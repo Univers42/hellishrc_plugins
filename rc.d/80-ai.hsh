@@ -1,0 +1,49 @@
+# 80-ai.hsh — the AI block from the original ~/.hellishrc, preserved verbatim.
+#
+# ── STATUS ON THIS BUILD ────────────────────────────────────────────────────
+# The text below shipped with hellish and is kept EXACTLY as it was, comments
+# and all. Be aware that on 2.7.6 the interface it documents does not exist:
+#
+#     $ hellish -c 'ai --help'   -> ai: command not found
+#     $ hellish -c 'set -o ai'   -> set: ai: invalid option name
+#
+# Confirmed interactively in a pty as well, not just under -c. So `ai setup`,
+# `set -o ai` and `set +o ai` will all fail today. HELLISH_AI_SUGGEST is still
+# exported because it is inert when unread and correct the moment the builtin
+# ships. Reported upstream as issue #71 §8.
+#
+# Toggle this whole module with:  conf off ai
+hx_feature ai on ai "the shipped AI block (inert on 2.7.6: no 'ai' builtin)"
+hx_guard ai || return 0
+
+# ─────────────────── original ~/.hellishrc content below ────────────────────
+# ~/.hellishrc — sourced by interactive hellish sessions (the .bashrc analogue).
+#
+# AI is ON by default in interactive mode. Turn it off any time with:
+#     set +o ai
+#
+# ── AI backend ───────────────────────────────────────────────────────────────
+# Out of the box hellish talks to a LOCAL llama.cpp server at 127.0.0.1:8080.
+# Start one (a model lives in a docker volume; pulled once):
+#     make ai-pull MODEL=<https url to a .gguf>
+#     make ai-up                 # CPU (universal). Or: COMPUTE=hybrid / COMPUTE=gpu
+# See docs/AI-COMPUTE.md for the CPU / hybrid / GPU trade-offs.
+#
+# For crazy-fast + high-intelligence answers, point it at a cloud API instead.
+# Easiest — run once and it writes the block below for you:
+#     ai setup groq            # free key from console.groq.com (prompted, hidden)
+#     ai setup openrouter      # Claude / many models via OpenRouter
+#     ai setup openai          # gpt-4o-mini, etc.
+#
+# …or configure by hand (any OpenAI-compatible API). A cloud primary falls back
+# to the local server automatically on error / rate-limit:
+#     export HELLISH_AI_URL=https://api.groq.com/openai/v1/chat/completions
+#     export HELLISH_AI_KEY=gsk_your_key_here
+#     export HELLISH_AI_MODEL=llama-3.3-70b-versatile
+#
+# Full reference: docs/AI.md   (commands, keybindings, env vars, privacy).
+# >>> hellish ai (managed by 'ai setup') >>>
+# <<< hellish ai <<<
+export HELLISH_AI_SUGGEST=1
+# ─────────────────── end of original content ────────────────────────────────
+hx_var_doc HELLISH_AI_SUGGEST "AI inline suggestions (inert until the 'ai' builtin ships)"

@@ -1,0 +1,68 @@
+# 20-options.hsh — shell options (set -o) and behaviour knobs (shopt / pretty).
+hx_feature options on core "shell options: set -o flags, pretty presets, glob knobs"
+hx_guard options || return 0
+
+# ── set -o : these all WORK (verified on 2.7.6) ─────────────────────────────
+set -o emacs                 # line editing; use `set -o vi` if you prefer modal
+hx_opt_doc "emacs" "emacs line editing (swap for: set -o vi)"
+
+# pipefail is deliberately OFF, and that decision cost a test failure to learn.
+# It is correct for scripts and a footgun in an interactive shell: when the
+# right-hand side of a pipe exits early, the left-hand side takes SIGPIPE and
+# pipefail promotes that to the pipeline's status.
+#     set -o pipefail; help_conf -s git | grep -q git ; echo $?   ->  141
+#     set -o pipefail; some_long_output | head -1     ; echo $?   ->  141
+# `| head`, `| grep -q` and `| less` are constant at a prompt, so every one of
+# them would start reporting failure. Turn it on per-script, not per-shell:
+#     (set -o pipefail; cmd | grep -q x)
+#   set -o pipefail
+hx_opt_doc "pipefail" "NOT enabled: it makes '| head' and '| grep -q' report 141 (SIGPIPE)"
+
+# Deliberately NOT enabled in an interactive shell:
+#   set -o errexit   — a failing command would kill your login shell
+#   set -o nounset   — every unset var in a one-liner becomes fatal
+#   set -o noclobber — surprising; use >| when you want it per-command
+# All three DO work in hellish; they belong in scripts, not in an rc.
+
+# ── shopt / pretty ──────────────────────────────────────────────────────────
+# `pretty` is hellish's curated front-end over shopt; per the docs the two share
+# one state, so either spelling works. Only the knobs verified to change real
+# behaviour are enabled here.
+pretty on resize-aware      2>/dev/null   # track terminal size after each command
+pretty on multiline-history 2>/dev/null   # recall keeps newlines + indentation
+pretty on cd-spell          2>/dev/null   # cd fixes a small typo
+hx_opt_doc "resize-aware"      "re-read terminal size after every command"
+hx_opt_doc "multiline-history" "history recall keeps newlines and indentation"
+hx_opt_doc "cd-spell"          "cd tolerates a one-character typo"
+
+# auto-cd: a bare directory name changes to it. Off by default because it turns
+# any typo that happens to be a directory name into a silent cd.
+# pretty on auto-cd
+
+# ── DEAD KNOBS — kept, commented, with the reason (hellish 2.7.6) ───────────
+# These are ACCEPTED by both `shopt -s` and `pretty on`, and `shopt <name>`
+# afterwards reports "on" — but the glob behaviour does not change. Verified
+# non-interactively AND in a real pty. Reported upstream as issue #71 §4.
+# Uncomment once a release fixes them; nothing else here depends on them.
+#
+#   shopt -s dotglob        # `*` would also match dot-files      -- NO-OP
+#   shopt -s nocaseglob     # globs would ignore case             -- NO-OP
+#   shopt -s globstar       # `**` across directory levels        -- NO-OP
+#   shopt -s extglob        # ?() *() +() @() !()  -- SYNTAX ERROR, not just a no-op:
+#                           #   $ echo @(a)  =>  syntax error near unexpected token `('
+#   pretty on hidden-glob   # the `pretty` spelling of dotglob    -- NO-OP
+#   pretty on case-blind-glob                                     -- NO-OP
+#   pretty on deep-glob                                           -- NO-OP
+#   pretty on extended-glob                                       -- NO-OP
+#
+# nullglob is the interesting one: it PARTLY works.
+#     shopt -s nullglob; echo x /nope* y   -> "x y"        (correct)
+#     shopt -s nullglob; set -- /nope*; echo $#  -> 0      (correct)
+#     shopt -s nullglob; a=(/nope*); echo ${#a[@]} -> 1    (WRONG, want 0)
+# So it is safe for command words but NOT for array literals. Enabling it would
+# make the working half silently disagree with the broken half, which is worse
+# than not having it — 40-functions.hsh provides glob_into() as the shim.
+#   shopt -s nullglob
+hx_opt_doc "nullglob"  "NOT enabled: correct for command words, wrong in a=(glob*) - see glob_into"
+hx_opt_doc "extglob"   "NOT available: @() +() etc are a lexer syntax error in 2.7.6"
+hx_opt_doc "globstar"  "NOT available: ** is literal - see rglob() for the shim"

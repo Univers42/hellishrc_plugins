@@ -1,0 +1,111 @@
+# plugins/net/plugin.hsh — networking answers without remembering flag soup.
+hx_plugin net on net "net: ports, local/public IP, DNS, HTTP probing, port waiting" || return 0
+hx_needs ss curl dig
+
+# ports [pattern] — what is listening here.
+ports() {
+    if [ -n "${1:-}" ]; then ss -tulpn 2>/dev/null | grep -i -- "$1"
+    else ss -tulpn 2>/dev/null
+    fi
+}
+hx_func_doc ports "listening TCP/UDP sockets, optionally filtered" "ports [pattern]"
+
+# port <n> — who owns one port.
+port() {
+    [ -n "$1" ] || { hx_err "usage: port <number>"; return 2; }
+    local out
+    out=$(ss -tulpn 2>/dev/null | grep ":$1 ")
+    if [ -n "$out" ]; then printf '%s\n' "$out"
+    else hx_warn "nothing listening on port $1"; return 1
+    fi
+}
+hx_func_doc port "what is listening on one port" "port <number>"
+
+localip() {
+    ip -4 addr show scope global 2>/dev/null \
+        | awk '/inet /{ split($2,a,"/"); printf "%-10s %s\n", $NF, a[1] }'
+}
+hx_func_doc localip "this machine's LAN addresses per interface"
+
+# pubip — deliberately NOT run automatically anywhere; it contacts a third party.
+pubip() {
+    hx_have curl || { hx_err "needs curl"; return 1; }
+    curl -fsS --max-time 5 https://ifconfig.me 2>/dev/null || {
+        hx_err "could not reach ifconfig.me"; return 1; }
+    printf '\n'
+}
+hx_func_doc pubip "your public IP (contacts ifconfig.me; never called automatically)"
+
+# hdr <url> — response headers plus the redirect chain.
+hdr() {
+    [ -n "$1" ] || { hx_err "usage: hdr <url>"; return 2; }
+    hx_have curl || { hx_err "needs curl"; return 1; }
+    curl -sSIL --max-time 10 "$1"
+}
+hx_func_doc hdr "HTTP response headers, following redirects" "hdr <url>"
+
+# httptime <url> — where the time actually goes.
+httptime() {
+    [ -n "$1" ] || { hx_err "usage: httptime <url>"; return 2; }
+    hx_have curl || { hx_err "needs curl"; return 1; }
+    curl -sS -o /dev/null --max-time 15 -w \
+'  dns          %{time_namelookup}s
+  tcp connect  %{time_connect}s
+  tls          %{time_appconnect}s
+  ttfb         %{time_starttransfer}s
+  total        %{time_total}s
+  status       %{http_code}
+  size         %{size_download} bytes
+' "$1"
+}
+hx_func_doc httptime "break an HTTP request into dns/tcp/tls/ttfb timings" "httptime <url>"
+
+# dns <name> — the records that matter, in one call.
+dns() {
+    [ -n "$1" ] || { hx_err "usage: dns <name>"; return 2; }
+    hx_have dig || { hx_err "needs dig (dnsutils)"; return 1; }
+    local t
+    for t in A AAAA CNAME MX TXT NS; do
+        local out
+        out=$(dig +short "$1" "$t" 2>/dev/null)
+        [ -n "$out" ] && { printf '%s%-6s%s %s\n' "$HX_ORA" "$t" "$HX_R" "$(printf '%s' "$out" | tr '\n' ' ')"; }
+    done
+}
+hx_func_doc dns "A/AAAA/CNAME/MX/TXT/NS records for a name" "dns <hostname>"
+
+# waitport <host> <port> [timeout] — block until something answers. The one
+# function here that earns its keep in scripts: no more `sleep 10` after docker up.
+waitport() {
+    local host="${1:-localhost}" p="$2" timeout="${3:-30}" i=0
+    [ -n "$p" ] || { hx_err "usage: waitport <host> <port> [timeout]"; return 2; }
+    while [ "$i" -lt "$timeout" ]; do
+        # hellish supports /dev/tcp redirection (verified).
+        if (exec 3<>"/dev/tcp/$host/$p") 2>/dev/null; then
+            hx_ok "$host:$p is up (after ${i}s)"
+            return 0
+        fi
+        i=$((i + 1))
+        sleep 1
+    done
+    hx_err "$host:$p did not open within ${timeout}s"
+    return 1
+}
+hx_func_doc waitport "block until a TCP port accepts connections" "waitport <host> <port> [timeout]"
+
+# scan <host> [from] [to] — tiny TCP sweep using /dev/tcp, no nmap needed.
+scan() {
+    local host="${1:-localhost}" from="${2:-1}" to="${3:-1024}" p open=0
+    hx_info "scanning $host ports $from-$to"
+    p="$from"
+    while [ "$p" -le "$to" ]; do
+        if (exec 3<>"/dev/tcp/$host/$p") 2>/dev/null; then
+            printf '  %sopen%s  %s\n' "$HX_GRN" "$HX_R" "$p"
+            open=$((open + 1))
+        fi
+        p=$((p + 1))
+    done
+    hx_ok "$open open port(s)"
+}
+hx_func_doc scan "sweep a TCP port range using /dev/tcp" "scan <host> [from] [to]"
+
+hx_complete dns A AAAA CNAME MX TXT NS

@@ -1,0 +1,19 @@
+# 99-local.hsh — your machine-specific overrides.
+#
+# This file is loaded LAST, so anything here wins over every module and plugin.
+# It is never overwritten by an update to this configuration; put personal
+# tweaks here rather than editing the numbered modules.
+hx_feature local on core "machine-specific overrides, loaded last"
+hx_guard local || return 0
+
+# Examples — uncomment and edit:
+#
+#   path_prepend "$HOME/.cargo/bin" "$HOME/go/bin"
+#   export EDITOR=nvim
+#   theme pure
+#   alias k='kubectl'
+#   conf off ai
+#
+# A private file (secrets, work-only settings) that you do not want in version
+# control can live beside this one and be sourced conditionally:
+[ -r "$HX_HOME/private.hsh" ] && . "$HX_HOME/private.hsh"

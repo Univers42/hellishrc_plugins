@@ -1,0 +1,81 @@
+# plugins/docker/plugin.hsh — container ergonomics.
+hx_plugin docker on dev "docker: container/image overview, shell-in, prune, compose" || return 0
+hx_needs docker
+
+# _dk — docker compose changed spelling between v1 and v2; resolve once.
+_dk_compose() {
+    if docker compose version >/dev/null 2>&1; then docker compose "$@"
+    elif command -v docker-compose >/dev/null 2>&1; then docker-compose "$@"
+    else hx_err "no docker compose available"; return 1
+    fi
+}
+
+dps() {
+    docker ps --format 'table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}' "$@"
+}
+hx_func_doc dps "running containers: name, status, ports, image" "dps [docker ps args]"
+
+dpsa() { docker ps -a --format 'table {{.Names}}\t{{.Status}}\t{{.Image}}'; }
+hx_func_doc dpsa "every container including stopped ones"
+
+dimg() { docker images --format 'table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}'; }
+hx_func_doc dimg "images with sizes and age"
+
+# dsh <container> — shell into a container, preferring bash then sh.
+dsh() {
+    local c="$1"
+    [ -n "$c" ] || { hx_err "usage: dsh <container>"; return 2; }
+    docker exec -it "$c" bash 2>/dev/null || docker exec -it "$c" sh
+}
+hx_func_doc dsh "interactive shell inside a container (bash, falling back to sh)" "dsh <container>"
+
+dlog() {
+    [ -n "$1" ] || { hx_err "usage: dlog <container>"; return 2; }
+    docker logs -f --tail 100 "$1"
+}
+hx_func_doc dlog "follow a container's logs (last 100 lines first)" "dlog <container>"
+
+dip() {
+    [ -n "$1" ] || { hx_err "usage: dip <container>"; return 2; }
+    docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{"\n"}}{{end}}' "$1"
+}
+hx_func_doc dip "a container's IP address(es)" "dip <container>"
+
+# dstopall — stop every running container, after confirming.
+dstopall() {
+    local ids n
+    ids=$(docker ps -q)
+    [ -n "$ids" ] || { hx_ok "no running containers"; return 0; }
+    n=$(printf '%s\n' "$ids" | wc -l | tr -d ' ')
+    dps
+    confirm "stop all $n running container(s)?" || { hx_info "cancelled"; return 1; }
+    docker stop $ids
+}
+hx_func_doc dstopall "stop every running container (asks first)"
+
+# dclean — reclaim disk. Shows what it would remove before doing it.
+dclean() {
+    hx_info "reclaimable space:"
+    docker system df
+    printf '\n'
+    confirm "prune stopped containers, dangling images, unused networks?" || { hx_info "cancelled"; return 1; }
+    docker system prune -f
+}
+hx_func_doc dclean "prune stopped containers and dangling images (shows usage, asks first)"
+
+dcu()   { _dk_compose up -d "$@"; }
+dcd()   { _dk_compose down "$@"; }
+dcl()   { _dk_compose logs -f --tail 100 "$@"; }
+dcr()   { _dk_compose restart "$@"; }
+dcps()  { _dk_compose ps "$@"; }
+hx_func_doc dcu  "compose up, detached" "dcu [service]"
+hx_func_doc dcd  "compose down" "dcd [args]"
+hx_func_doc dcl  "follow compose logs" "dcl [service]"
+hx_func_doc dcr  "restart compose services" "dcr [service]"
+hx_func_doc dcps "compose service status"
+
+# NOT: hx_complete dsh "$(docker ps ...)" — that ran `docker ps` on every shell
+# startup (18 ms of the 46 ms total) to build a completion list that cannot be
+# installed anyway until hellish gains a `complete` builtin. Container names are
+# volatile, so this belongs behind a completion FUNCTION, not a static list.
+hx_complete dsh

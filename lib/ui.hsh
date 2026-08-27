@@ -1,0 +1,70 @@
+# ~/.hellish/lib/ui.hsh — colour + output primitives.
+# Loaded first; everything else may rely on hx_c_* and hx_say/hx_warn/hx_die.
+#
+# INTERPRETER NOTE (hellish 2.7.6):
+#   printf does NOT understand '\e'. Only '\033' works. Every escape below
+#   therefore uses \033. $'...' ANSI-C quoting IS supported and is used here.
+
+# --- capability: does this stream deserve colour? ---------------------------
+hx_want_color() {
+    [ -n "${NO_COLOR+set}" ] && return 1
+    [ "${HX_COLOR:-auto}" = "never" ] && return 1
+    [ "${HX_COLOR:-auto}" = "always" ] && return 0
+    [ -t 1 ] || return 1
+    case "${TERM:-dumb}" in dumb|"") return 1 ;; esac
+    return 0
+}
+
+hx_color_init() {
+    if hx_want_color; then
+        HX_R=$'\033[0m';    HX_B=$'\033[1m';     HX_DIM=$'\033[2m'
+        HX_IT=$'\033[3m';   HX_UL=$'\033[4m'
+        HX_RED=$'\033[31m'; HX_GRN=$'\033[32m';  HX_YEL=$'\033[33m'
+        HX_BLU=$'\033[34m'; HX_MAG=$'\033[35m';  HX_CYN=$'\033[36m'
+        HX_GRY=$'\033[90m'
+        HX_ORA=$'\033[38;5;209m'  # hellish's own accent (matches `help`)
+    else
+        HX_R=; HX_B=; HX_DIM=; HX_IT=; HX_UL=
+        HX_RED=; HX_GRN=; HX_YEL=; HX_BLU=; HX_MAG=; HX_CYN=; HX_GRY=; HX_ORA=
+    fi
+}
+hx_color_init
+
+# --- message helpers --------------------------------------------------------
+hx_say()  { printf '%s\n' "$*"; }
+hx_info() { printf '%s%s%s %s\n' "$HX_BLU" "::" "$HX_R" "$*"; }
+hx_ok()   { printf '%s%s%s %s\n' "$HX_GRN" "ok" "$HX_R" "$*"; }
+hx_warn() { printf '%s%s%s %s\n' "$HX_YEL" "warn" "$HX_R" "$*" >&2; }
+hx_err()  { printf '%s%s%s %s\n' "$HX_RED" "err" "$HX_R" "$*" >&2; }
+hx_die()  { hx_err "$*"; return 1; }
+
+# hx_head <text> — a section heading in hellish's own `help` style.
+hx_head() { printf '\n%s%s%s\n' "$HX_ORA$HX_B" "$*" "$HX_R"; }
+
+# hx_kv <name> <desc> — the aligned two-column row used by help_conf.
+hx_kv() { printf '  %s%-22s%s %s\n' "$HX_B" "$1" "$HX_R" "$2"; }
+
+# hx_rule [width] — horizontal rule.
+hx_rule() {
+    local w="${1:-${COLUMNS:-72}}" i=0 line=
+    while [ "$i" -lt "$w" ]; do line="$line-"; i=$((i + 1)); done
+    printf '%s%s%s\n' "$HX_GRY" "$line" "$HX_R"
+}
+
+# hx_badge <on|off> — coloured state badge, fixed width for alignment.
+hx_badge() {
+    case "$1" in
+        on)  printf '%s%-3s%s' "$HX_GRN" "on"  "$HX_R" ;;
+        off) printf '%s%-3s%s' "$HX_GRY" "off" "$HX_R" ;;
+        *)   printf '%s%-3s%s' "$HX_YEL" "$1"  "$HX_R" ;;
+    esac
+}
+
+# hx_pager — page long output when interactive, else pass through.
+hx_pager() {
+    if [ -t 1 ] && command -v less >/dev/null 2>&1; then
+        less -FRX
+    else
+        cat
+    fi
+}

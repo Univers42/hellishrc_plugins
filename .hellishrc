@@ -1,0 +1,70 @@
+# ~/.hellishrc — loader.
+#
+# This file stays deliberately small. Everything real lives in ~/.hellish/ :
+#
+#   lib/          ui.hsh  core.hsh  plugin.hsh  conf.hsh     the framework
+#   rc.d/         10-env … 99-local                          core modules, in order
+#   plugins/      git devkit jump docker net sentinel forge  plugins
+#   hellish.conf  which of the above are switched on          (managed by `conf`)
+#
+#   help_conf     every alias, function, variable and option, documented
+#   conf list     what is on and off        conf on|off <name> to change it
+#   hxp list      plugins                   forge api        how to write one
+#
+# hellish sources this file for INTERACTIVE shells only, never for scripts,
+# `-c`, or piped input — so nothing here needs an interactivity guard.
+#
+# The previous contents of this file were kept: the AI block now lives in
+# rc.d/80-ai.hsh, verbatim, and a timestamped backup sits beside this file.
+
+HX_HOME="$HOME/.hellish"
+HX_CONF="$HX_HOME/hellish.conf"
+HX_STATE="$HX_HOME/state"
+export HX_HOME HX_CONF HX_STATE
+
+# NOTE: no top-level `return` anywhere in this file. hellish does not treat the
+# interactive rc as a sourced script, so `return` here fails with
+#   hellish: return: can only `return' from a function or sourced script
+# and leaves $? = 2 on the very first prompt. The whole body is therefore an
+# if/else rather than an early return.
+if [ ! -d "$HX_HOME/lib" ]; then
+    # Degrade to a bare but usable shell instead of erroring at every prompt.
+    printf 'hellishrc: %s is missing; running unconfigured\n' "$HX_HOME" >&2
+else
+
+    # Reset the per-load registries so `conf reload` is idempotent.
+    HX_LOADED=()
+    HX_ERRORS=()
+
+    # 1. framework
+    . "$HX_HOME/lib/ui.hsh"
+    . "$HX_HOME/lib/core.hsh"
+    . "$HX_HOME/lib/plugin.hsh"
+    . "$HX_HOME/lib/conf.hsh"
+
+    # 2. saved on/off state — BEFORE any module, so hx_guard sees it
+    hx_conf_load
+
+    # 3. core modules, lexical order (10-env … 99-local)
+    hx_load_dir "$HX_HOME/rc.d"
+
+    # 4. plugins
+    hx_load_plugins
+
+    # 5. first run: write the config file so `conf` has something to edit
+    [ -f "$HX_CONF" ] || hx_conf_save
+
+    # 6. report anything that went wrong, once, quietly
+    if [ "${#HX_ERRORS[@]}" -gt 0 ]; then
+    printf '%shellishrc: %s problem(s) during load — run: conf doctor%s\n' \
+        "${HX_YEL}" "${#HX_ERRORS[@]}" "${HX_R}" >&2
+    fi
+
+# 7. greeting: off by default. `conf set HX_GREET 1` to enable.
+    if [ "${HX_GREET:-0}" = "1" ] && command -v sentinel >/dev/null 2>&1; then
+        sentinel
+    fi
+fi
+
+# Always leave the first prompt showing success, whatever the last step returned.
+:

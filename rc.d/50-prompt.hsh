@@ -1,0 +1,79 @@
+# 50-prompt.hsh — prompt themes.
+#
+# hellish extends the bash escape set with SELF-SPACING escapes (they render
+# nothing when they have nothing to say), which is why these themes have no
+# conditional logic in them:
+#   \g  git branch of the cwd, + '*' when dirty      \S  " ✘N" after a failure
+#   \p  " took N.Ns" when a command ran >= 2s        \J  " ⚙N" while jobs exist
+#   \U  " ⬆X.Y.Z" while an update waits              \B  the built-in box theme
+#   \A  animated glyph (opt-in via HELLISH_ANIM; off by default, and the
+#       upstream docs warn it can corrupt some terminals -- left off here)
+# Standard escapes also work: \u \h \H \w \W \$ \n \t \d \j \s \v \[ \]
+hx_feature prompt on ui "prompt themes (box, pure, minimal, classic, plain)"
+hx_guard prompt || return 0
+
+HELLISH_ANIM=off        # see the note above; \A renders nothing while off
+
+# theme <name> — switch prompt live. Persist with: conf set HX_THEME <name>
+theme() {
+    case "${1:-}" in
+        box)
+            # hellish's own built-in framed prompt.
+            PS1='\B'
+            PS2='\[\033[38;5;242m\]  \[\033[0m\]'
+            ;;
+        pure)
+            # A blank line, one calm info row, then a lone arrow. Commands
+            # always start at the same column.
+            PS1='\n\[\033[1;38;5;111m\]\w\[\033[0m\] \[\033[38;5;245m\]\g\[\033[0m\]\[\033[1;38;5;203m\]\S\[\033[0m\]\[\033[38;5;179m\]\p\[\033[0m\]\[\033[1;38;5;117m\]\J\[\033[0m\]\[\033[38;5;108m\]\U\[\033[0m\]\n\[\033[1;38;5;176m\]❯\[\033[0m\] '
+            PS2='\[\033[38;5;245m\]❯\[\033[0m\] '
+            ;;
+        minimal)
+            PS1='\[\033[1;38;5;111m\]\W\[\033[0m\] \[\033[38;5;245m\]\g\[\033[0m\]\[\033[1;38;5;203m\]\S\[\033[0m\] \[\033[1;38;5;108m\]❯\[\033[0m\] '
+            PS2='\[\033[38;5;245m\]… \[\033[0m\]'
+            ;;
+        classic)
+            PS1='\u@\h:\w\$ '
+            PS2='> '
+            ;;
+        plain)
+            PS1='\w\$ '
+            PS2='> '
+            ;;
+        '')
+            printf '%s\n' "${HX_THEME:-box}"; return 0 ;;
+        *)
+            hx_err "unknown theme '$1' (box, pure, minimal, classic, plain)"
+            return 2 ;;
+    esac
+    HX_THEME="$1"
+    return 0
+}
+hx_func_doc theme "switch prompt theme live; no argument prints the current one" "theme box|pure|minimal|classic|plain"
+
+theme "${HX_THEME:-box}"
+
+# ── PROMPT_COMMAND ──────────────────────────────────────────────────────────
+# Works in hellish (verified interactively). Kept as a dispatch list rather than
+# a single string so a plugin can add to it without clobbering another plugin.
+# NOTE: hellish has no precmd/preexec hook arrays of its own (requested upstream
+# in issue #71 §7.5), so this list is a config-level convention only.
+HX_PRECMD_FUNCS=""
+
+hx_precmd_add() {
+    case " $HX_PRECMD_FUNCS " in
+        *" $1 "*) return 0 ;;                 # already registered
+    esac
+    HX_PRECMD_FUNCS="$HX_PRECMD_FUNCS $1"
+}
+hx_func_doc hx_precmd_add "register a function to run before each prompt" "hx_precmd_add <function>"
+
+_hx_precmd_run() {
+    local f
+    for f in $HX_PRECMD_FUNCS; do
+        command -v "$f" >/dev/null 2>&1 && "$f"
+    done
+    return 0
+}
+PROMPT_COMMAND='_hx_precmd_run'
+hx_var_doc PROMPT_COMMAND "runs _hx_precmd_run, which dispatches every hx_precmd_add function"

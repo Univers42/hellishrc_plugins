@@ -1,0 +1,46 @@
+# 60-history.hsh — history behaviour.
+hx_feature history on core "history file, size, and recall behaviour"
+hx_guard history || return 0
+
+HISTFILE="${HISTFILE:-$HOME/.hellish_history}"
+HISTSIZE="${HX_HIST_SIZE:-20000}"
+HISTFILESIZE="${HX_HIST_SIZE:-20000}"
+# ignoredups: don't store a command identical to the previous one
+# ignorespace: a leading space keeps a command out of history (for secrets)
+HISTCONTROL="${HISTCONTROL:-ignoredups:ignorespace:erasedups}"
+# Never record these: pure noise, or dangerous to replay.
+HISTIGNORE="${HISTIGNORE:-ls:ll:la:cd:cd -:pwd:exit:clear:history:h:hxl}"
+HISTTIMEFORMAT="${HISTTIMEFORMAT:-%F %T }"
+
+export HISTFILE HISTSIZE HISTFILESIZE HISTCONTROL HISTIGNORE HISTTIMEFORMAT
+
+hx_var_doc HISTFILE       "where history is kept (~/.hellish_history)"
+hx_var_doc HISTSIZE       "commands kept in memory"
+hx_var_doc HISTCONTROL    "ignoredups:ignorespace:erasedups - leading space hides a command"
+hx_var_doc HISTIGNORE     "commands never recorded (ls, cd, exit, ...)"
+hx_var_doc HISTTIMEFORMAT "timestamp shown by \`history\`"
+
+# `pretty on multiline-history` (set in 20-options.hsh) makes recall give a
+# multi-line command back with its newlines and indentation intact, instead of
+# joining it onto one line the way bash does.
+
+# shopt -s histappend  -- ACCEPTED but a verified no-op in 2.7.6, like the other
+# shopt knobs (issue #71 §4). Left commented rather than deleted so it starts
+# working the moment a release wires it up.
+#   shopt -s histappend
+
+# h [pattern] — search history, or show the tail.
+h() {
+    if [ $# -eq 0 ]; then history | tail -30
+    else history | grep -i -- "$*"
+    fi
+}
+hx_func_doc h "search history, or show the last 30 entries" "h [pattern]"
+
+# histtop [n] — most-used commands.
+histtop() {
+    local n="${1:-15}"
+    history | awk '{ $1=""; $2=""; $3=""; sub(/^ +/,""); print $0 }' \
+        | awk '{ print $1 }' | sort | uniq -c | sort -rn | head -"$n"
+}
+hx_func_doc histtop "your most-used commands" "histtop [count]"

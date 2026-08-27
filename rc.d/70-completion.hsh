@@ -1,0 +1,78 @@
+# 70-completion.hsh — programmable completion: NOT AVAILABLE, and what to do instead.
+#
+# ── THE SITUATION (hellish 2.7.6) ───────────────────────────────────────────
+# hellish HAS completion — src/completion/ completes commands, files and
+# variables, and it works well at the prompt. What it does not have is any way
+# for a config or a plugin to EXTEND it:
+#
+#     $ hellish -c 'complete -W "a b" foo'   -> complete: command not found
+#     $ hellish -c 'compgen -W "a b"'        -> compgen: command not found
+#     $ hellish -c 'bind -p'                 -> bind: command not found
+#
+# `shopt -s progcomp` is accepted (the option name exists) but there is nothing
+# behind it. Reported upstream as issue #71 §3.
+#
+# Everything below is therefore a REGISTRY, not working completion: plugins
+# declare the completions they WOULD install, `help_conf` can show them, and the
+# day `complete` lands, hx_complete_flush() installs the lot in one call with no
+# change to any plugin.
+hx_feature completion on core "completion registry (hellish cannot install completions yet)"
+hx_guard completion || return 0
+
+declare -A HX_COMPL_WORDS
+
+# hx_complete <command> <word...> — declare a static completion wordlist.
+hx_complete() {
+    local cmd="$1"
+    shift
+    hx_key_ok "$cmd" || return 1
+    hx_aset HX_COMPL_WORDS "$cmd" "$*"
+    return 0
+}
+hx_func_doc hx_complete "declare a completion wordlist for a command (stored until hellish supports it)" "hx_complete <cmd> <word>..."
+
+# hx_complete_flush — install every declared completion. A no-op today; the
+# single place that needs to change when `complete` arrives.
+hx_complete_flush() {
+    command -v complete >/dev/null 2>&1 || return 0
+    local c
+    for c in "${!HX_COMPL_WORDS[@]}"; do
+        complete -W "${HX_COMPL_WORDS[$c]}" "$c"
+    done
+}
+hx_func_doc hx_complete_flush "install declared completions once hellish gains 'complete'"
+
+# hx_complete_show [cmd] — what WOULD be completed. Useful right now as a
+# reminder of a command's subcommands.
+hx_complete_show() {
+    local c
+    if [ -n "${1:-}" ]; then
+        printf '%s\n' "${HX_COMPL_WORDS[$1]:-<none declared>}"
+        return 0
+    fi
+    hx_head "declared completions (not active - see issue #71 §3)"
+    for c in $(printf '%s\n' "${!HX_COMPL_WORDS[@]}" | sort); do
+        hx_kv "$c" "${HX_COMPL_WORDS[$c]}"
+    done
+    printf '\n'
+}
+hx_func_doc hx_complete_show "show declared completion wordlists" "hx_complete_show [cmd]"
+
+# Declare the ones this configuration itself would install.
+hx_complete conf  list on off toggle get set save reload reset edit path doctor profile modules help
+hx_complete hxp   list info enable disable doctor path new help
+hx_complete theme box pure minimal classic plain
+
+hx_complete_flush     # no-op today, correct tomorrow
+
+# ── KEYBINDINGS — also unavailable ──────────────────────────────────────────
+# `bind` does not exist, so none of this can be set from an rc. Kept verbatim so
+# it can be uncommented the day it lands.
+#
+#   bind '"\e[A": history-search-backward'   # Up  = prefix search
+#   bind '"\e[B": history-search-forward'    # Down= prefix search
+#   bind 'set completion-ignore-case on'
+#   bind '"\C-w": backward-kill-word'
+#
+# `set -o emacs` / `set -o vi` DO work (20-options.hsh) and are the only line
+# editing control an rc currently has.

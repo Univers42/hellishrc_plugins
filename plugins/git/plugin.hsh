@@ -1,0 +1,149 @@
+# plugins/git/plugin.hsh — git ergonomics beyond the short aliases.
+hx_plugin git on vcs "git: repo status, safe undo, wip commits, branch cleanup" || return 0
+hx_needs git
+
+# ── location ────────────────────────────────────────────────────────────────
+groot() {
+    local r
+    r=$(git rev-parse --show-toplevel 2>/dev/null) || { hx_err "not in a git repo"; return 1; }
+    cd "$r" && pwd
+}
+hx_func_doc groot "cd to the repository root"
+
+gbranch() { git rev-parse --abbrev-ref HEAD 2>/dev/null; }
+hx_func_doc gbranch "print the current branch name"
+
+# ── overview ────────────────────────────────────────────────────────────────
+# ginfo — everything you want to know on entering a repo, in one screen.
+ginfo() {
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { hx_err "not in a git repo"; return 1; }
+    local branch upstream ahead behind staged unstaged untracked stash
+    branch=$(gbranch)
+    upstream=$(git rev-parse --abbrev-ref '@{upstream}' 2>/dev/null)
+    staged=$(git diff --cached --numstat 2>/dev/null | wc -l | tr -d ' ')
+    unstaged=$(git diff --numstat 2>/dev/null | wc -l | tr -d ' ')
+    untracked=$(git ls-files --others --exclude-standard 2>/dev/null | wc -l | tr -d ' ')
+    stash=$(git stash list 2>/dev/null | wc -l | tr -d ' ')
+
+    hx_head "$(basename "$(git rev-parse --show-toplevel)")"
+    hx_kv "branch" "$branch"
+    if [ -n "$upstream" ]; then
+        ahead=$(git rev-list --count "$upstream..HEAD" 2>/dev/null)
+        behind=$(git rev-list --count "HEAD..$upstream" 2>/dev/null)
+        hx_kv "upstream" "$upstream  (ahead $ahead, behind $behind)"
+    else
+        hx_kv "upstream" "${HX_YEL}none${HX_R}"
+    fi
+    hx_kv "staged"    "$staged file(s)"
+    hx_kv "unstaged"  "$unstaged file(s)"
+    hx_kv "untracked" "$untracked file(s)"
+    hx_kv "stashes"   "$stash"
+    printf '\n%s  recent%s\n' "$HX_ORA" "$HX_R"
+    git log --oneline --decorate -8 2>/dev/null | sed 's/^/    /'
+    printf '\n'
+}
+hx_func_doc ginfo "one-screen repository overview: branch, drift, counts, recent log"
+
+# ── safe undo ───────────────────────────────────────────────────────────────
+# gundo — undo the last commit but KEEP the changes staged. The safe default;
+# the work is never lost, only the commit object.
+gundo() {
+    git rev-parse HEAD >/dev/null 2>&1 || { hx_err "no commits to undo"; return 1; }
+    hx_info "undoing: $(git log --oneline -1)"
+    git reset --soft HEAD~1 && hx_ok "commit undone; changes are staged"
+}
+hx_func_doc gundo "undo the last commit, keeping its changes staged"
+
+# gunstage [path] — the opposite of git add.
+gunstage() { if [ $# -eq 0 ]; then git reset HEAD .; else git reset HEAD -- "$@"; fi; }
+hx_func_doc gunstage "unstage everything, or the given paths" "gunstage [path...]"
+
+# gnuke — throw away ALL local changes. Asks first, always.
+gnuke() {
+    git rev-parse --is-inside-work-tree >/dev/null 2>&1 || { hx_err "not in a git repo"; return 1; }
+    local n
+    n=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+    [ "$n" = "0" ] && { hx_ok "working tree already clean"; return 0; }
+    git status --short
+    printf '\n'
+    confirm "discard all $n change(s) above? this cannot be undone" || { hx_info "cancelled"; return 1; }
+    git reset --hard HEAD && git clean -fd && hx_ok "working tree reset"
+}
+hx_func_doc gnuke "discard every local change (shows them and asks first)"
+
+# ── work in progress ────────────────────────────────────────────────────────
+gwip()   { git add -A && git commit -m "wip: $(date '+%Y-%m-%d %H:%M')" --no-verify; }
+hx_func_doc gwip "commit everything as a timestamped wip (skips hooks)"
+
+gunwip() {
+    case "$(git log -1 --pretty=%s 2>/dev/null)" in
+        wip:*) gundo ;;
+        *) hx_err "last commit is not a wip commit"; return 1 ;;
+    esac
+}
+hx_func_doc gunwip "undo the last wip commit (refuses if it is not one)"
+
+# ── branches ────────────────────────────────────────────────────────────────
+# gsweep — delete local branches already merged into the default branch.
+gsweep() {
+    local base merged n
+    base=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null)
+    base="${base#origin/}"
+    [ -n "$base" ] || base=main
+    git show-ref --verify --quiet "refs/heads/$base" || base=master
+    merged=$(git branch --merged "$base" 2>/dev/null | grep -vE "^\*|^\s*($base)$" | tr -d ' ')
+    [ -n "$merged" ] || { hx_ok "no merged branches to remove (base: $base)"; return 0; }
+    printf '%s\n' "$merged" | sed 's/^/  /'
+    n=$(printf '%s\n' "$merged" | wc -l | tr -d ' ')
+    confirm "delete these $n branch(es) merged into $base?" || { hx_info "cancelled"; return 1; }
+    printf '%s\n' "$merged" | while read -r b; do
+        [ -n "$b" ] && git branch -d "$b"
+    done
+}
+hx_func_doc gsweep "delete local branches already merged into the default branch"
+
+# gsw <name> — switch to a branch, creating it if it does not exist.
+gsw() {
+    [ -n "$1" ] || { hx_err "usage: gsw <branch>"; return 2; }
+    if git show-ref --verify --quiet "refs/heads/$1"; then git checkout "$1"
+    else hx_info "creating branch $1"; git checkout -b "$1"
+    fi
+}
+hx_func_doc gsw "switch to a branch, creating it if needed" "gsw <branch>"
+
+# ── history ─────────────────────────────────────────────────────────────────
+gwho() { git shortlog -sn --no-merges "$@" | head -20; }
+hx_func_doc gwho "commit counts per author" "gwho [rev-range]"
+
+gfind() {
+    [ -n "$1" ] || { hx_err "usage: gfind <string>"; return 2; }
+    git log --oneline -S"$1" --all
+}
+hx_func_doc gfind "find commits that added or removed a string" "gfind <string>"
+
+gwhen() {
+    [ -n "$1" ] || { hx_err "usage: gwhen <file>"; return 2; }
+    git log --follow --oneline --date=short --pretty='%C(auto)%h %ad %an  %s' -- "$1"
+}
+hx_func_doc gwhen "history of one file, following renames" "gwhen <file>"
+
+# ── prompt integration ──────────────────────────────────────────────────────
+# hellish already renders the branch with the \g escape, which is faster than
+# anything a shell function could do. This just makes ginfo run when you cd into
+# a different repository.
+HX_GIT_LAST_ROOT=""
+_git_on_prompt() {
+    [ "${HX_GIT_AUTOINFO:-0}" = "1" ] || return 0
+    local root
+    root=$(git rev-parse --show-toplevel 2>/dev/null)
+    [ -n "$root" ] || { HX_GIT_LAST_ROOT=""; return 0; }
+    [ "$root" = "$HX_GIT_LAST_ROOT" ] && return 0
+    HX_GIT_LAST_ROOT="$root"
+    ginfo
+}
+hx_precmd_add _git_on_prompt 2>/dev/null
+hx_var_doc HX_GIT_AUTOINFO "set to 1 to run ginfo automatically on entering a new repo"
+
+# NOT: hx_complete gsw "$(git branch ...)" — forking git at every startup to
+# list branches that are stale by the next command. Needs a completion function.
+hx_complete gsw

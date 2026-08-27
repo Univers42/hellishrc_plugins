@@ -1,0 +1,273 @@
+#!/usr/bin/hellish
+# ~/.hellish/test/run.hsh — the configuration's own test suite.
+#
+#   hellish ~/.hellish/test/run.hsh          run everything
+#   hellish ~/.hellish/test/run.hsh -v       show every passing assertion
+#
+# It loads the real ~/.hellishrc and then asserts against the live registry, so
+# it tests what you actually run, not a copy.
+
+HX_T_PASS=0
+HX_T_FAIL=0
+HX_T_SKIP=0
+HX_T_VERBOSE=0
+[ "${1:-}" = "-v" ] && HX_T_VERBOSE=1
+
+t_head() { printf '\n\033[1;38;5;209m%s\033[0m\n' "$*"; }
+
+t_ok()   {
+    HX_T_PASS=$((HX_T_PASS + 1))
+    [ "$HX_T_VERBOSE" = "1" ] && printf '  \033[32mpass\033[0m %s\n' "$*"
+    return 0
+}
+t_bad()  { HX_T_FAIL=$((HX_T_FAIL + 1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; return 0; }
+t_skip() { HX_T_SKIP=$((HX_T_SKIP + 1)); printf '  \033[90mskip\033[0m %s\n' "$*"; return 0; }
+
+# t_eq <expected> <actual> <label>
+t_eq() {
+    if [ "$1" = "$2" ]; then t_ok "$3"
+    else t_bad "$3 — expected [$1], got [$2]"
+    fi
+}
+# t_true <label> ... command
+t_true()  { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_ok "$l"; else t_bad "$l"; fi; }
+t_false() { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_bad "$l (expected failure)"; else t_ok "$l"; fi; }
+t_defined() { if command -v "$1" >/dev/null 2>&1; then t_ok "$2"; else t_bad "$2 — '$1' not defined"; fi; }
+
+# ── load the real configuration ─────────────────────────────────────────────
+t_head "load"
+. "$HOME/.hellishrc"
+t_eq "0" "${#HX_ERRORS[@]}" "configuration loads with no recorded errors"
+[ "${#HX_ERRORS[@]}" -gt 0 ] && printf '    %s\n' "${HX_ERRORS[@]}"
+if [ "${#HX_LOADED[@]}" -ge 10 ]; then t_ok "loaded ${#HX_LOADED[@]} files"
+else t_bad "only ${#HX_LOADED[@]} files loaded"; fi
+
+# ── framework ───────────────────────────────────────────────────────────────
+t_head "framework: registry and the hx_aset shim"
+declare -A T_M
+hx_aset T_M plain "a plain value"
+t_eq "a plain value" "${T_M[plain]}" "hx_aset stores a simple value"
+hx_aset T_M nasty 'he said "hi"; `date`; $HOME; * ? [x]'
+t_eq 'he said "hi"; `date`; $HOME; * ? [x]' "${T_M[nasty]}" "hx_aset does not re-parse hostile values"
+hx_aset T_M empty ""
+t_eq "" "${T_M[empty]}" "hx_aset stores an empty value"
+hx_aset T_M "colon:key" v
+t_eq "v" "${T_M[colon:key]}" "hx_aset accepts a colon in the key"
+
+t_true  "hx_key_ok accepts a safe key"        hx_key_ok "func:my-name.1"
+t_false "hx_key_ok rejects whitespace"        hx_key_ok "bad key"
+t_false "hx_key_ok rejects a metacharacter"   hx_key_ok 'bad$key'
+t_false "hx_key_ok rejects an empty key"      hx_key_ok ""
+
+# ── every registered item really exists ─────────────────────────────────────
+t_head "registry integrity: nothing is documented that does not exist"
+_missing_funcs=""
+_missing_aliases=""
+for _k in $(hx_item_keys_sorted); do
+    _kind="${HX_ITEM_KIND[$_k]}"
+    _name="${_k#*:}"
+    case "$_kind" in
+        func)
+            command -v "$_name" >/dev/null 2>&1 || _missing_funcs="$_missing_funcs $_name" ;;
+        alias)
+            alias 2>/dev/null | grep -q "^$_name=" || _missing_aliases="$_missing_aliases $_name" ;;
+    esac
+done
+t_eq "" "$_missing_funcs"   "every documented function is defined"
+t_eq "" "$_missing_aliases" "every documented alias is defined"
+
+# Descriptions must not be empty — an undocumented entry is a registry bug.
+_blank=""
+for _k in $(hx_item_keys_sorted); do
+    [ -n "${HX_ITEM_DESC[$_k]}" ] || _blank="$_blank $_k"
+done
+t_eq "" "$_blank" "every registered item has a description"
+
+# ── alias / function collisions ─────────────────────────────────────────────
+# This is a REAL bug that shipped once: an alias whose name matches a function
+# makes that function's definition a syntax error, because the alias expands
+# inside `name() {`. Nothing warns you; the plugin just silently fails to load.
+t_head "alias/function collisions (regression guard)"
+_collisions=""
+for _k in $(hx_item_keys_sorted); do
+    [ "${HX_ITEM_KIND[$_k]}" = "alias" ] || continue
+    _name="${_k#*:}"
+    for _k2 in $(hx_item_keys_sorted); do
+        [ "${HX_ITEM_KIND[$_k2]}" = "func" ] || continue
+        [ "${_k2#*:}" = "$_name" ] && _collisions="$_collisions $_name"
+    done
+done
+t_eq "" "$_collisions" "no alias shares a name with a function"
+
+
+# ── safety-alias leak (regression guard) ────────────────────────────────────
+# alias rm/mv/cp -i are live when later files are PARSED, so an unguarded
+# rm/mv/cp inside a plugin function blocks on an invisible prompt. Every such
+# call must be `command rm` / `command mv` / `command cp`.
+t_head "safety-alias leak (regression guard)"
+_leaky=$(grep -rn '\(^\|[;&|] *\|&& *\)\(rm\|mv\|cp\) ' "$HX_HOME/lib" "$HX_HOME/plugins" "$HX_HOME/rc.d" 2>/dev/null \
+    | grep -v 'command \(rm\|mv\|cp\)' | grep -v ':[0-9]*:#' | grep -v 'alias ' | grep -v 'hx_alias_doc')
+t_eq "" "$_leaky" "no unguarded rm/mv/cp inside functions"
+
+# ── shims ───────────────────────────────────────────────────────────────────
+t_head "shims for interpreter gaps"
+glob_into _G /etc/host*
+if [ "${#_G[@]}" -ge 1 ]; then t_ok "glob_into fills an array on match (${#_G[@]})"
+else t_bad "glob_into found nothing under /etc"; fi
+glob_into _G /tmp/definitely-no-match-xyz*
+t_eq "0" "${#_G[@]}" "glob_into yields 0 on no match (the nullglob array bug)"
+
+_e=""
+t_true  "is_set finds an empty-but-set variable" is_set _e
+t_false "is_set rejects an unset variable"       is_set _totally_unset_xyz
+
+t_eq "'a b'"      "$(quote 'a b')"   "quote wraps a spaced string"
+t_eq "'it'\\''s'" "$(quote "it's")"  "quote escapes an embedded single quote"
+
+[ -n "$(rglob /etc hostname)" ] && t_ok "rglob finds files recursively" || t_bad "rglob"
+[ -n "$(dirs)" ] && t_ok "dirs shim prints something" || t_bad "dirs shim"
+
+# ── core functions ──────────────────────────────────────────────────────────
+t_head "core functions"
+_td=$(mktemp -d)
+( mkcd "$_td/a/b" >/dev/null 2>&1 && [ "$PWD" = "$_td/a/b" ] ) && t_ok "mkcd creates and enters" || t_bad "mkcd"
+( cd "$_td/a/b" && up 2 >/dev/null && [ "$PWD" = "$_td" ] ) && t_ok "up climbs N levels" || t_bad "up"
+rm -rf "$_td"
+
+t_eq "7.0" "$(calc '3.5 * 2')" "calc does floating point"
+printf 'y\n' | confirm x >/dev/null 2>&1 && t_ok "confirm accepts y" || t_bad "confirm accepts y"
+printf 'n\n' | confirm x >/dev/null 2>&1 && t_bad "confirm rejects n" || t_ok "confirm rejects n"
+
+_p_before="$PATH"
+path_append /tmp; path_append /tmp
+t_eq "1" "$(path_list | grep -c '^/tmp$')" "path_append does not duplicate"
+path_remove /tmp
+t_eq "0" "$(path_list | grep -c '^/tmp$')" "path_remove drops the entry"
+PATH="$_p_before"
+
+_ef=$(mktemp)
+printf 'A_TEST_KEY=hello\n# comment\nB_TEST_KEY="quoted value"\nnot a line\n' > "$_ef"
+envload "$_ef" >/dev/null 2>&1
+t_eq "hello"        "$A_TEST_KEY" "envload exports a plain value"
+t_eq "quoted value" "$B_TEST_KEY" "envload strips surrounding quotes"
+rm -f "$_ef"
+
+# ── feature toggles ─────────────────────────────────────────────────────────
+t_head "feature toggles"
+t_true  "a known feature is known"      hx_known git
+t_false "an unknown feature is not"     hx_known no_such_feature_xyz
+_orig="${HX_FEAT_STATE[git]}"
+hx_set_state git off
+t_false "hx_enabled is false once off"  hx_enabled git
+hx_set_state git on
+t_true  "hx_enabled is true once on"    hx_enabled git
+hx_set_state git "$_orig"
+
+# hellish.conf round-trip
+_cbak=$(mktemp)
+cp "$HX_CONF" "$_cbak" 2>/dev/null
+hx_conf_save
+t_true "conf save writes a readable file" test -r "$HX_CONF"
+t_true "saved file contains feature lines" grep -q '^feature ' "$HX_CONF"
+t_true "saved file contains set lines"     grep -q '^set ' "$HX_CONF"
+hx_conf_load
+t_ok "conf load parses what conf save wrote"
+cp "$_cbak" "$HX_CONF" 2>/dev/null; rm -f "$_cbak"
+
+# ── help_conf / conf / hxp render ───────────────────────────────────────────
+t_head "documentation commands"
+[ -n "$(_help_conf_render)" ] && t_ok "help_conf renders" || t_bad "help_conf renders"
+for _s in features aliases functions plugins vars options; do
+    [ -n "$(help_conf $_s)" ] && t_ok "help_conf $_s renders" || t_bad "help_conf $_s renders"
+done
+_hs=$(help_conf -s git 2>/dev/null)
+case "$_hs" in *git*) t_ok "help_conf -s finds a known term" ;; *) t_bad "help_conf -s" ;; esac
+[ -n "$(conf list)" ]    && t_ok "conf list renders"    || t_bad "conf list renders"
+[ -n "$(conf doctor)" ]  && t_ok "conf doctor renders"  || t_bad "conf doctor renders"
+[ -n "$(conf modules)" ] && t_ok "conf modules renders" || t_bad "conf modules renders"
+[ -n "$(hxp list)" ]     && t_ok "hxp list renders"     || t_bad "hxp list renders"
+[ -n "$(hxp info git)" ] && t_ok "hxp info git renders" || t_bad "hxp info git renders"
+t_false "conf rejects an unknown subcommand"   conf no_such_cmd
+t_false "help_conf rejects an unknown section" help_conf no_such_section
+
+# ── plugins ─────────────────────────────────────────────────────────────────
+t_head "plugins"
+for _p in git devkit jump docker net sentinel forge; do
+    if hx_known "$_p"; then t_ok "plugin '$_p' registered"; else t_bad "plugin '$_p' missing"; fi
+done
+t_defined ginfo     "git: ginfo defined"
+t_defined gsweep    "git: gsweep defined"
+t_defined proj_type "devkit: proj_type defined"
+t_defined j         "jump: j defined"
+t_defined marks     "jump: marks defined"
+t_defined dps       "docker: dps defined"
+t_defined waitport  "net: waitport defined"
+t_defined sentinel  "sentinel: sentinel defined"
+t_defined forge     "forge: forge defined"
+
+t_eq "unknown" "$(proj_type /tmp)"        "devkit detects an unknown directory"
+t_eq "make"    "$(proj_type $HOME/hellish)" "devkit detects a Makefile project"
+
+# jump database round-trip
+_jbak=$(mktemp); cp "$HX_JUMP_DB" "$_jbak" 2>/dev/null
+_jump_record /tmp
+t_true "jump records a directory" grep -q '|/tmp$' "$HX_JUMP_DB"
+t_true "jump ranks candidates"    sh -c "[ -n \"\$(. $HOME/.hellishrc >/dev/null 2>&1; _jump_rank tmp)\" ]"
+cp "$_jbak" "$HX_JUMP_DB" 2>/dev/null; rm -f "$_jbak"
+
+# net: waitport must fail fast on a dead port
+t_false "waitport fails on a closed port" waitport localhost 59997 1
+
+# ── forge lint over every plugin ────────────────────────────────────────────
+t_head "forge lint (the contract) over every plugin"
+for _p in git devkit jump docker net sentinel forge; do
+    if forge_lint "$_p" >/dev/null 2>&1; then t_ok "forge lint: $_p"
+    else t_bad "forge lint: $_p — run: forge lint $_p"; fi
+done
+
+# forge new produces a plugin that itself passes lint
+_tmpname="forgetest$$"
+if forge_new "$_tmpname" "a generated test plugin" >/dev/null 2>&1; then
+    t_ok "forge new scaffolds a plugin"
+    if forge_lint "$_tmpname" >/dev/null 2>&1; then t_ok "forge new output passes forge lint"
+    else t_bad "forge new output FAILS forge lint"; fi
+    t_true "forge new writes a README" test -r "$HX_PLUGIN_DIR/$_tmpname/README.md"
+    rm -rf "$HX_PLUGIN_DIR/$_tmpname"
+else
+    t_bad "forge new failed"
+fi
+
+# ── prompt ──────────────────────────────────────────────────────────────────
+t_head "prompt"
+_th="$HX_THEME"
+for _t in box pure minimal classic plain; do
+    theme "$_t" >/dev/null 2>&1 && [ -n "$PS1" ] && t_ok "theme $_t sets PS1" || t_bad "theme $_t"
+done
+t_false "theme rejects an unknown name" theme no_such_theme
+theme "$_th" >/dev/null 2>&1
+t_eq "_hx_precmd_run" "$PROMPT_COMMAND" "PROMPT_COMMAND dispatches the precmd list"
+hx_precmd_add _dupe_probe; hx_precmd_add _dupe_probe
+t_eq "1" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep -c '^_dupe_probe$')" "hx_precmd_add de-duplicates"
+
+# ── the AI block is preserved verbatim ──────────────────────────────────────
+t_head "preserved content"
+t_true "original rc snapshot still present" test -r "$HX_STATE/original-hellishrc.snapshot"
+if diff -q <(sed -n '/original ~\/.hellishrc content below/,/end of original content/p' \
+        "$HX_HOME/rc.d/80-ai.hsh" | sed '1d;$d') \
+        "$HX_STATE/original-hellishrc.snapshot" >/dev/null 2>&1; then
+    t_ok "80-ai.hsh reproduces the original rc byte for byte"
+else
+    t_bad "80-ai.hsh has drifted from the original rc"
+fi
+
+# ── summary ─────────────────────────────────────────────────────────────────
+printf '\n'
+_total=$((HX_T_PASS + HX_T_FAIL))
+if [ "$HX_T_FAIL" -eq 0 ]; then
+    printf '\033[32m  %s/%s passed\033[0m' "$HX_T_PASS" "$_total"
+else
+    printf '\033[31m  %s/%s passed, %s FAILED\033[0m' "$HX_T_PASS" "$_total" "$HX_T_FAIL"
+fi
+[ "$HX_T_SKIP" -gt 0 ] && printf '\033[90m, %s skipped\033[0m' "$HX_T_SKIP"
+printf '\n\n'
+[ "$HX_T_FAIL" -eq 0 ]

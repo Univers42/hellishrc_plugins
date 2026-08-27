@@ -1,0 +1,121 @@
+# 30-aliases.hsh — aliases.
+#
+# INTERPRETER NOTE: an alias can never be used in the file that DEFINES it —
+# hellish parses a whole file before executing any of it, so the alias does not
+# exist yet at parse time. They work fine interactively and in later-sourced
+# files. Never call an alias from a function; call the real command.
+hx_feature aliases on core "the alias set: ls, git, safety nets, navigation"
+hx_guard aliases || return 0
+
+# ── listing ─────────────────────────────────────────────────────────────────
+alias ls='ls --color=auto --group-directories-first'
+alias ll='ls -lh --color=auto --group-directories-first'
+alias la='ls -lha --color=auto --group-directories-first'
+alias lt='ls -lhtr --color=auto'
+alias l1='ls -1 --color=auto'
+hx_alias_doc ls "colourised ls, directories first"
+hx_alias_doc ll "long listing, human sizes"
+hx_alias_doc la "long listing including dot-files"
+hx_alias_doc lt "long listing, oldest-modified last"
+hx_alias_doc l1 "one entry per line"
+
+# ── navigation ──────────────────────────────────────────────────────────────
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+alias -- -='cd -'
+hx_alias_doc ".."   "up one directory"
+hx_alias_doc "..."  "up two directories"
+hx_alias_doc "...." "up three directories"
+
+# ── safety nets ─────────────────────────────────────────────────────────────
+# -i on the destructive three. This is the one place the config is deliberately
+# NOT minimal: an interactive shell should ask before it destroys something.
+#
+# HAZARD, and it bit during development: hellish expands aliases when it PARSES
+# a file, and every module and plugin sourced after this one is parsed with
+# these aliases already defined. So a plugin function containing `mv "$a" "$b"`
+# silently becomes `mv -i "$a" "$b"` and blocks on a prompt nobody sees. Any
+# function in this configuration that moves, copies or removes a file therefore
+# calls `command mv` / `command rm` / `command cp`. forge lint enforces it and
+# test/run.hsh has a regression guard.
+alias rm='rm -i'
+alias mv='mv -i'
+alias cp='cp -i'
+alias ln='ln -i'
+hx_alias_doc rm "rm -i (prompt before delete; use \\rm to bypass)"
+hx_alias_doc mv "mv -i (prompt before overwrite)"
+hx_alias_doc cp "cp -i (prompt before overwrite)"
+hx_alias_doc ln "ln -i (prompt before overwrite)"
+
+# ── grep family ─────────────────────────────────────────────────────────────
+alias grep='grep --color=auto'
+alias egrep='grep -E --color=auto'
+alias fgrep='grep -F --color=auto'
+alias rg-='grep -rn --color=auto'
+hx_alias_doc grep  "grep with colour"
+hx_alias_doc egrep "extended-regex grep"
+hx_alias_doc fgrep "fixed-string grep"
+hx_alias_doc "rg-"  "recursive grep with line numbers (plain-grep fallback)"
+
+# ── disk / process ──────────────────────────────────────────────────────────
+alias df='df -h'
+alias du='du -h'
+alias free='free -h'
+alias psg='ps aux | grep -v grep | grep -i'
+hx_alias_doc df    "disk free, human units"
+hx_alias_doc du    "disk usage, human units"
+hx_alias_doc free  "memory, human units"
+hx_alias_doc psg   "search running processes"
+# NOTE: no 'ports' alias here on purpose — the net plugin defines a ports()
+# FUNCTION, and an alias of the same name makes its definition a syntax error
+# (the alias expands inside 'ports() {'). test/run.hsh enforces this.
+
+# ── git (short forms; the git plugin adds the powerful ones) ────────────────
+alias g='git'
+alias gs='git status --short --branch'
+alias ga='git add'
+alias gc='git commit'
+alias gca='git commit --amend'
+alias gd='git diff'
+alias gds='git diff --staged'
+alias gl='git log --oneline --graph --decorate -20'
+alias gp='git push'
+alias gpl='git pull --ff-only'
+alias gco='git checkout'
+alias gb='git branch'
+hx_alias_doc g   "git"
+hx_alias_doc gs  "git status, short with branch header"
+hx_alias_doc ga  "git add"
+hx_alias_doc gc  "git commit"
+hx_alias_doc gca "git commit --amend"
+hx_alias_doc gd  "git diff (unstaged)"
+hx_alias_doc gds "git diff --staged"
+hx_alias_doc gl  "git log, graph, last 20"
+hx_alias_doc gp  "git push"
+hx_alias_doc gpl "git pull --ff-only (never creates a merge)"
+hx_alias_doc gco "git checkout"
+hx_alias_doc gb  "git branch"
+
+# ── this configuration ──────────────────────────────────────────────────────
+alias hxr='conf reload'
+alias hxe='conf edit'
+alias hxl='conf list'
+alias hxd='conf doctor'
+hx_alias_doc hxr "reload the whole configuration"
+hx_alias_doc hxe "edit hellish.conf in \$EDITOR"
+hx_alias_doc hxl "list features and their state"
+hx_alias_doc hxd "configuration health check"
+
+# ── misc ────────────────────────────────────────────────────────────────────
+alias path='path_list'
+alias now='date "+%Y-%m-%d %H:%M:%S"'
+alias week='date +%V'
+alias reload='conf reload'
+hx_alias_doc path   "print PATH one entry per line"
+hx_alias_doc now    "current timestamp"
+hx_alias_doc week   "ISO week number"
+hx_alias_doc reload "reload the configuration"
+
+# `-` as a command: `alias -- -='cd -'` needs the `--` so `-` is not read as a flag.
+hx_alias_doc "-" "cd to the previous directory"

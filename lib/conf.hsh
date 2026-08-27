@@ -1,0 +1,298 @@
+# ~/.hellish/lib/conf.hsh — the `conf` control command and `help_conf` reference.
+#
+# Everything shown here is read from the registries in core.hsh. Nothing is
+# hard-coded, so a plugin that documents itself with hx_func_doc automatically
+# appears in `help_conf` with no change to this file.
+
+# ── conf: turn things on and off, persistently ──────────────────────────────
+conf() {
+    local cmd="${1:-list}"
+    [ $# -gt 0 ] && shift
+    case "$cmd" in
+        list|ls)      _conf_list ;;
+        on|enable)    _conf_switch on  "$@" ;;
+        off|disable)  _conf_switch off "$@" ;;
+        toggle)       _conf_toggle "$@" ;;
+        get)          _conf_get "$1" ;;
+        set)          _conf_set "$1" "$2" ;;
+        save)         hx_conf_save && hx_ok "saved -> $HX_CONF" ;;
+        reload)       _conf_reload ;;
+        reset)        _conf_reset ;;
+        edit)         "${EDITOR:-vi}" "$HX_CONF" ;;
+        path)         printf '%s\n' "$HX_CONF" ;;
+        doctor)       _conf_doctor ;;
+        profile)      _conf_profile ;;
+        modules)      _conf_modules ;;
+        help|-h|--help) _conf_help ;;
+        *)            hx_err "conf: unknown command '$cmd'"; _conf_help; return 2 ;;
+    esac
+}
+
+_conf_help() {
+    hx_head "conf — configuration control"
+    hx_kv "conf list"            "every feature, grouped, with on/off state"
+    hx_kv "conf on <name>..."    "enable one or more features (persisted)"
+    hx_kv "conf off <name>..."   "disable one or more features (persisted)"
+    hx_kv "conf toggle <name>"   "flip a feature"
+    hx_kv "conf get <VAR>"       "read a configuration variable"
+    hx_kv "conf set <VAR> <val>" "set and persist a configuration variable"
+    hx_kv "conf save"            "write current state to hellish.conf"
+    hx_kv "conf reload"          "re-source the whole configuration"
+    hx_kv "conf reset"           "restore every feature to its default"
+    hx_kv "conf edit"            "open hellish.conf in \$EDITOR"
+    hx_kv "conf modules"         "list loaded files in load order"
+    hx_kv "conf profile"         "re-load with per-module timings"
+    hx_kv "conf doctor"          "health check: errors, missing deps, stale state"
+    hx_kv "conf path"            "print the config file path"
+    printf '\n  %ssee also: help_conf (full reference), hxp (plugins)%s\n\n' "$HX_GRY" "$HX_R"
+}
+
+_conf_list() {
+    local group last= n
+    hx_head "features"
+    for group in core ui vcs dev nav net sys ai; do
+        for n in $(hx_feat_names_sorted); do
+            [ "${HX_FEAT_GROUP[$n]:-}" = "$group" ] || continue
+            if [ "$last" != "$group" ]; then
+                printf '\n  %s%s%s\n' "$HX_ORA" "$group" "$HX_R"
+                last="$group"
+            fi
+            printf '    '
+            hx_badge "${HX_FEAT_STATE[$n]:-off}"
+            printf ' %s%-14s%s %s\n' "$HX_B" "$n" "$HX_R" "${HX_FEAT_DESC[$n]}"
+        done
+    done
+    # anything in a group not listed above
+    for n in $(hx_feat_names_sorted); do
+        case "${HX_FEAT_GROUP[$n]:-}" in
+            core|ui|vcs|dev|nav|net|sys|ai) continue ;;
+        esac
+        printf '    '
+        hx_badge "${HX_FEAT_STATE[$n]:-off}"
+        printf ' %s%-14s%s %s\n' "$HX_B" "$n" "$HX_R" "${HX_FEAT_DESC[$n]}"
+    done
+    printf '\n  %sconf on <name> / conf off <name>, then conf reload%s\n\n' "$HX_GRY" "$HX_R"
+}
+
+_conf_switch() {
+    local want="$1" n rc=0
+    shift
+    [ $# -gt 0 ] || { hx_err "usage: conf $want <name>..."; return 2; }
+    for n in "$@"; do
+        if hx_known "$n"; then
+            hx_set_state "$n" "$want"
+            hx_ok "$n -> $want"
+        else
+            hx_err "no such feature: $n"
+            rc=1
+        fi
+    done
+    hx_conf_save
+    [ "$rc" -eq 0 ] && printf '  %srun: conf reload%s\n' "$HX_GRY" "$HX_R"
+    return $rc
+}
+
+_conf_toggle() {
+    local n
+    [ $# -gt 0 ] || { hx_err "usage: conf toggle <name>"; return 2; }
+    for n in "$@"; do
+        hx_known "$n" || { hx_err "no such feature: $n"; return 1; }
+        if hx_enabled "$n"; then _conf_switch off "$n"; else _conf_switch on "$n"; fi
+    done
+}
+
+_conf_get() {
+    [ -n "$1" ] || { hx_err "usage: conf get <VAR>"; return 2; }
+    hx_key_ok "$1" || { hx_err "bad variable name"; return 2; }
+    eval "printf '%s\n' \"\${$1:-<unset>}\""
+}
+
+_conf_set() {
+    [ -n "$1" ] || { hx_err "usage: conf set <VAR> <value>"; return 2; }
+    hx_key_ok "$1" || { hx_err "bad variable name"; return 2; }
+    eval "$1=\"\$2\""
+    hx_conf_save
+    hx_ok "$1 = $2"
+}
+
+_conf_reload() {
+    hx_info "reloading configuration"
+    HX_RELOAD=1
+    . "$HOME/.hellishrc"
+    hx_ok "reloaded ${#HX_LOADED[@]} files"
+}
+
+_conf_reset() {
+    local n
+    for n in $(hx_feat_names_sorted); do
+        hx_set_state "$n" "${HX_FEAT_DEFAULT[$n]}"
+    done
+    hx_conf_save
+    hx_ok "all features restored to defaults - run: conf reload"
+}
+
+_conf_modules() {
+    local f i=1
+    hx_head "loaded files (in order)"
+    if [ "${#HX_LOADED[@]}" -eq 0 ]; then
+        printf '  %s(nothing recorded)%s\n\n' "$HX_GRY" "$HX_R"; return 0
+    fi
+    for f in "${HX_LOADED[@]}"; do
+        printf '  %s%2s%s  %s\n' "$HX_GRY" "$i" "$HX_R" "${f#$HOME/}"
+        i=$((i + 1))
+    done
+    printf '\n'
+}
+
+_conf_profile() {
+    hx_info "re-loading with timings (HX_PROFILE=1)"
+    HX_PROFILE=1 . "$HOME/.hellishrc"
+    HX_PROFILE=0
+}
+
+_conf_doctor() {
+    local e n bad=0
+    hx_head "configuration doctor"
+    hx_kv "hellish"   "$(/usr/bin/hellish --version 2>/dev/null | head -1)"
+    hx_kv "config"    "v$HX_VERSION at ${HX_HOME/#$HOME/\~}"
+    hx_kv "conf file" "$([ -r "$HX_CONF" ] && echo present || echo "${HX_YEL}absent (using defaults)${HX_R}")"
+    hx_kv "files"     "${#HX_LOADED[@]} loaded"
+    hx_kv "features"  "$(hx_feat_names_sorted | wc -l | tr -d ' ') registered"
+    hx_kv "items"     "$(hx_item_keys_sorted | wc -l | tr -d ' ') documented"
+
+    printf '\n%s  load errors%s\n' "$HX_ORA" "$HX_R"
+    if [ "${#HX_ERRORS[@]}" -eq 0 ]; then
+        printf '    %snone%s\n' "$HX_GRN" "$HX_R"
+    else
+        for e in "${HX_ERRORS[@]}"; do
+            printf '    %s%s%s\n' "$HX_RED" "$e" "$HX_R"; bad=$((bad + 1))
+        done
+    fi
+
+    printf '\n%s  missing dependencies%s\n' "$HX_ORA" "$HX_R"
+    for n in $(hx_plugins_sorted); do
+        [ -n "${HX_PLUG_MISSING[$n]:-}" ] || continue
+        printf '    %s%-10s%s %s\n' "$HX_YEL" "$n" "$HX_R" "${HX_PLUG_MISSING[$n]}"
+        bad=$((bad + 1))
+    done
+    [ "$bad" -eq 0 ] && printf '    %snone%s\n' "$HX_GRN" "$HX_R"
+
+    printf '\n%s  known interpreter gaps worked around%s\n' "$HX_ORA" "$HX_R"
+    printf '    %s%s%s\n' "$HX_GRY" "see ~/.context_conf.md for the full list" "$HX_R"
+    printf '\n'
+    return 0
+}
+
+# ── help_conf: the full, professional reference ─────────────────────────────
+help_conf() {
+    case "${1:-}" in
+        -s|--search) _help_conf_search "$2"; return ;;
+        -d|--doctor) _conf_doctor; return ;;
+        -h|--help)   _help_conf_usage; return ;;
+        '')          _help_conf_render | hx_pager; return ;;
+        *)           _help_conf_section "$1"; return ;;
+    esac
+}
+
+_help_conf_usage() {
+    hx_head "help_conf — this configuration, documented"
+    hx_kv "help_conf"              "the full reference (paged)"
+    hx_kv "help_conf <section>"    "one section: features, aliases, functions, plugins, vars, options"
+    hx_kv "help_conf -s <term>"    "search every name and description"
+    hx_kv "help_conf -d"           "health check (same as conf doctor)"
+    printf '\n'
+}
+
+_help_conf_banner() {
+    printf '%s' "$HX_ORA$HX_B"
+    printf '  hellish configuration%s %sv%s%s\n' "$HX_R" "$HX_GRY" "$HX_VERSION" "$HX_R"
+    printf '  %s%s | %s files | %s features | %s documented items%s\n' \
+        "$HX_GRY" \
+        "$(/usr/bin/hellish --version 2>/dev/null | head -1 | cut -d, -f1)" \
+        "${#HX_LOADED[@]}" \
+        "$(hx_feat_names_sorted | wc -l | tr -d ' ')" \
+        "$(hx_item_keys_sorted | wc -l | tr -d ' ')" \
+        "$HX_R"
+}
+
+# _help_conf_kind <kind> <heading> — render every registered item of one kind,
+# grouped by the module that owns it.
+_help_conf_kind() {
+    local kind="$1" heading="$2" key owner last= name usage n
+    n=0
+    for key in $(hx_item_keys_sorted); do
+        [ "${HX_ITEM_KIND[$key]:-}" = "$kind" ] || continue
+        n=$((n + 1))
+    done
+    [ "$n" -eq 0 ] && return 0
+    hx_head "$heading"
+    for owner in $(_help_conf_owners "$kind"); do
+        printf '\n  %s%s%s\n' "$HX_CYN" "$owner" "$HX_R"
+        for key in $(hx_item_keys_sorted); do
+            [ "${HX_ITEM_KIND[$key]:-}" = "$kind" ] || continue
+            [ "${HX_ITEM_OWNER[$key]:-}" = "$owner" ] || continue
+            name="${key#*:}"
+            usage="${HX_ITEM_USAGE[$key]:-}"
+            printf '    %s%-20s%s %s\n' "$HX_B" "$name" "$HX_R" "${HX_ITEM_DESC[$key]}"
+            [ -n "$usage" ] && printf '    %s%-20s   %s%s\n' "" "" "$HX_GRY$usage" "$HX_R"
+        done
+    done
+    printf '\n'
+}
+
+_help_conf_owners() {
+    local kind="$1" key
+    for key in $(hx_item_keys_sorted); do
+        [ "${HX_ITEM_KIND[$key]:-}" = "$kind" ] || continue
+        printf '%s\n' "${HX_ITEM_OWNER[$key]}"
+    done | sort -u
+}
+
+_help_conf_render() {
+    _help_conf_banner
+    _conf_list
+    _help_conf_kind plugin "plugins"
+    _help_conf_kind alias  "aliases"
+    _help_conf_kind func   "functions"
+    _help_conf_kind cmd    "commands"
+    _help_conf_kind var    "variables"
+    _help_conf_kind opt    "shell options"
+    hx_head "control"
+    hx_kv "conf"       "turn features on and off (conf help)"
+    hx_kv "hxp"        "manage plugins (hxp help)"
+    hx_kv "help_conf"  "this reference; -s <term> to search"
+    printf '\n'
+}
+
+_help_conf_section() {
+    case "$1" in
+        feature|features) _conf_list ;;
+        alias|aliases)    _help_conf_kind alias  "aliases" ;;
+        func|functions)   _help_conf_kind func   "functions" ;;
+        cmd|commands)     _help_conf_kind cmd    "commands" ;;
+        var|vars)         _help_conf_kind var    "variables" ;;
+        opt|options)      _help_conf_kind opt    "shell options" ;;
+        plugin|plugins)   _help_conf_kind plugin "plugins" ;;
+        *) hx_err "unknown section '$1'"; _help_conf_usage; return 2 ;;
+    esac
+}
+
+_help_conf_search() {
+    local term="$1" key hits=0 name
+    [ -n "$term" ] || { hx_err "usage: help_conf -s <term>"; return 2; }
+    hx_head "search: $term"
+    for key in $(hx_item_keys_sorted); do
+        name="${key#*:}"
+        case "$name ${HX_ITEM_DESC[$key]} ${HX_ITEM_USAGE[$key]:-}" in
+            *"$term"*)
+                printf '  %s%-6s%s %s%-18s%s %s %s(%s)%s\n' \
+                    "$HX_GRY" "${HX_ITEM_KIND[$key]}" "$HX_R" \
+                    "$HX_B" "$name" "$HX_R" \
+                    "${HX_ITEM_DESC[$key]}" \
+                    "$HX_GRY" "${HX_ITEM_OWNER[$key]}" "$HX_R"
+                hits=$((hits + 1)) ;;
+        esac
+    done
+    [ "$hits" -eq 0 ] && printf '  %sno match%s\n' "$HX_GRY" "$HX_R"
+    printf '\n'
+}

@@ -1,0 +1,97 @@
+# 10-env.hsh — environment, PATH hygiene, editor/pager defaults.
+hx_feature env on core "environment variables, PATH hygiene, editor and pager defaults"
+hx_guard env || return 0
+
+# ── PATH helpers ────────────────────────────────────────────────────────────
+# hellish has no `readarray -d` and no assoc-array writes from sourced
+# functions without the shim, so the dedupe below is a plain string walk.
+path_prepend() {
+    local d
+    for d in "$@"; do
+        [ -d "$d" ] || continue
+        path_remove "$d"
+        PATH="$d:$PATH"
+    done
+    export PATH
+}
+path_append() {
+    local d
+    for d in "$@"; do
+        [ -d "$d" ] || continue
+        path_remove "$d"
+        PATH="$PATH:$d"
+    done
+    export PATH
+}
+path_remove() {
+    local d="$1" out= p
+    local OIFS="$IFS"; IFS=:
+    for p in $PATH; do
+        [ "$p" = "$d" ] && continue
+        [ -z "$p" ] && continue
+        out="$out:$p"
+    done
+    IFS="$OIFS"
+    PATH="${out#:}"
+}
+path_list() { printf '%s\n' "$PATH" | tr ':' '\n'; }
+path_dedupe() {
+    local out= p seen
+    local OIFS="$IFS"; IFS=:
+    for p in $PATH; do
+        [ -z "$p" ] && continue
+        case ":$out:" in *":$p:"*) continue ;; esac
+        out="$out:$p"
+    done
+    IFS="$OIFS"
+    PATH="${out#:}"; export PATH
+}
+hx_func_doc path_prepend "put directories at the front of PATH (deduped)" "path_prepend <dir>..."
+hx_func_doc path_append  "put directories at the end of PATH (deduped)"   "path_append <dir>..."
+hx_func_doc path_remove  "drop a directory from PATH"                     "path_remove <dir>"
+hx_func_doc path_list    "print PATH one entry per line"
+hx_func_doc path_dedupe  "collapse duplicate PATH entries, keeping first"
+
+path_prepend "$HOME/.local/bin" "$HOME/bin"
+path_dedupe
+
+# ── editor / pager ──────────────────────────────────────────────────────────
+if [ -z "${EDITOR:-}" ]; then
+    for _e in nvim vim vi nano; do
+        command -v "$_e" >/dev/null 2>&1 && { export EDITOR="$_e"; break; }
+    done
+    unset _e
+fi
+export VISUAL="${VISUAL:-$EDITOR}"
+export PAGER="${PAGER:-less}"
+# -R keep colour, -F quit if one screen, -X don't clear on exit, -i smart case
+export LESS="${LESS:--RFXi}"
+export LESSHISTFILE="${LESSHISTFILE:-$HX_STATE/lesshst}"
+
+hx_var_doc EDITOR "preferred editor, auto-detected (nvim/vim/vi/nano)"
+hx_var_doc PAGER  "preferred pager"
+hx_var_doc LESS   "less flags: -R colour, -F short-quit, -X no-clear, -i smart case"
+
+# ── locale / misc ───────────────────────────────────────────────────────────
+export LANG="${LANG:-en_US.UTF-8}"
+export LC_COLLATE="${LC_COLLATE:-C}"       # stable, predictable sort order
+# Tell tools they are talking to a real terminal-ish shell.
+export CLICOLOR=1
+# Quieter, faster toolchains.
+export PIP_DISABLE_PIP_VERSION_CHECK=1
+export DOTNET_CLI_TELEMETRY_OPTOUT=1
+export NEXT_TELEMETRY_DISABLED=1
+export DO_NOT_TRACK=1
+
+# ── XDG ─────────────────────────────────────────────────────────────────────
+export XDG_CONFIG_HOME="${XDG_CONFIG_HOME:-$HOME/.config}"
+export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$HOME/.cache}"
+export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
+export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
+
+# ── this configuration's own vars ───────────────────────────────────────────
+export HX_THEME="${HX_THEME:-box}"
+hx_var_doc HX_THEME     "prompt theme: box | minimal | classic | plain  (conf set HX_THEME ...)"
+hx_var_doc HX_COLOR     "colour policy: auto | always | never"
+hx_var_doc HX_HIST_SIZE "history size kept in memory and on disk"
+hx_var_doc HX_HOME      "root of this configuration (~/.hellish)"

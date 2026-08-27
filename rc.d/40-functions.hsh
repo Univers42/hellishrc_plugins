@@ -1,0 +1,249 @@
+# 40-functions.hsh — general-purpose functions, plus shims for interpreter gaps.
+hx_feature functions on core "everyday functions: navigation, archives, search, shims"
+hx_guard functions || return 0
+
+# ═══ SHIMS for things hellish 2.7.6 cannot do ═══════════════════════════════
+
+# glob_into <arrayname> <pattern...>
+#   The `shopt -s nullglob` shim. nullglob works for command words but NOT for
+#   array literals: `a=(/nope*)` yields one element (the literal pattern) instead
+#   of zero. This fills an array with only real matches.
+#     glob_into files /etc/host*  ->  ${files[@]} has 4 entries
+#     glob_into files /nope*      ->  ${#files[@]} is 0
+#   Writes through eval because a subscripted write from a sourced function is
+#   itself broken (see lib/core.hsh hx_aset).
+glob_into() {
+    local __arr="$1" __p __n=0
+    shift
+    eval "$__arr=()"
+    for __p in "$@"; do
+        [ -e "$__p" ] || [ -L "$__p" ] || continue
+        eval "$__arr+=(\"\$__p\")"
+        __n=$((__n + 1))
+    done
+    return 0
+}
+hx_func_doc glob_into "fill an array with only real glob matches (nullglob shim)" "glob_into <array> <pattern>..."
+
+# rglob <dir> <name-pattern>
+#   The `globstar` / `**` shim. `**` is literal in 2.7.6, so this walks with find.
+#     rglob . '*.c'   ->  every .c file below .
+rglob() {
+    local dir="${1:-.}" pat="${2:-*}"
+    find "$dir" -type f -name "$pat" 2>/dev/null
+}
+hx_func_doc rglob "recursive file glob (** shim, uses find)" "rglob <dir> <pattern>"
+
+# dirs — pushd/popd exist in hellish but `dirs` does not.
+dirs() {
+    # No introspection into the shell's own stack is exposed, so this reports
+    # what it can: the current and previous directory.
+    printf '%s' "$PWD"
+    [ -n "${OLDPWD:-}" ] && printf ' %s' "$OLDPWD"
+    printf '\n'
+}
+hx_func_doc dirs "current and previous directory (partial 'dirs' shim)"
+
+# is_set <VAR> — the `test -v` shim; `[ -v x ]` returns false even when set.
+is_set() { eval "[ -n \"\${$1+x}\" ]"; }
+hx_func_doc is_set "true when a variable is set, even if empty (test -v shim)" "is_set <VARNAME>"
+
+# quote <string> — the `printf %q` shim; %q is an invalid format in 2.7.6.
+# Wraps in single quotes and escapes embedded single quotes, so the result is
+# safe to paste back into the shell.
+quote() {
+    local s="$1" out=
+    while [ -n "$s" ]; do
+        case "$s" in
+            \'*) out="$out'\\''"; s="${s#?}" ;;
+            *)   out="$out${s%%\'*}"
+                 case "$s" in *\'*) s="'${s#*\'}" ;; *) s= ;; esac ;;
+        esac
+    done
+    printf "'%s'\n" "$out"
+}
+hx_func_doc quote "shell-quote a string safely (printf %q shim)" "quote <string>"
+
+# ═══ NAVIGATION ═════════════════════════════════════════════════════════════
+mkcd() { [ -n "$1" ] || { hx_err "usage: mkcd <dir>"; return 2; }; mkdir -p "$1" && cd "$1"; }
+hx_func_doc mkcd "create a directory (with parents) and cd into it" "mkcd <dir>"
+
+up() {
+    local n="${1:-1}"
+    case "$n" in ''|*[!0-9]*) hx_err "usage: up [count]"; return 2 ;; esac
+    while [ "$n" -gt 0 ]; do cd .. || return 1; n=$((n - 1)); done
+    pwd
+}
+hx_func_doc up "climb N directories" "up [count]"
+
+# cdf <pattern> — cd to the first directory below . whose name matches.
+cdf() {
+    local d
+    [ -n "$1" ] || { hx_err "usage: cdf <pattern>"; return 2; }
+    d=$(find . -type d -name "$1" -not -path '*/.git/*' 2>/dev/null | head -1)
+    [ -n "$d" ] || { hx_err "no directory matching '$1'"; return 1; }
+    cd "$d" && pwd
+}
+hx_func_doc cdf "cd to the first matching directory below here" "cdf <pattern>"
+
+tmpd() { local d; d=$(mktemp -d) && cd "$d" && pwd; }
+hx_func_doc tmpd "create a temp directory and cd into it"
+
+# ═══ FILES ══════════════════════════════════════════════════════════════════
+# extract <archive> — one command for every archive format.
+extract() {
+    local f="$1"
+    [ -f "$f" ] || { hx_err "not a file: $f"; return 2; }
+    case "$f" in
+        *.tar.bz2|*.tbz2) tar xjf "$f" ;;
+        *.tar.gz|*.tgz)   tar xzf "$f" ;;
+        *.tar.xz|*.txz)   tar xJf "$f" ;;
+        *.tar.zst)        tar --zstd -xf "$f" ;;
+        *.tar)            tar xf "$f" ;;
+        *.bz2)            bunzip2 "$f" ;;
+        *.gz)             gunzip "$f" ;;
+        *.xz)             unxz "$f" ;;
+        *.zst)            unzstd "$f" ;;
+        *.zip)            unzip "$f" ;;
+        *.rar)            unrar x "$f" ;;
+        *.7z)             7z x "$f" ;;
+        *.Z)              uncompress "$f" ;;
+        *) hx_err "don't know how to extract: $f"; return 1 ;;
+    esac
+}
+hx_func_doc extract "extract any archive by extension" "extract <archive>"
+
+# bak <file> — timestamped copy beside the original.
+bak() {
+    local f
+    [ $# -gt 0 ] || { hx_err "usage: bak <file>..."; return 2; }
+    for f in "$@"; do
+        [ -e "$f" ] || { hx_err "no such file: $f"; continue; }
+        command cp -a "$f" "$f.bak.$(date +%Y%m%d-%H%M%S)" && hx_ok "$f.bak.$(date +%Y%m%d-%H%M%S)"
+    done
+}
+hx_func_doc bak "timestamped backup copy of a file" "bak <file>..."
+
+# ff <pattern> — find files by name, skipping noise directories.
+ff() {
+    [ -n "$1" ] || { hx_err "usage: ff <pattern>"; return 2; }
+    find . -type f -iname "*$1*" \
+        -not -path '*/.git/*' -not -path '*/node_modules/*' \
+        -not -path '*/target/*' -not -path '*/build/*' 2>/dev/null
+}
+hx_func_doc ff "find files by name below here (skips .git, node_modules)" "ff <pattern>"
+
+# biggest [n] — largest files below here.
+biggest() {
+    local n="${1:-10}"
+    find . -type f -not -path '*/.git/*' -printf '%s\t%p\n' 2>/dev/null \
+        | sort -rn | head -"$n" \
+        | while IFS=$(printf '\t') read -r sz path; do
+              printf '%8s  %s\n' "$(numfmt --to=iec "$sz" 2>/dev/null || echo "$sz")" "$path"
+          done
+}
+hx_func_doc biggest "largest files below here" "biggest [count]"
+
+# ═══ DEV UTILITIES ══════════════════════════════════════════════════════════
+# serve [port] — static HTTP server in the current directory.
+serve() {
+    local port="${1:-8000}"
+    if command -v python3 >/dev/null 2>&1; then
+        hx_info "http://localhost:$port  (ctrl-c to stop)"
+        python3 -m http.server "$port"
+    else
+        hx_err "needs python3"; return 1
+    fi
+}
+hx_func_doc serve "static HTTP server for the current directory" "serve [port]"
+
+calc() { [ $# -gt 0 ] || { hx_err "usage: calc <expr>"; return 2; }; printf '%s\n' "$*" | bc -l; }
+hx_func_doc calc "floating-point calculator" "calc '3.5 * 2'"
+
+genpass() {
+    local n="${1:-24}"
+    LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*_+=-' < /dev/urandom | head -c "$n"
+    printf '\n'
+}
+hx_func_doc genpass "random password from /dev/urandom" "genpass [length]"
+
+# retry <n> <command...> — re-run a command until it succeeds.
+retry() {
+    local max="$1" i=1
+    shift
+    case "$max" in ''|*[!0-9]*) hx_err "usage: retry <count> <command>..."; return 2 ;; esac
+    while [ "$i" -le "$max" ]; do
+        "$@" && return 0
+        hx_warn "attempt $i/$max failed"
+        i=$((i + 1))
+        sleep 1
+    done
+    hx_err "gave up after $max attempts"
+    return 1
+}
+hx_func_doc retry "re-run a command until it succeeds" "retry <count> <command>..."
+
+# timer <command...> — wall-clock duration of a command.
+timer() {
+    local t0 t1
+    t0=$(hx_now_ms); "$@"; local rc=$?; t1=$(hx_now_ms)
+    printf '%s-> %s ms (exit %s)%s\n' "$HX_GRY" "$(( t1 - t0 ))" "$rc" "$HX_R" >&2
+    return $rc
+}
+hx_func_doc timer "time a command in milliseconds" "timer <command>..."
+
+# confirm <prompt> — yes/no gate for destructive scripts.
+# `read -n 1` is broken in 2.7.6 (returns empty), so this reads a whole line.
+confirm() {
+    local reply
+    printf '%s [y/N] ' "${1:-are you sure?}"
+    read -r reply
+    case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
+}
+hx_func_doc confirm "ask a yes/no question (returns 0 for yes)" "confirm 'delete everything?'"
+
+# envload [file] — export every KEY=VALUE in a .env file.
+envload() {
+    local f="${1:-.env}" line key val n=0
+    [ -r "$f" ] || { hx_err "no such file: $f"; return 1; }
+    while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) ;; *) continue ;; esac
+        key="${line%%=*}"
+        val="${line#*=}"
+        case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
+        # strip one layer of surrounding quotes
+        case "$val" in
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
+        export "$key=$val"
+        n=$((n + 1))
+    done < "$f"
+    hx_ok "exported $n variables from $f"
+}
+hx_func_doc envload "export every KEY=VALUE from a .env file" "envload [file]"
+
+# psgrep / killport
+killport() {
+    local port="$1" pids
+    [ -n "$port" ] || { hx_err "usage: killport <port>"; return 2; }
+    pids=$(lsof -ti tcp:"$port" 2>/dev/null)
+    [ -n "$pids" ] || { hx_warn "nothing listening on port $port"; return 1; }
+    printf '%s\n' "$pids" | while read -r p; do
+        hx_info "killing pid $p on port $port"
+        kill -9 "$p" 2>/dev/null
+    done
+}
+hx_func_doc killport "kill whatever is listening on a TCP port" "killport <port>"
+
+# ═══ CONFIG SELF-SERVICE ════════════════════════════════════════════════════
+hxcd() { cd "$HX_HOME" && pwd; }
+hx_func_doc hxcd "cd to the configuration directory (~/.hellish)"
+
+hxnew() {
+    hx_have forge_new && { forge_new "$@"; return $?; }
+    hx_err "enable the 'forge' plugin first:  conf on forge && conf reload"
+    return 1
+}
+hx_func_doc hxnew "scaffold a new plugin (via the forge plugin)" "hxnew <name>"

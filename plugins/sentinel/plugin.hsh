@@ -1,0 +1,110 @@
+# plugins/sentinel/plugin.hsh — the "what is this machine doing" dashboard.
+hx_plugin sentinel on sys "sentinel: system dashboard, disk/load/memory watch, repo scan" || return 0
+
+HX_SENTINEL_DISK_WARN="${HX_SENTINEL_DISK_WARN:-90}"
+hx_var_doc HX_SENTINEL_DISK_WARN "disk %% at which sentinel warns (default 90)"
+
+_sent_bar() {
+    # _sent_bar <pct> <width> — a coloured usage bar.
+    local pct="${1:-0}" w="${2:-20}" filled i=0 out= col
+    pct=${pct%\%}
+    case "$pct" in ''|*[!0-9]*) pct=0 ;; esac
+    filled=$(( pct * w / 100 ))
+    if   [ "$pct" -ge 90 ]; then col="$HX_RED"
+    elif [ "$pct" -ge 70 ]; then col="$HX_YEL"
+    else col="$HX_GRN"; fi
+    while [ "$i" -lt "$w" ]; do
+        if [ "$i" -lt "$filled" ]; then out="$out#"; else out="$out."; fi
+        i=$((i + 1))
+    done
+    printf '%s%s%s %3s%%' "$col" "$out" "$HX_R" "$pct"
+}
+
+sys_disk() {
+    hx_head "disk"
+    df -h -x tmpfs -x devtmpfs -x overlay 2>/dev/null | awk 'NR>1 && $2 != "0" { print $6, $5, $2, $4 }' \
+    | while read -r mount pct size avail; do
+        printf '  %-24s %s  %5s free of %s\n' "$mount" "$(_sent_bar "$pct" 18)" "$avail" "$size"
+    done
+}
+hx_func_doc sys_disk "disk usage per mount, with bars"
+
+sys_mem() {
+    hx_head "memory"
+    free -m 2>/dev/null | awk '/^Mem:/ { printf "%d %d\n", $3, $2 }' | while read -r used total; do
+        [ "$total" -gt 0 ] || continue
+        printf '  %-24s %s  %s / %s MB\n' "ram" "$(_sent_bar $(( used * 100 / total )) 18)" "$used" "$total"
+    done
+    free -m 2>/dev/null | awk '/^Swap:/ { printf "%d %d\n", $3, $2 }' | while read -r used total; do
+        [ "${total:-0}" -gt 0 ] || continue
+        printf '  %-24s %s  %s / %s MB\n' "swap" "$(_sent_bar $(( used * 100 / total )) 18)" "$used" "$total"
+    done
+}
+hx_func_doc sys_mem "memory and swap usage"
+
+sys_load() {
+    local l1 l5 l15 cores
+    read -r l1 l5 l15 _ < /proc/loadavg
+    cores=$(nproc 2>/dev/null || echo 1)
+    hx_head "load"
+    printf '  %-24s %s  %s  %s   (%s cores)\n' "1 / 5 / 15 min" "$l1" "$l5" "$l15" "$cores"
+    printf '  %-24s %s\n' "uptime" "$(uptime -p 2>/dev/null || echo '?')"
+}
+hx_func_doc sys_load "load average and uptime"
+
+sys_top() {
+    hx_head "top processes by memory"
+    ps -eo pmem,pcpu,comm --sort=-pmem 2>/dev/null | head -6 \
+        | awk 'NR>1 { printf "  %5s%%mem %5s%%cpu  %s\n", $1, $2, $3 }'
+}
+hx_func_doc sys_top "the five hungriest processes"
+
+# repos [dir] — every git repo below a directory with uncommitted work.
+repos() {
+    local base="${1:-$HOME}" d dirty branch
+    hx_head "dirty repositories under ${base/#$HOME/\~}"
+    find "$base" -maxdepth 4 -type d -name .git 2>/dev/null | while read -r g; do
+        d=$(dirname "$g")
+        dirty=$(git -C "$d" status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+        [ "$dirty" = "0" ] && continue
+        branch=$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)
+        printf '  %s%-40s%s %s%-16s%s %s file(s)\n' \
+            "$HX_B" "${d/#$HOME/\~}" "$HX_R" "$HX_GRY" "$branch" "$HX_R" "$dirty"
+    done
+    printf '\n'
+}
+hx_func_doc repos "git repositories below a directory with uncommitted changes" "repos [dir]"
+
+# sentinel — the whole dashboard.
+sentinel() {
+    _help_conf_banner 2>/dev/null
+    sys_load
+    sys_mem
+    sys_disk
+    sys_top
+    printf '\n'
+}
+hx_func_doc sentinel "the full system dashboard"
+
+# A quiet disk check that can run on every prompt without being annoying:
+# it prints once per shell, only when a mount crosses the threshold.
+HX_SENT_WARNED=0
+_sent_check() {
+    [ "${HX_SENTINEL_WATCH:-0}" = "1" ] || return 0
+    [ "$HX_SENT_WARNED" = "1" ] && return 0
+    local worst
+    worst=$(df -h -x tmpfs -x devtmpfs 2>/dev/null | awk 'NR>1 { gsub(/%/,"",$5); if ($5+0 > m) { m=$5+0; p=$6 } } END { print m "|" p }')
+    case "$worst" in
+        ''|'|') return 0 ;;
+    esac
+    local pct="${worst%%|*}" mount="${worst#*|}"
+    if [ "${pct:-0}" -ge "$HX_SENTINEL_DISK_WARN" ]; then
+        hx_warn "disk $mount is ${pct}% full"
+        HX_SENT_WARNED=1
+    fi
+    return 0
+}
+hx_precmd_add _sent_check 2>/dev/null
+hx_var_doc HX_SENTINEL_WATCH "set to 1 to warn once per shell when a disk crosses the threshold"
+
+hx_complete sentinel disk mem load top

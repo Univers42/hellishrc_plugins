@@ -1,0 +1,178 @@
+# ~/.hellish/lib/core.hsh — registry, toggle engine, module loader.
+#
+# ── WHY A REGISTRY EXISTS ───────────────────────────────────────────────────
+# In bash you would build `help_conf` by introspection: `declare -F` lists every
+# function, `alias -p` every alias. In hellish 2.7.6 BOTH return empty (verified,
+# see ~/.context_conf.md). Nothing can discover what this config defined. So every
+# module *declares* what it provides via hx_feature/hx_item, and that declaration
+# is the single source of truth for help_conf, `conf`, and the test suite.
+#
+# ── WHY hx_aset EXISTS (interpreter bug shim) ───────────────────────────────
+# Assigning an array element from inside a function that was DEFINED IN A SOURCED
+# FILE is parsed as a command, not an assignment:
+#     $ cat lib.hsh          -->  declare -A M; f() { M[$1]=v; }
+#     $ hellish -c '. lib.hsh; f k'
+#     hellish: line 1: M[k]=v: command not found
+# The same code works inline under -c. Reads (${M[k]}) and appends (A+=(x)) are
+# fine; only subscripted WRITES break. Since every module here is a sourced file,
+# that would kill the whole registry -- hence hx_aset, which defers the value
+# through a positional parameter so it is expanded but never re-parsed.
+
+HX_VERSION="1.0.0"
+HX_HOME="${HX_HOME:-$HOME/.hellish}"
+HX_CONF="${HX_CONF:-$HX_HOME/hellish.conf}"
+HX_STATE="${HX_STATE:-$HX_HOME/state}"
+
+# --- registries -------------------------------------------------------------
+declare -A HX_FEAT_DESC HX_FEAT_STATE HX_FEAT_DEFAULT HX_FEAT_GROUP
+declare -A HX_ITEM_KIND HX_ITEM_DESC HX_ITEM_OWNER HX_ITEM_USAGE
+HX_FEAT_ORDER=()
+HX_ITEM_ORDER=()
+HX_LOADED=()
+HX_ERRORS=()
+
+# --- the shim ---------------------------------------------------------------
+# hx_aset <array> <key> <value>   — safe subscripted write (see header note).
+# The key is interpolated when the eval string is built, so it must be free of
+# whitespace and shell metacharacters; every key in this config is generated,
+# never user input, and hx_key_ok enforces that in the test suite.
+hx_aset() { eval "$1[$2]=\"\$3\""; }
+
+# hx_key_ok <key> — true when a key is safe to interpolate into a subscript.
+hx_key_ok() { case "$1" in ''|*[!A-Za-z0-9_:.-]*) return 1 ;; *) return 0 ;; esac; }
+
+# --- diagnostics ------------------------------------------------------------
+hx_debug() { [ "${HX_DEBUG:-0}" = "1" ] && printf '%s[hx]%s %s\n' "$HX_GRY" "$HX_R" "$*" >&2; return 0; }
+hx_error_record() { HX_ERRORS+=("$1"); }
+
+# hx_now_ms — millisecond clock for the startup profiler ($SECONDS is too coarse).
+hx_now_ms() {
+    local n
+    n=$(date +%s%N 2>/dev/null) || { echo 0; return; }
+    case "$n" in *N*|'') echo 0 ;; *) echo $(( n / 1000000 )) ;; esac
+}
+
+# --- feature registration ---------------------------------------------------
+# hx_feature <name> <on|off default> <group> <description>
+hx_feature() {
+    local name="$1" def="$2" group="$3"
+    shift 3
+    hx_key_ok "$name" || { hx_error_record "bad feature name: $name"; return 1; }
+    hx_aset HX_FEAT_DEFAULT "$name" "$def"
+    hx_aset HX_FEAT_GROUP   "$name" "$group"
+    hx_aset HX_FEAT_DESC    "$name" "$*"
+    # A value already parsed out of hellish.conf always wins over the default.
+    if [ -z "${HX_FEAT_STATE[$name]+set}" ]; then
+        hx_aset HX_FEAT_STATE "$name" "$def"
+    fi
+    HX_FEAT_ORDER+=("$name")
+    return 0
+}
+
+hx_enabled() { [ "${HX_FEAT_STATE[$1]:-off}" = "on" ]; }
+hx_known()   { [ -n "${HX_FEAT_DEFAULT[$1]+set}" ]; }
+hx_guard()   { hx_enabled "$1"; }   # first line of every optional module
+
+hx_set_state() { hx_aset HX_FEAT_STATE "$1" "$2"; }
+
+# --- item registration ------------------------------------------------------
+# hx_item <kind> <name> <owner> <description> [usage]
+#   kind: alias | func | var | opt | cmd | plugin
+hx_item() {
+    local kind="$1" name="$2" owner="$3" desc="$4" usage="${5:-}"
+    local key="$kind:$name"
+    hx_key_ok "$key" || { hx_error_record "bad item key: $key"; return 1; }
+    hx_aset HX_ITEM_KIND  "$key" "$kind"
+    hx_aset HX_ITEM_DESC  "$key" "$desc"
+    hx_aset HX_ITEM_OWNER "$key" "$owner"
+    hx_aset HX_ITEM_USAGE "$key" "$usage"
+    HX_ITEM_ORDER+=("$key")
+    return 0
+}
+
+hx_alias_doc()  { hx_item alias  "$1" "$HX_CURRENT_MODULE" "$2" "${3:-}"; }
+hx_func_doc()   { hx_item func   "$1" "$HX_CURRENT_MODULE" "$2" "${3:-}"; }
+hx_var_doc()    { hx_item var    "$1" "$HX_CURRENT_MODULE" "$2" "${3:-}"; }
+hx_opt_doc()    { hx_item opt    "$1" "$HX_CURRENT_MODULE" "$2" "${3:-}"; }
+hx_cmd_doc()    { hx_item cmd    "$1" "$HX_CURRENT_MODULE" "$2" "${3:-}"; }
+
+# --- config file ------------------------------------------------------------
+# Format:  feature <name> <on|off>   |   set <VAR> <value>
+hx_conf_load() {
+    [ -r "$HX_CONF" ] || return 0
+    local kind a b
+    while read -r kind a b; do
+        case "$kind" in
+            ''|'#'*) continue ;;
+            feature) [ -n "$a" ] && hx_aset HX_FEAT_STATE "$a" "$b" ;;
+            set)     [ -n "$a" ] && hx_key_ok "$a" && eval "$a=\"\$b\"" ;;
+            *)       hx_error_record "hellish.conf: unknown directive '$kind'" ;;
+        esac
+    done < "$HX_CONF"
+    return 0
+}
+
+hx_conf_save() {
+    local tmp="$HX_CONF.tmp.$$" name
+    {
+        printf '# ~/.hellish/hellish.conf\n'
+        printf '# Written by `conf save`. Hand-editing is fine: one directive per line.\n'
+        printf '#   feature <name> <on|off>   toggle a module or plugin\n'
+        printf '#   set     <VAR> <value>     set a configuration variable\n'
+        printf '# Generated %s\n\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+        for name in $(hx_feat_names_sorted); do
+            printf 'feature %-16s %s\n' "$name" "${HX_FEAT_STATE[$name]}"
+        done
+        printf '\n'
+        printf 'set %-16s %s\n' HX_THEME     "${HX_THEME:-box}"
+        printf 'set %-16s %s\n' HX_COLOR     "${HX_COLOR:-auto}"
+        printf 'set %-16s %s\n' HX_HIST_SIZE "${HX_HIST_SIZE:-20000}"
+    } > "$tmp" && command mv "$tmp" "$HX_CONF"
+}
+
+# sort -u: a `conf reload` re-appends names; the maps are idempotent, the
+# order arrays are not.
+hx_feat_names_sorted() {
+    [ "${#HX_FEAT_ORDER[@]}" -eq 0 ] && return 0
+    printf '%s\n' "${HX_FEAT_ORDER[@]}" | sort -u
+}
+hx_item_keys_sorted() {
+    [ "${#HX_ITEM_ORDER[@]}" -eq 0 ] && return 0
+    printf '%s\n' "${HX_ITEM_ORDER[@]}" | sort -u
+}
+
+# --- module loading ---------------------------------------------------------
+hx_source() {
+    local f="$1" t0 t1
+    [ -r "$f" ] || { hx_error_record "missing: $f"; return 1; }
+    if [ "${HX_PROFILE:-0}" = "1" ]; then
+        t0=$(hx_now_ms); . "$f"; t1=$(hx_now_ms)
+        printf '  %6s ms  %s\n' "$(( t1 - t0 ))" "${f#$HX_HOME/}" >&2
+    else
+        . "$f"
+    fi
+    HX_LOADED+=("$f")
+    return 0
+}
+
+# hx_load_dir <dir> — source *.hsh in lexical order (00-, 10-, ... 99-).
+hx_load_dir() {
+    local d="$1" f
+    [ -d "$d" ] || return 0
+    for f in "$d"/*.hsh; do
+        [ -r "$f" ] || continue      # hellish has no working nullglob: guard by hand
+        HX_CURRENT_MODULE="$(hx_module_name "$f")"
+        hx_source "$f"
+    done
+    HX_CURRENT_MODULE=core
+    return 0
+}
+
+# hx_module_name <path>  "40-functions.hsh" -> "functions"
+hx_module_name() {
+    local b="${1##*/}"
+    b="${b%.hsh}"
+    printf '%s' "${b#*-}"
+}
+
+HX_CURRENT_MODULE=core

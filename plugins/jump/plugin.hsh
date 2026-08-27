@@ -1,0 +1,153 @@
+# plugins/jump/plugin.hsh — frecency directory jumping (the `z` idea).
+#
+# Every directory you cd into is scored. `j <fragment>` jumps to the best match.
+# Score combines frequency and recency: each visit adds 1, and the ranking
+# multiplies by a recency factor so somewhere you used 40 times last year loses
+# to somewhere you used 5 times today.
+#
+# State: ~/.hellish/state/jump.db, one record per line:  score|last_epoch|path
+hx_plugin jump on nav "jump: frecency directory jumping, bookmarks, back-stack" || return 0
+
+HX_JUMP_DB="${HX_JUMP_DB:-$HX_STATE/jump.db}"
+HX_JUMP_MAX="${HX_JUMP_MAX:-800}"
+hx_var_doc HX_JUMP_DB  "frecency database for the jump plugin"
+hx_var_doc HX_JUMP_MAX "how many directories to remember before pruning"
+
+[ -f "$HX_JUMP_DB" ] || : > "$HX_JUMP_DB"
+
+# _jump_record <dir> — bump a directory's score.
+_jump_record() {
+    local dir="$1" now tmp
+    case "$dir" in
+        "$HOME"|/|"$HX_STATE"*) return 0 ;;      # not worth remembering
+    esac
+    [ -d "$dir" ] || return 0
+    now=$(date +%s)
+    tmp="$HX_JUMP_DB.$$"
+    # awk does the read-modify-write in one pass: bump if present, else append.
+    awk -F'|' -v d="$dir" -v now="$now" '
+        BEGIN { found = 0 }
+        $3 == d { printf "%d|%d|%s\n", $1 + 1, now, $3; found = 1; next }
+        NF == 3 { print }
+        END { if (!found) printf "1|%d|%s\n", now, d }
+    ' "$HX_JUMP_DB" > "$tmp" 2>/dev/null && command mv "$tmp" "$HX_JUMP_DB"
+    return 0
+}
+
+_jump_on_prompt() {
+    [ "$PWD" = "${HX_JUMP_LAST:-}" ] && return 0
+    HX_JUMP_LAST="$PWD"
+    _jump_record "$PWD"
+}
+hx_precmd_add _jump_on_prompt 2>/dev/null
+
+# _jump_rank [pattern] — score|path, best first. Recency multiplier:
+#   < 1h  x4     < 1d  x2     < 1w  x0.5     older  x0.25
+_jump_rank() {
+    local pat="${1:-}" now
+    now=$(date +%s)
+    awk -F'|' -v pat="$pat" -v now="$now" '
+        NF != 3 { next }
+        { age = now - $2
+          if      (age < 3600)   f = 4
+          else if (age < 86400)  f = 2
+          else if (age < 604800) f = 0.5
+          else                   f = 0.25
+          score = $1 * f
+          if (pat == "" || index(tolower($3), tolower(pat)) > 0)
+              printf "%.4f|%s\n", score, $3
+        }
+    ' "$HX_JUMP_DB" 2>/dev/null | sort -t'|' -k1,1 -rn
+}
+
+# j <fragment> — jump to the highest-scoring directory matching a fragment.
+j() {
+    local target
+    [ $# -eq 0 ] && { cd "$HOME" && return 0; }
+    # An existing path always wins over the database.
+    [ -d "$1" ] && { cd "$1" && _jump_record "$PWD" && pwd; return 0; }
+    target=$(_jump_rank "$*" | head -1 | cut -d'|' -f2-)
+    [ -n "$target" ] || { hx_err "jump: no match for '$*'"; return 1; }
+    [ -d "$target" ] || { hx_err "jump: '$target' no longer exists"; return 1; }
+    cd "$target" && _jump_record "$PWD" && pwd
+}
+hx_func_doc j "jump to the best-scoring directory matching a fragment" "j <fragment>"
+
+# jl [fragment] — list candidates with their scores instead of jumping.
+jl() {
+    local n=0 line score path
+    hx_head "jump candidates${1:+ matching '$1'}"
+    _jump_rank "${1:-}" | head -20 | while IFS='|' read -r score path; do
+        printf '  %s%8.1f%s  %s\n' "$HX_GRY" "$score" "$HX_R" "${path/#$HOME/\~}"
+    done
+    printf '\n'
+}
+hx_func_doc jl "list jump candidates and their scores" "jl [fragment]"
+
+# jrm <fragment> — forget matching directories.
+jrm() {
+    local tmp="$HX_JUMP_DB.$$"
+    [ -n "$1" ] || { hx_err "usage: jrm <fragment>"; return 2; }
+    awk -F'|' -v pat="$1" 'NF==3 && index(tolower($3), tolower(pat)) == 0' \
+        "$HX_JUMP_DB" > "$tmp" && command mv "$tmp" "$HX_JUMP_DB"
+    hx_ok "forgot entries matching '$1'"
+}
+hx_func_doc jrm "forget jump entries matching a fragment" "jrm <fragment>"
+
+# jclean — drop entries whose directory no longer exists, and prune to HX_JUMP_MAX.
+jclean() {
+    local tmp="$HX_JUMP_DB.$$" before after
+    before=$(wc -l < "$HX_JUMP_DB" | tr -d ' ')
+    : > "$tmp"
+    while IFS='|' read -r s t p; do
+        [ -n "$p" ] && [ -d "$p" ] && printf '%s|%s|%s\n' "$s" "$t" "$p" >> "$tmp"
+    done < "$HX_JUMP_DB"
+    sort -t'|' -k1,1 -rn "$tmp" | head -"$HX_JUMP_MAX" > "$HX_JUMP_DB"
+    command rm -f "$tmp"
+    after=$(wc -l < "$HX_JUMP_DB" | tr -d ' ')
+    hx_ok "jump database: $before -> $after entries"
+}
+hx_func_doc jclean "drop dead paths and prune the jump database"
+
+# ── bookmarks: explicit, never scored ───────────────────────────────────────
+HX_MARK_DB="${HX_MARK_DB:-$HX_STATE/marks.db}"
+[ -f "$HX_MARK_DB" ] || : > "$HX_MARK_DB"
+
+mark() {
+    local name="${1:-$(basename "$PWD")}" tmp="$HX_MARK_DB.$$"
+    case "$name" in *[!A-Za-z0-9_-]*) hx_err "mark names: letters, digits, _ and - only"; return 2 ;; esac
+    grep -v "^$name|" "$HX_MARK_DB" > "$tmp" 2>/dev/null
+    printf '%s|%s\n' "$name" "$PWD" >> "$tmp"
+    command mv "$tmp" "$HX_MARK_DB"
+    hx_ok "mark '$name' -> ${PWD/#$HOME/\~}"
+}
+hx_func_doc mark "bookmark the current directory" "mark [name]"
+
+to() {
+    local p
+    [ -n "$1" ] || { marks; return 0; }
+    p=$(grep "^$1|" "$HX_MARK_DB" 2>/dev/null | head -1 | cut -d'|' -f2-)
+    [ -n "$p" ] || { hx_err "no mark named '$1'"; return 1; }
+    cd "$p" && pwd
+}
+hx_func_doc to "jump to a bookmark (no argument lists them)" "to <name>"
+
+marks() {
+    hx_head "bookmarks"
+    if [ ! -s "$HX_MARK_DB" ]; then
+        printf '  %snone yet - use: mark [name]%s\n\n' "$HX_GRY" "$HX_R"; return 0
+    fi
+    while IFS='|' read -r n p; do
+        [ -n "$n" ] && printf '  %s%-14s%s %s\n' "$HX_B" "$n" "$HX_R" "${p/#$HOME/\~}"
+    done < "$HX_MARK_DB"
+    printf '\n'
+}
+hx_func_doc marks "list bookmarks"
+
+unmark() {
+    local tmp="$HX_MARK_DB.$$"
+    [ -n "$1" ] || { hx_err "usage: unmark <name>"; return 2; }
+    grep -v "^$1|" "$HX_MARK_DB" > "$tmp" 2>/dev/null && command mv "$tmp" "$HX_MARK_DB"
+    hx_ok "removed mark '$1'"
+}
+hx_func_doc unmark "remove a bookmark" "unmark <name>"

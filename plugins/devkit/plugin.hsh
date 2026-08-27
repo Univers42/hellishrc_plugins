@@ -1,0 +1,138 @@
+# plugins/devkit/plugin.hsh — one set of verbs for every project type.
+#
+# The idea: you should not have to remember whether this repo wants `npm test`,
+# `cargo test`, `pytest`, `go test ./...` or `make test`. devkit detects the
+# project from the files in the tree and dispatches.
+hx_plugin devkit on dev "devkit: project detection, universal run/build/test/fmt/lint" || return 0
+
+# proj_type — the marker file wins in this order (most specific first).
+proj_type() {
+    local d="${1:-$PWD}"
+    [ -f "$d/Cargo.toml" ]        && { echo rust;   return; }
+    [ -f "$d/go.mod" ]            && { echo go;     return; }
+    [ -f "$d/pyproject.toml" ]    && { echo python; return; }
+    [ -f "$d/setup.py" ]          && { echo python; return; }
+    [ -f "$d/requirements.txt" ]  && { echo python; return; }
+    [ -f "$d/package.json" ]      && { echo node;   return; }
+    [ -f "$d/pom.xml" ]           && { echo maven;  return; }
+    [ -f "$d/build.gradle" ]      && { echo gradle; return; }
+    [ -f "$d/CMakeLists.txt" ]    && { echo cmake;  return; }
+    [ -f "$d/Makefile" ]          && { echo make;   return; }
+    [ -f "$d/Dockerfile" ]        && { echo docker; return; }
+    echo unknown
+}
+hx_func_doc proj_type "detect the project type of a directory" "proj_type [dir]"
+
+# proj_root — nearest ancestor holding a project marker or .git.
+proj_root() {
+    local d="$PWD"
+    while [ "$d" != "/" ]; do
+        [ -d "$d/.git" ] && { printf '%s\n' "$d"; return 0; }
+        [ "$(proj_type "$d")" != "unknown" ] && { printf '%s\n' "$d"; return 0; }
+        d=$(dirname "$d")
+    done
+    return 1
+}
+hx_func_doc proj_root "nearest directory above here that looks like a project"
+
+# _devkit_node_script <name> — does package.json declare this script?
+_devkit_node_script() {
+    [ -f package.json ] || return 1
+    grep -q "\"$1\"[[:space:]]*:" package.json 2>/dev/null
+}
+
+# _devkit_runner — npm / pnpm / yarn / bun, whichever this repo uses.
+_devkit_runner() {
+    [ -f bun.lockb ]         && { echo bun;  return; }
+    [ -f pnpm-lock.yaml ]    && { echo pnpm; return; }
+    [ -f yarn.lock ]         && { echo yarn; return; }
+    echo npm
+}
+
+# _devkit_make_target <name> — does the Makefile have this target?
+_devkit_make_target() {
+    [ -f Makefile ] || return 1
+    grep -qE "^$1[[:space:]]*:" Makefile 2>/dev/null
+}
+
+# _devkit_do <verb> — the dispatch table.
+_devkit_do() {
+    local verb="$1" t r
+    shift
+    t=$(proj_type)
+    r=$(_devkit_runner)
+    case "$t:$verb" in
+        rust:build)  cargo build "$@" ;;
+        rust:run)    cargo run "$@" ;;
+        rust:test)   cargo test "$@" ;;
+        rust:fmt)    cargo fmt "$@" ;;
+        rust:lint)   cargo clippy "$@" ;;
+
+        go:build)    go build ./... ;;
+        go:run)      go run . "$@" ;;
+        go:test)     go test ./... "$@" ;;
+        go:fmt)      go fmt ./... ;;
+        go:lint)     go vet ./... ;;
+
+        python:test) if command -v pytest >/dev/null 2>&1; then pytest "$@"; else python3 -m unittest "$@"; fi ;;
+        python:fmt)  command -v ruff >/dev/null 2>&1 && ruff format . || black . ;;
+        python:lint) command -v ruff >/dev/null 2>&1 && ruff check . || python3 -m pyflakes . ;;
+        python:run)  python3 "$@" ;;
+        python:build) python3 -m build "$@" ;;
+
+        node:*)      if _devkit_node_script "$verb"; then "$r" run "$verb" "$@"
+                     else hx_err "package.json has no \"$verb\" script"; return 1; fi ;;
+
+        maven:build) mvn package "$@" ;;
+        maven:test)  mvn test "$@" ;;
+        gradle:build) ./gradlew build "$@" ;;
+        gradle:test)  ./gradlew test "$@" ;;
+
+        cmake:build) cmake -B build && cmake --build build "$@" ;;
+        cmake:test)  ctest --test-dir build "$@" ;;
+
+        make:*)      if _devkit_make_target "$verb"; then make "$verb" "$@"
+                     else hx_err "Makefile has no '$verb' target"; return 1; fi ;;
+
+        *) hx_err "don't know how to '$verb' a '$t' project"; return 1 ;;
+    esac
+}
+
+build() { _devkit_do build "$@"; }
+run()   { _devkit_do run   "$@"; }
+test_() { _devkit_do test  "$@"; }
+fmt()   { _devkit_do fmt   "$@"; }
+lint()  { _devkit_do lint  "$@"; }
+hx_func_doc build "build this project, whatever kind it is" "build [args]"
+hx_func_doc run   "run this project" "run [args]"
+hx_func_doc test_ "test this project (named test_ so it never shadows the 'test' builtin)" "test_ [args]"
+hx_func_doc fmt   "format this project's source"
+hx_func_doc lint  "lint this project"
+
+# proj — what am I looking at?
+proj() {
+    local r t
+    r=$(proj_root) || { hx_err "no project here"; return 1; }
+    t=$(proj_type "$r")
+    hx_head "$(basename "$r")"
+    hx_kv "type" "$t"
+    hx_kv "root" "${r/#$HOME/\~}"
+    [ "$t" = "node" ] && hx_kv "runner" "$(_devkit_runner)"
+    command -v git >/dev/null 2>&1 && [ -d "$r/.git" ] && hx_kv "branch" "$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+    [ -f "$r/.env" ] && hx_kv "env file" ".env present (envload to export it)"
+    printf '\n%s  verbs%s\n' "$HX_ORA" "$HX_R"
+    printf '    build  run  test_  fmt  lint\n\n'
+}
+hx_func_doc proj "describe the project you are standing in"
+
+# scratch <ext> — a throwaway file of the right type, opened in $EDITOR.
+scratch() {
+    local ext="${1:-sh}" f
+    f="$HX_STATE/scratch-$(date +%Y%m%d-%H%M%S).$ext"
+    : > "$f"
+    "${EDITOR:-vi}" "$f"
+    printf '%s\n' "$f"
+}
+hx_func_doc scratch "open a timestamped scratch file in \$EDITOR" "scratch [extension]"
+
+hx_complete proj build run test_ fmt lint

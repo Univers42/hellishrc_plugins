@@ -1,0 +1,156 @@
+# ~/.hellish/lib/plugin.hsh — plugin contract + manager.
+#
+# ── THE PLUGIN CONTRACT ─────────────────────────────────────────────────────
+# A plugin is a directory ~/.hellish/plugins/<name>/ containing plugin.hsh.
+# Its first executable line MUST be:
+#
+#     hx_plugin <name> <on|off default> <group> "<one-line description>" || return 0
+#
+# hx_plugin registers the plugin as a toggleable feature and returns non-zero
+# when the user has it switched off, so `|| return 0` skips the rest of the file
+# at zero cost. Everything after that line may assume the plugin is enabled.
+#
+# Inside, a plugin should:
+#   * declare external dependencies with  hx_needs <cmd> ...
+#   * document every alias/function it defines with hx_alias_doc / hx_func_doc
+#   * prefix private helpers with _<name>_ to avoid collisions
+#
+# `return` from a sourced file is supported by hellish (verified).
+
+HX_PLUGIN_DIR="${HX_PLUGIN_DIR:-$HX_HOME/plugins}"
+declare -A HX_PLUG_DESC HX_PLUG_GROUP HX_PLUG_NEEDS HX_PLUG_MISSING
+HX_PLUG_ORDER=()
+
+# hx_plugin <name> <default> <group> <desc>  -> 0 if enabled, 1 if disabled
+hx_plugin() {
+    local name="$1" def="$2" group="$3" desc="$4"
+    HX_CURRENT_MODULE="$name"
+    hx_feature "$name" "$def" "$group" "$desc"
+    hx_item plugin "$name" "$name" "$desc"
+    hx_aset HX_PLUG_DESC  "$name" "$desc"
+    hx_aset HX_PLUG_GROUP "$name" "$group"
+    HX_PLUG_ORDER+=("$name")
+    hx_enabled "$name"
+}
+
+# hx_needs <cmd> [cmd ...] — record external dependencies of the current plugin.
+# Never fails the load: a plugin degrades, it does not explode. Missing commands
+# surface in `hxp doctor` and `help_conf --doctor`.
+hx_needs() {
+    local p="$HX_CURRENT_MODULE" c miss=
+    for c in "$@"; do
+        command -v "$c" >/dev/null 2>&1 || miss="$miss $c"
+    done
+    hx_aset HX_PLUG_NEEDS "$p" "$*"
+    [ -n "$miss" ] && hx_aset HX_PLUG_MISSING "$p" "${miss# }"
+    return 0
+}
+
+# hx_have <cmd> — guard for a single optional command inside a function.
+hx_have() { command -v "$1" >/dev/null 2>&1; }
+
+hx_plugins_sorted() {
+    [ "${#HX_PLUG_ORDER[@]}" -eq 0 ] && return 0
+    printf '%s\n' "${HX_PLUG_ORDER[@]}" | sort -u
+}
+
+# hx_load_plugins — discover and source every plugin directory.
+hx_load_plugins() {
+    local d name
+    [ -d "$HX_PLUGIN_DIR" ] || return 0
+    for d in "$HX_PLUGIN_DIR"/*/; do
+        [ -d "$d" ] || continue               # no nullglob: guard by hand
+        [ -r "$d/plugin.hsh" ] || continue
+        name="${d%/}"; name="${name##*/}"
+        hx_source "$d/plugin.hsh"
+    done
+    HX_CURRENT_MODULE=core
+    return 0
+}
+
+# ── hxp: the plugin manager command ─────────────────────────────────────────
+hxp() {
+    local cmd="${1:-list}"
+    [ $# -gt 0 ] && shift
+    case "$cmd" in
+        list|ls)   _hxp_list ;;
+        info)      _hxp_info "$1" ;;
+        enable|on) _hxp_switch "$1" on ;;
+        disable|off) _hxp_switch "$1" off ;;
+        doctor)    _hxp_doctor ;;
+        path)      printf '%s\n' "$HX_PLUGIN_DIR" ;;
+        new)       hx_have forge_new && forge_new "$@" || hx_err "the 'forge' plugin provides 'hxp new' (conf on forge)" ;;
+        help|-h|--help) _hxp_help ;;
+        *)         hx_err "hxp: unknown command '$cmd'"; _hxp_help; return 2 ;;
+    esac
+}
+
+_hxp_help() {
+    hx_head "hxp — plugin manager"
+    hx_kv "hxp list"           "installed plugins and their state"
+    hx_kv "hxp info <name>"    "description, group, dependencies, what it defines"
+    hx_kv "hxp enable <name>"  "turn a plugin on (persisted)"
+    hx_kv "hxp disable <name>" "turn a plugin off (persisted)"
+    hx_kv "hxp doctor"         "report missing external dependencies"
+    hx_kv "hxp new <name>"     "scaffold a new plugin (needs the 'forge' plugin)"
+    hx_kv "hxp path"           "print the plugin directory"
+    printf '\n'
+}
+
+_hxp_list() {
+    local n miss
+    hx_head "plugins"
+    for n in $(hx_plugins_sorted); do
+        miss="${HX_PLUG_MISSING[$n]:-}"
+        printf '  '
+        hx_badge "${HX_FEAT_STATE[$n]:-off}"
+        printf ' %s%-10s%s %s' "$HX_B" "$n" "$HX_R" "${HX_PLUG_DESC[$n]}"
+        [ -n "$miss" ] && printf ' %s(missing:%s)%s' "$HX_YEL" "$miss" "$HX_R"
+        printf '\n'
+    done
+    printf '\n  %s%s%s\n' "$HX_GRY" "hxp info <name> for detail - conf on|off <name> to toggle" "$HX_R"
+}
+
+_hxp_info() {
+    local n="$1" key kind
+    [ -n "$n" ] || { hx_err "usage: hxp info <name>"; return 2; }
+    hx_known "$n" || { hx_err "no such plugin: $n"; return 1; }
+    hx_head "$n"
+    hx_kv "state"   "$(hx_badge "${HX_FEAT_STATE[$n]:-off}")"
+    hx_kv "group"   "${HX_PLUG_GROUP[$n]:-?}"
+    hx_kv "purpose" "${HX_PLUG_DESC[$n]:-?}"
+    [ -n "${HX_PLUG_NEEDS[$n]:-}" ]   && hx_kv "requires" "${HX_PLUG_NEEDS[$n]}"
+    [ -n "${HX_PLUG_MISSING[$n]:-}" ] && hx_kv "missing"  "${HX_YEL}${HX_PLUG_MISSING[$n]}${HX_R}"
+    printf '\n%s  provides%s\n' "$HX_ORA" "$HX_R"
+    for key in $(hx_item_keys_sorted); do
+        [ "${HX_ITEM_OWNER[$key]:-}" = "$n" ] || continue
+        kind="${HX_ITEM_KIND[$key]}"
+        [ "$kind" = "plugin" ] && continue
+        printf '    %s%-6s%s %s%-18s%s %s\n' \
+            "$HX_GRY" "$kind" "$HX_R" "$HX_B" "${key#*:}" "$HX_R" "${HX_ITEM_DESC[$key]}"
+    done
+    printf '\n'
+}
+
+_hxp_switch() {
+    local n="$1" want="$2"
+    [ -n "$n" ] || { hx_err "usage: hxp $want <name>"; return 2; }
+    hx_known "$n" || { hx_err "no such feature: $n"; return 1; }
+    hx_set_state "$n" "$want"
+    hx_conf_save
+    hx_ok "$n -> $want   (run 'conf reload' or open a new shell)"
+}
+
+_hxp_doctor() {
+    local n bad=0
+    hx_head "plugin doctor"
+    for n in $(hx_plugins_sorted); do
+        if [ -n "${HX_PLUG_MISSING[$n]:-}" ]; then
+            printf '  %s%-10s%s missing:%s\n' "$HX_YEL" "$n" "$HX_R" "${HX_PLUG_MISSING[$n]}"
+            bad=$((bad + 1))
+        fi
+    done
+    [ "$bad" -eq 0 ] && hx_ok "every enabled plugin has its dependencies"
+    printf '\n'
+    return 0
+}
