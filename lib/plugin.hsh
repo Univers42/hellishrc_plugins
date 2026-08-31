@@ -77,6 +77,10 @@ hxp() {
         info)      _hxp_info "$1" ;;
         enable|on) _hxp_switch "$1" on ;;
         disable|off) _hxp_switch "$1" off ;;
+        install|add) _hxp_install "$1" ;;
+        remove|rm)  _hxp_remove "$1" ;;
+        update|up)  _hxp_update "${1:-}" ;;
+        catalog)   _hxp_catalog ;;
         doctor)    _hxp_doctor ;;
         path)      printf '%s\n' "$HX_PLUGIN_DIR" ;;
         new)       hx_have forge_new && forge_new "$@" || hx_err "the 'forge' plugin provides 'hxp new' (conf on forge)" ;;
@@ -88,13 +92,66 @@ hxp() {
 _hxp_help() {
     hx_head "hxp — plugin manager"
     hx_kv "hxp list"           "installed plugins and their state"
+    hx_kv "hxp catalog"        "everything installable, installed or not"
     hx_kv "hxp info <name>"    "description, group, dependencies, what it defines"
+    hx_kv "hxp install <name>" "fetch an external plugin from the catalog"
+    hx_kv "hxp remove <name>"  "delete a fetched plugin's directory"
+    hx_kv "hxp update [name]"  "re-fetch one external plugin, or all of them"
     hx_kv "hxp enable <name>"  "turn a plugin on (persisted)"
     hx_kv "hxp disable <name>" "turn a plugin off (persisted)"
     hx_kv "hxp doctor"         "report missing external dependencies"
     hx_kv "hxp new <name>"     "scaffold a new plugin (needs the 'forge' plugin)"
     hx_kv "hxp path"           "print the plugin directory"
     printf '\n'
+}
+
+# ── external plugins: install / remove / update ─────────────────────────────
+# The heavy lifting is bin/hx-fetch-plugin, a plain-sh script shared with the
+# framework installer, so "how a plugin is fetched" exists exactly once.
+_hxp_catalog() {
+    local name kind url def desc
+    [ -f "$HX_HOME/plugins/catalog.tsv" ] || { hx_err "no catalog installed"; return 1; }
+    hx_head "catalog"
+    while IFS='	' read -r name kind url def desc; do
+        case "$name" in ''|'#'*) continue ;; esac
+        printf '  '
+        if [ -d "$HX_PLUGIN_DIR/$name" ]; then hx_badge on; else hx_badge off; fi
+        printf ' %s%-22s%s %s%-8s%s %s\n' \
+            "$HX_B" "$name" "$HX_R" "$HX_GRY" "$kind" "$HX_R" "$desc"
+    done < "$HX_HOME/plugins/catalog.tsv"
+    printf '\n  %shxp install <name> to fetch an external one%s\n' "$HX_GRY" "$HX_R"
+}
+
+_hxp_install() {
+    [ -n "${1:-}" ] || { hx_err "usage: hxp install <name>   (hxp catalog to browse)"; return 2; }
+    sh "$HX_HOME/bin/hx-fetch-plugin" "$1" || return 1
+    hx_ok "$1 installed — open a new shell or run: conf reload"
+}
+
+_hxp_remove() {
+    local n="${1:-}"
+    [ -n "$n" ] || { hx_err "usage: hxp remove <name>"; return 2; }
+    [ -d "$HX_PLUGIN_DIR/$n" ] || { hx_err "not installed: $n"; return 1; }
+    rm -rf "$HX_PLUGIN_DIR/$n"
+    hx_ok "$n removed — open a new shell or run: conf reload"
+}
+
+_hxp_update() {
+    local n d
+    if [ -n "${1:-}" ]; then
+        _hxp_install "$1"
+        return
+    fi
+    for d in "$HX_PLUGIN_DIR"/*/; do
+        [ -d "$d" ] || continue
+        n="${d%/}"; n="${n##*/}"
+        # only what the catalog knows and did not ship builtin
+        grep -v '^#' "$HX_HOME/plugins/catalog.tsv" 2>/dev/null \
+            | awk -F'	' -v p="$n" '$1 == p && $2 != "builtin" { found = 1 } END { exit !found }' \
+            || continue
+        sh "$HX_HOME/bin/hx-fetch-plugin" "$n" && hx_ok "updated $n"
+    done
+    return 0
 }
 
 _hxp_list() {

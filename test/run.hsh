@@ -206,13 +206,21 @@ t_defined sentinel  "sentinel: sentinel defined"
 t_defined forge     "forge: forge defined"
 
 t_eq "unknown" "$(proj_type /tmp)"        "devkit detects an unknown directory"
-t_eq "make"    "$(proj_type $HOME/hellish)" "devkit detects a Makefile project"
+# a project of our own making, so the test does not assume anything about
+# this machine's home directory
+_pt=$(mktemp -d); : > "$_pt/Makefile"
+t_eq "make"    "$(proj_type $_pt)"        "devkit detects a Makefile project"
+rm -rf "$_pt"
 
 # jump database round-trip
 _jbak=$(mktemp); cp "$HX_JUMP_DB" "$_jbak" 2>/dev/null
 _jump_record /tmp
 t_true "jump records a directory" grep -q '|/tmp$' "$HX_JUMP_DB"
-t_true "jump ranks candidates"    sh -c "[ -n \"\$(. $HOME/.hellishrc >/dev/null 2>&1; _jump_rank tmp)\" ]"
+# rank in THIS shell: the functions are loaded, so asking a child sh to
+# re-source everything only tested the child's dialect
+if [ -n "$(_jump_rank tmp)" ]; then t_ok "jump ranks candidates"
+else t_bad "jump ranks candidates"
+fi
 cp "$_jbak" "$HX_JUMP_DB" 2>/dev/null; rm -f "$_jbak"
 
 # net: waitport must fail fast on a dead port
@@ -250,14 +258,21 @@ hx_precmd_add _dupe_probe; hx_precmd_add _dupe_probe
 t_eq "1" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep -c '^_dupe_probe$')" "hx_precmd_add de-duplicates"
 
 # ── the AI block is preserved verbatim ──────────────────────────────────────
+# Only meaningful on a machine that migrated an older ~/.hellishrc: the
+# installer keeps a snapshot when it preserves one. A fresh install has
+# nothing to have preserved, which is not a failure.
 t_head "preserved content"
-t_true "original rc snapshot still present" test -r "$HX_STATE/original-hellishrc.snapshot"
-if diff -q <(sed -n '/original ~\/.hellishrc content below/,/end of original content/p' \
-        "$HX_HOME/rc.d/80-ai.hsh" | sed '1d;$d') \
-        "$HX_STATE/original-hellishrc.snapshot" >/dev/null 2>&1; then
-    t_ok "80-ai.hsh reproduces the original rc byte for byte"
+if [ -r "$HX_STATE/original-hellishrc.snapshot" ]; then
+    t_ok "original rc snapshot still present"
+    if diff -q <(sed -n '/original ~\/.hellishrc content below/,/end of original content/p' \
+            "$HX_HOME/rc.d/80-ai.hsh" | sed '1d;$d') \
+            "$HX_STATE/original-hellishrc.snapshot" >/dev/null 2>&1; then
+        t_ok "80-ai.hsh reproduces the original rc byte for byte"
+    else
+        t_bad "80-ai.hsh has drifted from the original rc"
+    fi
 else
-    t_bad "80-ai.hsh has drifted from the original rc"
+    t_skip "no migrated rc on this machine — nothing to have preserved"
 fi
 
 # ── summary ─────────────────────────────────────────────────────────────────

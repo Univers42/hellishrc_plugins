@@ -1,0 +1,32 @@
+# The plugin catalog — every plugin an installer or `hxp install` can offer.
+#
+# TAB-separated:  name  kind  source  default  description
+#   kind    builtin  ships in this repo under plugins/<name>/
+#           zsh      a real zsh plugin, sourced through hellish's zsh dialect
+#           sh       plain sh/bash, sourced directly
+#   source  "-" for builtin, else the URL of the single file to fetch
+#   default on|off — what "install all" enables
+#
+# Adding a plugin = adding a line here. Nothing else changes: hellish's
+# install.sh and `hxp install` both read this file.
+#
+# Descriptions are embedded in DOUBLE QUOTES by the wrapper generator: keep
+# them free of backticks, $ and backslashes, or they execute at load time.
+git	builtin	-	on	repo status, safe undo, wip commits, branch cleanup
+jump	builtin	-	on	frecency directory jumping (j, marks)
+devkit	builtin	-	on	build/run helpers for C and 42 projects
+docker	builtin	-	on	container shortcuts and cleanup
+net	builtin	-	on	ip, ports, http serve, speed checks
+sentinel	builtin	-	on	greeting + system report
+forge	builtin	-	on	write and scaffold your own plugins (hxp new)
+omz-sudo	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/sudo/sudo.plugin.zsh	on	ESC-ESC prepends sudo to the line
+omz-extract	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/extract/extract.plugin.zsh	on	the extract command opens any archive
+omz-dirhistory	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/dirhistory/dirhistory.plugin.zsh	on	Alt-Left/Alt-Right walk your cd history
+omz-colored-man-pages	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/colored-man-pages/colored-man-pages.plugin.zsh	on	man pages in colour
+omz-copypath	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/copypath/copypath.plugin.zsh	off	copy the cwd to the clipboard
+omz-jsontools	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/jsontools/jsontools.plugin.zsh	off	pretty-print and validate JSON
+omz-web-search	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/web-search/web-search.plugin.zsh	off	search the web from the prompt (google foo)
+git-completion	sh	https://raw.githubusercontent.com/git/git/master/contrib/completion/git-completion.bash	on	git's own TAB completion (needs shopt -s progcomp)
+git-prompt	sh	https://raw.githubusercontent.com/git/git/master/contrib/completion/git-prompt.sh	on	__git_ps1 for your prompt
+bash-preexec	sh	https://raw.githubusercontent.com/rcaloras/bash-preexec/master/bash-preexec.sh	off	preexec/precmd hooks, bash style
+z	sh	https://raw.githubusercontent.com/rupa/z/master/z.sh	off	the classic frecency jumper
