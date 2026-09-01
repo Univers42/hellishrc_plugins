@@ -1,0 +1,134 @@
+#!/usr/bin/env hellish
+# test/prompt.hsh — assertions for examples/hellishrc.
+#
+#   hellish test/prompt.hsh
+#
+# Loads the rc with HX_FORCE=1 (which bypasses the interactivity guard) into
+# the current shell, then checks the collectors, the theme registry and the
+# helpers that the prompt depends on. Everything here runs without a tty.
+
+HX_RC_UNDER_TEST="${HX_RC_UNDER_TEST:-$(dirname "$0")/../examples/hellishrc}"
+HX_FORCE=1
+HX_PROMPT_CONF=/dev/null
+. "$HX_RC_UNDER_TEST"
+
+hx_fail=0
+hx_run=0
+
+ck() {
+    hx_run=$((hx_run + 1))
+    if [ "$2" = "$3" ]; then
+        printf '  %sok%s   %s\n' "$HX_fgreen" "$HX_r" "$1"
+    else
+        printf '  %sFAIL%s %s\n        got  [%s]\n        want [%s]\n' \
+            "$HX_fred" "$HX_r" "$1" "$2" "$3"
+        hx_fail=$((hx_fail + 1))
+    fi
+}
+
+ckn() {   # non-empty
+    hx_run=$((hx_run + 1))
+    if [ -n "$2" ]; then
+        printf '  %sok%s   %s = %s\n' "$HX_fgreen" "$HX_r" "$1" "$2"
+    else
+        printf '  %sFAIL%s %s is empty\n' "$HX_fred" "$HX_r" "$1"
+        hx_fail=$((hx_fail + 1))
+    fi
+}
+
+printf '\n%sregistry%s\n' "$HX_bd$HX_forange" "$HX_r"
+ck 'HX_THEMES has 30 entries' "$(printf '%s\n' $HX_THEMES | grep -c .)" 30
+hx_missing=''
+for hx_t in $HX_THEMES; do
+    command -v "hx_theme_$hx_t" >/dev/null 2>&1 || hx_missing="$hx_missing $hx_t"
+done
+ck 'every listed theme is defined' "$hx_missing" ''
+
+printf '\n%severy theme renders%s\n' "$HX_bd$HX_forange" "$HX_r"
+hx_collect 0
+hx_bad=''
+for hx_t in $HX_THEMES; do
+    HX_THEME="$hx_t"; hx_build
+    [ -n "$HX_PS1" ] || hx_bad="$hx_bad $hx_t"
+done
+ck 'with colour, live data' "$hx_bad" ''
+
+HX_COLOR=none; hx_palette; hx_collect 0
+hx_bad=''
+for hx_t in $HX_THEMES; do
+    HX_THEME="$hx_t"; hx_build
+    [ -n "$HX_PS1" ] || hx_bad="$hx_bad $hx_t"
+    # With colour off nothing may emit an escape.
+    case "$HX_PS1" in *"$HX_ESC"*) hx_bad="$hx_bad esc:$hx_t" ;; esac
+done
+ck 'with HX_COLOR=none, no escapes' "$hx_bad" ''
+HX_COLOR=24; hx_palette
+HX_THEME=hellish
+
+printf '\n%sutilities%s\n' "$HX_bd$HX_forange" "$HX_r"
+hx_dur 500;    ck 'hx_dur 500'    "$HX_RET" '500ms'
+hx_dur 1500;   ck 'hx_dur 1500'   "$HX_RET" '1.5s'
+hx_dur 90000;  ck 'hx_dur 90000'  "$HX_RET" '1m30s'
+hx_dur 7200000;ck 'hx_dur 7200000' "$HX_RET" '2h0m'
+hx_repeat '-' 4; ck 'hx_repeat'   "$HX_RET" '----'
+hx_ms10 1650 40; ck 'hx_ms10'     "$HX_RET" '41.2 ms'
+
+hx_strip "$(printf '\033[38;5;80mHI\033[0m!')"
+ck 'hx_strip removes SGR' "$HX_RET" 'HI!'
+hx_vwidth "$(printf '\033[1m12:34:56\033[0m')"
+ck 'hx_vwidth ignores escapes' "$HX_W" 8
+
+hx_signame 139; ck 'hx_signame 139' "$HX_RET" 'SIGSEGV'
+hx_signame 130; ck 'hx_signame 130' "$HX_RET" 'SIGINT'
+hx_signame 1;   ck 'hx_signame 1'   "$HX_RET" ''
+
+HX_PATH_STYLE=full; HX_PATH_MAX=2
+hx_shorten "$HOME/a/b/c"; ck 'hx_shorten elides' "$HX_RET" "$HX_G_ELL/b/c"
+HX_PATH_STYLE=tail
+hx_shorten "$HOME/a/b/c"; ck 'hx_shorten tail'   "$HX_RET" 'c'
+HX_PATH_STYLE=full; HX_PATH_MAX=4
+
+printf '\n%sconfig safety%s\n' "$HX_bd$HX_forange" "$HX_r"
+ck 'HX_HOME is not settable'  "$(hx_key_valid HX_HOME  && echo yes || echo no)" 'no'
+ck 'HX_STATE is not settable' "$(hx_key_valid HX_STATE && echo yes || echo no)" 'no'
+ck 'HX_THEME is settable'     "$(hx_key_valid HX_THEME && echo yes || echo no)" 'yes'
+# hx_key_valid must not clobber its caller's loop variable (it used to).
+hx_k=sentinel; hx_key_valid HX_THEME >/dev/null
+ck 'hx_key_valid keeps hx_k'  "$hx_k" 'sentinel'
+# NB: written with `if`, not `$(case ...)`. hellish cannot parse a case
+# statement inside a command substitution (bash and dash both can), so that
+# construct is avoided throughout this repository.
+hx_clash=separate
+case "$HX_PROMPT_CONF" in */hellish.conf) hx_clash=clash ;; esac
+ck 'prompt conf is not hellish.conf' "$hx_clash" 'separate'
+
+printf '\n%sclock%s\n' "$HX_bd$HX_forange" "$HX_r"
+ckn 'clock source' "$HX_CLOCK"
+hx_now_ms; hx_t0="$HX_RET"
+hx_now_ms; hx_t1="$HX_RET"
+ck 'hx_now_ms is monotonic' "$([ "$hx_t1" -ge "$hx_t0" ] && echo yes || echo no)" 'yes'
+hx_num=yes
+case "$hx_t0" in ''|*[!0-9]*) hx_num=no ;; esac
+ck 'hx_now_ms is numeric' "$hx_num" 'yes'
+# The preexec guard is what makes durations work at all; see section 11.
+HX_ARMED=0; HX_T0=''
+hx_preexec; hx_first="$HX_T0"
+hx_preexec                      # the second DEBUG fire must not re-stamp
+ck 'preexec double-fire guarded' "$HX_T0" "$hx_first"
+
+printf '\n%scollectors%s\n' "$HX_bd$HX_forange" "$HX_r"
+hx_collect 0
+ckn 'HX_P'  "$HX_P"
+ckn 'HX_U'  "$HX_U"
+ck  'HX_X'  "$HX_X" 0
+hx_collect 139
+ck  'HX_XSIG for 139' "$HX_XSIG" 'SIGSEGV'
+ck  'HX_XOK for 139'  "$HX_XOK" 0
+
+printf '\n'
+if [ "$hx_fail" = "0" ]; then
+    printf '%s%s all %s checks passed%s\n\n' "$HX_fgreen" "$HX_G_OK" "$hx_run" "$HX_r"
+else
+    printf '%s%s %s of %s checks failed%s\n\n' "$HX_fred" "$HX_G_BAD" "$hx_fail" "$hx_run" "$HX_r"
+fi
+exit "$hx_fail"

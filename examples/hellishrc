@@ -1,0 +1,2236 @@
+# ~/.hellishrc
+# ============================================================================
+# HELLISH — monolithic interactive shell rc
+# ============================================================================
+#
+# Single-file, self-contained, zero dependencies beyond a POSIX shell.
+# Drives the prompt, the context collectors, and a small command suite (`hx`).
+#
+# Design constraints:
+#
+#   1. The ENTIRE file is POSIX-parseable. No arrays, no [[ ]], no ${x//a/b}
+#      outside of eval, no process substitution. This means dash, bash, zsh
+#      and hellish(1) can all parse it top to bottom without a syntax error,
+#      even if they cannot execute every branch.
+#
+#   2. Feature detection is runtime, not compile-time. Everything degrades:
+#      no colors -> plain text, no unicode -> ASCII, no git -> no vcs segment,
+#      no monotonic clock -> second-resolution timings.
+#
+#   3. `return` is never used at top level. The whole loader is if/else.
+#
+#   4. The last statement is `:` so sourcing NEVER poisons $? and therefore
+#      never makes the first prompt render a bogus failure marker.
+#
+#   5. Nothing here forks on a fast path. Rendering a prompt in a warm cache
+#      is pure parameter expansion. `hx bench` measures it; keep it honest.
+#
+# Commands:
+#
+#       hx                  status card
+#       hx theme            theme control (list/set/next/prev/random/demo)
+#       hx conf             get/set/list/edit/reset configuration
+#       hx doctor           capability + health report
+#       hx bench [N]        measure prompt render cost
+#       hx segments         dump every collected value, right now
+#       hx colors           color ramps for the detected depth
+#       hx glyphs           unicode / nerd font test card
+#       hx banner           the boot card
+#       hx keys             keybindings this shell actually honors
+#       hx reload           re-source this file
+#       hx help             everything above, documented
+#
+#   Aliases: `theme` and `prompt` map to `hx theme`.
+#
+# Config: environment, or ~/.hellish/prompt.conf as plain KEY=VALUE lines.
+# (prompt.conf is deliberately NOT hellish.conf — that file belongs to the
+#  plugin framework and uses a different grammar. Writing to it would eat
+#  the user's `feature <name> on` lines.)
+#
+#   HX_THEME            theme name                      (default: hellish)
+#   HX_COLOR            auto|24|256|8|none              (default: auto)
+#   HX_UNICODE          auto|1|0                        (default: auto)
+#   HX_NERD             1|0     powerline/branch glyphs (default: 0)
+#   HX_GIT              1|0     enable vcs segment      (default: 1)
+#   HX_GIT_DEEP         1|0     ahead/behind/stash      (default: 1)
+#   HX_PATH_MAX         path components before eliding  (default: 4)
+#   HX_PATH_STYLE       full|short|tail|fish            (default: full)
+#   HX_DUR_MIN          ms before duration shows        (default: 2000)
+#   HX_TITLE            1|0     set terminal title      (default: 1)
+#   HX_RPROMPT          1|0     right prompt emulation  (default: 1)
+#   HX_ERGONOMICS       1|0     history/keys/aliases    (default: 1)
+#   HX_BANNER           1|0     print boot card         (default: 0)
+#   HX_CACHE            1|0     per-directory collector cache (default: 1)
+#   HX_K8S              1|0     kubernetes segment      (default: 0)
+#   HX_CLOUD            1|0     aws/gcp profile segment (default: 0)
+#   HX_SYS              1|0     load average + battery  (default: 0)
+#
+# ============================================================================
+
+# ============================================================================
+# 1. SHELL DETECTION + INTERACTIVITY GUARD
+# ============================================================================
+
+HX_SHELL=posix
+HX_IS_HELLISH=0
+if [ -n "${ZSH_VERSION-}" ]; then
+    HX_SHELL=zsh
+elif [ -n "${BASH_VERSION-}" ]; then
+    HX_SHELL=bash
+fi
+
+# hellish(1) reports BASH_VERSION for compatibility, so the bash branch is the
+# right one to take — but it is NOT bash, and the differences bite:
+#
+#   * the DEBUG trap fires twice per command (before it, and again before
+#     PROMPT_COMMAND), which silently zeroes any naive preexec timer;
+#   * `shopt` accepts everything and does nothing;
+#   * `bind` does not exist;
+#   * parameter expansion is byte-oriented, not character-oriented;
+#   * COLUMNS is never set.
+#
+# Detect it once, here, and let the rest of the file branch on facts instead
+# of guessing. `hx doctor` prints the whole list.
+if [ "$HX_SHELL" = "bash" ] && [ -z "${BASH-}" ]; then
+    HX_IS_HELLISH=1
+fi
+case "${0##*/}" in hellish) HX_IS_HELLISH=1 ;; esac
+
+# Interactive check. `case $- in *i*` is the portable form; zsh keeps $- too.
+HX_INTERACTIVE=0
+case "$-" in
+    *i*) HX_INTERACTIVE=1 ;;
+esac
+
+if [ "$HX_INTERACTIVE" = "0" ] && [ -z "${HX_FORCE-}" ]; then
+    # Non-interactive. Do nothing at all, but do not error.
+    :
+else
+
+# ============================================================================
+# 2. PATHS, CONFIG, STATE
+# ============================================================================
+
+HX_HOME="${HX_HOME:-$HOME/.hellish}"
+HX_STATE="${HX_STATE:-$HX_HOME/state}"
+HX_VERSION="2.0.0"
+
+# NOT $HX_HOME/hellish.conf. That file belongs to the plugin framework
+# (`feature <name> on` / `set VAR value`) and rewriting it from here would
+# silently delete every plugin the user has enabled.
+HX_PROMPT_CONF="${HX_PROMPT_CONF:-$HX_HOME/prompt.conf}"
+
+export HX_HOME HX_STATE HX_PROMPT_CONF
+
+[ -d "$HX_STATE" ] || mkdir -p "$HX_STATE" 2>/dev/null
+
+# --- defaults ---------------------------------------------------------------
+HX_COLOR="${HX_COLOR:-auto}"
+HX_UNICODE="${HX_UNICODE:-auto}"
+HX_NERD="${HX_NERD:-0}"
+HX_GIT="${HX_GIT:-1}"
+HX_GIT_DEEP="${HX_GIT_DEEP:-1}"
+HX_PATH_MAX="${HX_PATH_MAX:-4}"
+HX_PATH_STYLE="${HX_PATH_STYLE:-full}"
+HX_DUR_MIN="${HX_DUR_MIN:-2000}"
+HX_TITLE="${HX_TITLE:-1}"
+HX_RPROMPT="${HX_RPROMPT:-1}"
+HX_ERGONOMICS="${HX_ERGONOMICS:-1}"
+HX_BANNER="${HX_BANNER:-0}"
+HX_CACHE="${HX_CACHE:-1}"
+HX_K8S="${HX_K8S:-0}"
+HX_CLOUD="${HX_CLOUD:-0}"
+HX_SYS="${HX_SYS:-0}"
+
+# Every key `hx conf` will accept, read or write. A config file cannot reach
+# outside this list, so it can never relocate $HX_HOME or $HX_STATE mid-load.
+HX_KEYS="HX_THEME HX_COLOR HX_UNICODE HX_NERD HX_GIT HX_GIT_DEEP
+HX_PATH_MAX HX_PATH_STYLE HX_DUR_MIN HX_TITLE HX_RPROMPT
+HX_ERGONOMICS HX_BANNER HX_CACHE HX_K8S HX_CLOUD HX_SYS"
+
+# NB: the loop variable is hx_kv, not hx_k. hx_conf_load iterates with hx_k
+# and calls this function from inside that loop; sharing the name let the
+# callee's `unset` blank the caller's key, and every config line was then
+# eval'd as `=value`, i.e. "command not found" on every startup. There are no
+# locals here, so distinct names are the only defence.
+hx_key_valid() {
+    for hx_kv in $HX_KEYS; do
+        [ "$hx_kv" = "$1" ] && { unset hx_kv; return 0; }
+    done
+    unset hx_kv
+    return 1
+}
+
+# Deliberately dumb parser: KEY=VALUE, one per line, # comments, no quoting
+# games, no eval of arbitrary shell. Only whitelisted keys are assigned.
+hx_conf_load() {
+    [ -r "$HX_PROMPT_CONF" ] || return 0
+    while IFS= read -r hx_line; do
+        case "$hx_line" in
+            ''|\#*) continue ;;
+            *=*) : ;;
+            *) continue ;;
+        esac
+        hx_k="${hx_line%%=*}"
+        hx_v="${hx_line#*=}"
+        if hx_key_valid "$hx_k"; then
+            eval "$hx_k=\$hx_v"
+        fi
+    done < "$HX_PROMPT_CONF"
+    unset hx_line hx_k hx_v
+}
+
+hx_conf_save() {
+    [ -d "$HX_HOME" ] || mkdir -p "$HX_HOME" 2>/dev/null || return 1
+    {
+        printf '# %s\n' "${HX_PROMPT_CONF##*/} - written by hellishrc $HX_VERSION"
+        printf '# Prompt configuration only. Plugin state lives in hellish.conf.\n'
+        for hx_k in $HX_KEYS; do
+            eval "hx_v=\${$hx_k-}"
+            printf '%s=%s\n' "$hx_k" "$hx_v"
+        done
+    } > "$HX_PROMPT_CONF" || return 1
+    unset hx_k hx_v
+    return 0
+}
+
+hx_conf_load
+
+# ============================================================================
+# 3. CAPABILITY DETECTION
+# ============================================================================
+
+hx_has() { command -v "$1" >/dev/null 2>&1; }
+
+# --- color depth ------------------------------------------------------------
+if [ "$HX_COLOR" = "auto" ]; then
+    if [ -n "${NO_COLOR-}" ]; then
+        HX_COLOR=none
+    elif [ "${TERM-}" = "dumb" ] || [ -z "${TERM-}" ]; then
+        HX_COLOR=none
+    else
+        case "${COLORTERM-}" in
+            truecolor|24bit) HX_COLOR=24 ;;
+            *)
+                hx_n=8
+                hx_has tput && hx_n=$(tput colors 2>/dev/null || echo 8)
+                case "$hx_n" in
+                    ''|*[!0-9]*) hx_n=8 ;;
+                esac
+                if [ "$hx_n" -ge 256 ]; then HX_COLOR=256; else HX_COLOR=8; fi
+                unset hx_n
+                ;;
+        esac
+    fi
+fi
+
+# --- unicode ----------------------------------------------------------------
+if [ "$HX_UNICODE" = "auto" ]; then
+    case "${LC_ALL-}${LC_CTYPE-}${LANG-}" in
+        *[Uu][Tt][Ff]*) HX_UNICODE=1 ;;
+        *) HX_UNICODE=0 ;;
+    esac
+fi
+
+# --- monotonic-ish clock ----------------------------------------------------
+# Resolution, best first:
+#   1. /proc/uptime      10ms, and NO FORK - just a builtin read
+#   2. $EPOCHREALTIME    1us  (zsh, bash 5)
+#   3. date '+%s %N'     1ms  but two forks per prompt
+#   4. $EPOCHSECONDS     1s
+#   5. date +%s          1s   and a fork
+#
+# Note: `date +%s%3N` is NOT used. uutils-coreutils date ignores the field
+# width and emits full nanoseconds, which produces a 19-digit garbage number
+# that silently breaks every duration. Learned the hard way.
+HX_CLOCK=seconds
+if [ -r /proc/uptime ]; then
+    HX_CLOCK=uptime
+elif [ -n "${EPOCHREALTIME-}" ]; then
+    HX_CLOCK=epochreal
+elif [ -n "${EPOCHSECONDS-}" ]; then
+    HX_CLOCK=epochsec
+fi
+
+# --- terminal width ---------------------------------------------------------
+# hellish never sets COLUMNS, so cache `tput cols` and refresh it on SIGWINCH
+# rather than forking tput on every prompt.
+HX_COLS=80
+hx_cols_refresh() {
+    if [ -n "${COLUMNS-}" ] && [ "$COLUMNS" -gt 0 ] 2>/dev/null; then
+        HX_COLS="$COLUMNS"
+    elif hx_has tput; then
+        HX_COLS=$(tput cols 2>/dev/null || echo 80)
+    fi
+    case "$HX_COLS" in
+        ''|*[!0-9]*|0) HX_COLS=80 ;;
+    esac
+}
+hx_cols_refresh
+trap 'hx_cols_refresh' WINCH 2>/dev/null
+
+# --- prompt-escape wrapping -------------------------------------------------
+# Non-printing sequences must be marked or the shell miscomputes line width
+# and wrecks multiline editing / history recall.
+#
+#   zsh   %{ ... %}
+#   bash  \001 ... \002   (raw bytes, since we build PS1 dynamically)
+#   other nothing
+HX_WS=''
+HX_WE=''
+if [ "$HX_SHELL" = "zsh" ]; then
+    HX_WS='%{'
+    HX_WE='%}'
+elif [ "$HX_SHELL" = "bash" ]; then
+    HX_WS=$(printf '\001')
+    HX_WE=$(printf '\002')
+fi
+
+# ============================================================================
+# 4. COLOR ENGINE
+# ============================================================================
+#
+# Escapes are computed ONCE at load into plain variables. Rendering a prompt
+# is then pure string concatenation: no subshells, no forks, no measurable
+# cost per keystroke.
+
+HX_ESC=$(printf '\033')
+
+# 256-index -> ANSI 30..37 fallback, so 8-color terminals still get sane hues.
+hx_basic8() {
+    case "$1" in
+        16|232|233|234|235|236|237|238|239|240) echo 30 ;;
+        1|9|52|88|124|160|196|197|203|204|210)  echo 31 ;;
+        2|10|22|28|34|40|46|76|82|114|118|154)  echo 32 ;;
+        3|11|136|172|178|180|184|214|220|222|223) echo 33 ;;
+        4|12|17|19|25|27|33|39|67|69|75|111)    echo 34 ;;
+        5|13|54|90|93|127|129|135|141|176|177|212|213) echo 35 ;;
+        6|14|30|37|44|45|50|51|80|86|87|116)    echo 36 ;;
+        *) echo 37 ;;
+    esac
+}
+
+# hx_esc <38|48> <256-index>
+hx_esc() {
+    case "$HX_COLOR" in
+        none) return 0 ;;
+        8)
+            hx_b8=$(hx_basic8 "$2")
+            [ "$1" = "48" ] && hx_b8=$((hx_b8 + 10))
+            printf '%s\033[%sm%s' "$HX_WS" "$hx_b8" "$HX_WE"
+            ;;
+        *)
+            printf '%s\033[%s;5;%sm%s' "$HX_WS" "$1" "$2" "$HX_WE"
+            ;;
+    esac
+}
+
+hx_sgr() {
+    [ "$HX_COLOR" = "none" ] && return 0
+    printf '%s\033[%sm%s' "$HX_WS" "$1" "$HX_WE"
+}
+
+# hx_palette: fill HX_f* (foreground) and HX_b* (background) + attributes.
+hx_palette() {
+    HX_r=$(hx_sgr 0)
+    HX_bd=$(hx_sgr 1)
+    HX_dm=$(hx_sgr 2)
+    HX_it=$(hx_sgr 3)
+    HX_ul=$(hx_sgr 4)
+    HX_rv=$(hx_sgr 7)
+
+    for hx_spec in \
+        fblack:236 fgrey:244 fdark:240 fslate:246 fwhite:252 fsnow:255 \
+        fred:203 fblood:160 fcrim:197 fpink:212 forange:209 fsand:223 \
+        fyellow:180 fgold:214 flime:154 facid:118 fgreen:114 fmoss:71 \
+        fteal:44 fcyan:80 fneon:51 fsky:117 fblue:75 fsteel:67 fdeep:33 \
+        fviolet:141 fpurple:135 fmagenta:176 fmauve:183 \
+        bblack:236 bgrey:240 bred:160 bgreen:29 byellow:136 bblue:25 \
+        bmagenta:90 bcyan:30 bwhite:250 bviolet:54 borange:130 bsteel:60
+    do
+        hx_n="${hx_spec%%:*}"
+        hx_c="${hx_spec#*:}"
+        case "$hx_n" in
+            f*) eval "HX_$hx_n=\$(hx_esc 38 $hx_c)" ;;
+            b*) eval "HX_$hx_n=\$(hx_esc 48 $hx_c)" ;;
+        esac
+    done
+    unset hx_spec hx_n hx_c
+}
+hx_palette
+
+# ============================================================================
+# 5. GLYPHS
+# ============================================================================
+
+if [ "$HX_UNICODE" = "1" ]; then
+    HX_G_TL='╭'; HX_G_BL='╰'; HX_G_V='│'; HX_G_H='─'
+    HX_G_ARR='❯'; HX_G_LAM='λ'; HX_G_OK='✓'; HX_G_BAD='✘'
+    HX_G_BR='⎇'; HX_G_ELL='…'; HX_G_DOT='•'; HX_G_STAR='★'
+    HX_G_PL='▶'; HX_G_PLT='❯'; HX_G_UP='↑'; HX_G_DN='↓'
+    HX_G_STASH='⚑'; HX_G_LOCK='⚿'; HX_G_BOLT='⚡'; HX_G_CLK='⏱'
+    HX_G_TLB='┌'; HX_G_BLB='└'; HX_G_TR='╮'; HX_G_HASH='#'
+    HX_G_DIAM='◆'; HX_G_SQ='▪'; HX_G_TRI='▸'; HX_G_HALF='▓'
+    HX_G_CLOUD='☁'; HX_G_HELM='⎈'; HX_G_BOX='▣'; HX_G_PLUG='⌁'
+else
+    HX_G_TL='.'; HX_G_BL='`'; HX_G_V='|'; HX_G_H='-'
+    HX_G_ARR='>'; HX_G_LAM='\\'; HX_G_OK='+'; HX_G_BAD='x'
+    HX_G_BR='git'; HX_G_ELL='..'; HX_G_DOT='*'; HX_G_STAR='*'
+    HX_G_PL='>'; HX_G_PLT='>'; HX_G_UP='^'; HX_G_DN='v'
+    HX_G_STASH='$'; HX_G_LOCK='#'; HX_G_BOLT='!'; HX_G_CLK='@'
+    HX_G_TLB='+'; HX_G_BLB='+'; HX_G_TR='+'; HX_G_HASH='#'
+    HX_G_DIAM='<>'; HX_G_SQ='#'; HX_G_TRI='>'; HX_G_HALF='#'
+    HX_G_CLOUD='c'; HX_G_HELM='k'; HX_G_BOX='[]'; HX_G_PLUG='~'
+fi
+
+# Nerd Font glyphs (U+E0B0 U+E0B1 U+E0A0). Off by default: they render as
+# tofu without a patched font. Enable with HX_NERD=1 or `hx conf set HX_NERD 1`.
+# Written as octal escapes so this file stays 7-bit clean and survives any
+# copy/paste, editor or terminal that would otherwise eat private-use chars.
+if [ "$HX_NERD" = "1" ] && [ "$HX_UNICODE" = "1" ]; then
+    HX_G_PL=$(printf '\356\202\260')
+    HX_G_PLT=$(printf '\356\202\261')
+    HX_G_BR=$(printf '\356\202\240')
+fi
+
+HX_NL='
+'
+
+# ============================================================================
+# 6. UTILITIES
+# ============================================================================
+
+# Escape % so zsh prompt expansion cannot be hijacked by a path or branch
+# name containing a percent sign. This is a real bug in most dotfiles.
+hx_pct() {
+    if [ "$HX_SHELL" = "zsh" ]; then
+        eval 'HX_RET=${1//\%/%%}'
+    else
+        HX_RET="$1"
+    fi
+}
+
+# hx_strip <string> -> HX_RET with every SGR sequence and prompt-escape
+# marker removed. Pure parameter expansion, no fork. ESC, '[', the numeric
+# parameters and the final letter are all 7-bit ASCII, so this is safe even
+# where ${x#?} slices bytes rather than characters.
+hx_strip() {
+    hx_s="$1"
+    hx_o=''
+    while :; do
+        case "$hx_s" in
+            *"$HX_ESC"*) : ;;
+            *) hx_o="$hx_o$hx_s"; break ;;
+        esac
+        hx_o="$hx_o${hx_s%%"$HX_ESC"*}"
+        hx_s="${hx_s#*"$HX_ESC"}"
+        hx_s="${hx_s#\[}"
+        while [ -n "$hx_s" ]; do
+            hx_c="${hx_s%"${hx_s#?}"}"
+            hx_s="${hx_s#?}"
+            case "$hx_c" in
+                [a-zA-Z]) break ;;
+            esac
+        done
+    done
+    HX_RET="$hx_o"
+    unset hx_s hx_c
+    # Drop the \001/\002 width markers too; they occupy no columns.
+    # Guarded on a non-empty marker: `case $x in *""*)` matches everything.
+    case "${HX_WS:-}${hx_o}" in
+        ''|"$hx_o") : ;;
+        *)
+            hx_o2=''
+            while [ -n "$hx_o" ]; do
+                hx_c="${hx_o%"${hx_o#?}"}"
+                hx_o="${hx_o#?}"
+                case "$hx_c" in
+                    "$HX_WS"|"$HX_WE") : ;;
+                    *) hx_o2="$hx_o2$hx_c" ;;
+                esac
+            done
+            HX_RET="$hx_o2"
+            unset hx_o2
+            ;;
+    esac
+    unset hx_o hx_c
+}
+
+# hx_vwidth <string> -> HX_W, the column count of <string> once decorated.
+#
+# ${#s} counts CHARACTERS in bash and zsh but BYTES in hellish, so a UTF-8
+# glyph is over-counted there. That only ever makes the estimate too large,
+# which nudges a right-aligned string a couple of columns further left -
+# never off the edge, never a wrap. A theme that cares can set HX_RPW itself.
+hx_vwidth() {
+    hx_strip "$1"
+    HX_W="${#HX_RET}"
+}
+
+# hx_repeat <char> <n> -> HX_RET
+hx_repeat() {
+    hx_rr=''
+    hx_ri=0
+    while [ "$hx_ri" -lt "$2" ]; do
+        hx_rr="$hx_rr$1"
+        hx_ri=$((hx_ri + 1))
+    done
+    HX_RET="$hx_rr"
+    unset hx_rr hx_ri
+}
+
+# hx_dur <milliseconds> -> human string in HX_RET
+hx_dur() {
+    hx_ms=$1
+    if [ "$hx_ms" -lt 1000 ]; then
+        HX_RET="${hx_ms}ms"
+    elif [ "$hx_ms" -lt 60000 ]; then
+        HX_RET="$((hx_ms / 1000)).$(( (hx_ms % 1000) / 100 ))s"
+    elif [ "$hx_ms" -lt 3600000 ]; then
+        HX_RET="$((hx_ms / 60000))m$(( (hx_ms % 60000) / 1000 ))s"
+    else
+        HX_RET="$((hx_ms / 3600000))h$(( (hx_ms % 3600000) / 60000 ))m"
+    fi
+    unset hx_ms
+}
+
+# hx_ms10 <total-ms> <iterations> -> HX_RET as "12.3 ms", one decimal.
+# Integer arithmetic only; there is no float type in a POSIX shell.
+hx_ms10() {
+    hx_t=$(( $1 * 10 / $2 ))
+    HX_RET="$((hx_t / 10)).$((hx_t % 10)) ms"
+    unset hx_t
+}
+
+# hx_shorten <path> -> HX_RET, honoring HX_PATH_STYLE / HX_PATH_MAX
+hx_shorten() {
+    hx_p="$1"
+    case "$hx_p" in
+        "$HOME") hx_p='~' ;;
+        "$HOME"/*) hx_p="~${hx_p#"$HOME"}" ;;
+    esac
+
+    case "$HX_PATH_STYLE" in
+        tail)
+            case "$hx_p" in
+                */*) hx_p="${hx_p##*/}" ;;
+            esac
+            ;;
+        fish|short)
+            # ~/dev/projects/hellish -> ~/d/p/hellish
+            hx_out=''
+            hx_rest="$hx_p"
+            hx_last="${hx_p##*/}"
+            [ "$hx_last" = "$hx_p" ] && hx_last=''
+            while [ -n "$hx_rest" ]; do
+                hx_seg="${hx_rest%%/*}"
+                case "$hx_rest" in
+                    */*) hx_rest="${hx_rest#*/}" ;;
+                    *) hx_rest='' ;;
+                esac
+                if [ -z "$hx_rest" ] && [ -n "$hx_last" ]; then
+                    hx_out="$hx_out/$hx_seg"
+                elif [ -z "$hx_seg" ]; then
+                    :
+                else
+                    case "$hx_seg" in
+                        .?*) hx_out="$hx_out/$(printf '%.2s' "$hx_seg")" ;;
+                        *)   hx_out="$hx_out/$(printf '%.1s' "$hx_seg")" ;;
+                    esac
+                fi
+            done
+            hx_p="${hx_out#/}"
+            case "$1" in
+                /*) [ "${hx_p#\~}" = "$hx_p" ] && hx_p="/$hx_p" ;;
+            esac
+            unset hx_out hx_rest hx_seg hx_last
+            ;;
+        *)
+            # full, but elide the middle past HX_PATH_MAX components
+            hx_cnt=0
+            hx_tmp="$hx_p"
+            while [ -n "$hx_tmp" ]; do
+                case "$hx_tmp" in
+                    */*) hx_tmp="${hx_tmp#*/}"; hx_cnt=$((hx_cnt + 1)) ;;
+                    *) hx_tmp=''; hx_cnt=$((hx_cnt + 1)) ;;
+                esac
+            done
+            if [ "$hx_cnt" -gt "$HX_PATH_MAX" ]; then
+                hx_drop=$((hx_cnt - HX_PATH_MAX))
+                hx_tmp="$hx_p"
+                while [ "$hx_drop" -gt 0 ]; do
+                    hx_tmp="${hx_tmp#*/}"
+                    hx_drop=$((hx_drop - 1))
+                done
+                hx_p="$HX_G_ELL/$hx_tmp"
+            fi
+            unset hx_cnt hx_tmp hx_drop
+            ;;
+    esac
+
+    HX_RET="$hx_p"
+    unset hx_p
+}
+
+# ============================================================================
+# 7. CLOCK
+# ============================================================================
+#
+# hx_now_ms -> HX_RET, milliseconds. Whatever the source, the value is only
+# ever compared against another reading from the same source, so an arbitrary
+# epoch (as /proc/uptime has) is fine.
+hx_now_ms() {
+    case "$HX_CLOCK" in
+        uptime)
+            read -r hx_up hx_idle < /proc/uptime 2>/dev/null || hx_up=0
+            hx_sec="${hx_up%%.*}"
+            hx_frac="${hx_up#*.}"
+            case "$hx_up" in
+                *.*) : ;;
+                *) hx_frac=00 ;;
+            esac
+            # Two centisecond digits, without forking printf: pad, then
+            # subtract the tail. Strip the leading zero or `07` is octal.
+            hx_frac="${hx_frac}00"
+            hx_idle="${hx_frac#??}"
+            hx_frac="${hx_frac%"$hx_idle"}"
+            case "$hx_frac" in 0?) hx_frac="${hx_frac#0}" ;; esac
+            case "$hx_sec$hx_frac" in
+                ''|*[!0-9]*) HX_RET=0 ;;
+                *) HX_RET=$(( hx_sec * 1000 + hx_frac * 10 )) ;;
+            esac
+            unset hx_up hx_idle hx_sec hx_frac
+            ;;
+        epochreal)
+            eval 'HX_RET=$(( ${EPOCHREALTIME%%.*} * 1000 + ${EPOCHREALTIME#*.} / 1000 ))' \
+                2>/dev/null || HX_RET=0
+            ;;
+        epochsec)
+            HX_RET=$(( ${EPOCHSECONDS:-0} * 1000 ))
+            ;;
+        *)
+            HX_RET=$(($(date +%s 2>/dev/null || echo 0) * 1000))
+            ;;
+    esac
+}
+
+# ============================================================================
+# 8. CONTEXT COLLECTORS
+# ============================================================================
+#
+# Rules every collector obeys:
+#   * it sets its outputs to a known-empty value FIRST, so a bail-out can
+#     never leave a stale segment on screen;
+#   * it is wrapped so a missing or broken tool can never break a prompt;
+#   * anything that costs a fork is either gated behind a config flag or
+#     served from the cache in section 9.
+
+# --- git --------------------------------------------------------------------
+# Cheap plumbing calls beat one --porcelain parse loop in a shell.
+hx_git_collect() {
+    HX_GB=''; HX_GF=''; HX_GA=0; HX_GBH=0; HX_GS=0; HX_GST=''
+    HX_GDIRTY=0; HX_GREPO=''; HX_GWT=0
+
+    [ "$HX_GIT" = "1" ] || return 0
+    hx_has git || return 0
+
+    # ONE rev-parse for four facts. Each `git` invocation costs ~2.5ms, and
+    # the naive version of this collector made eleven of them - 40ms per
+    # prompt, which is felt while typing. `hx bench` measures it.
+    #
+    # The output is four lines: is-inside-work-tree, git-dir, toplevel,
+    # branch-or-HEAD. Parsed with parameter expansion so no extra fork is
+    # spent unpicking it, and paths with spaces survive.
+    hx_gi=$(git rev-parse --is-inside-work-tree --git-dir --show-toplevel \
+                          --abbrev-ref HEAD 2>/dev/null)
+
+    # Check the OUTPUT, not just the status. `alias g=git` followed by a
+    # `g() { ... }` definition silently defines a function named git - in
+    # bash, zsh, dash and hellish alike - after which rev-parse returns 0 and
+    # prints nothing, and a status-only check invents a detached HEAD in
+    # every directory. Demanding the literal `true` costs nothing.
+    case "$hx_gi" in
+        true"$HX_NL"*) : ;;
+        *) unset hx_gi; return 0 ;;
+    esac
+
+    hx_gi="${hx_gi#*"$HX_NL"}"
+    hx_gd="${hx_gi%%"$HX_NL"*}"
+    hx_gi="${hx_gi#*"$HX_NL"}"
+    hx_top="${hx_gi%%"$HX_NL"*}"
+    HX_GB="${hx_gi#*"$HX_NL"}"
+    HX_GB="${HX_GB%%"$HX_NL"*}"
+
+    HX_GREPO="${hx_top##*/}"
+
+    if [ "$HX_GB" = "HEAD" ]; then
+        HX_GB="${HX_G_DIAM}$(git rev-parse --short HEAD 2>/dev/null)"
+    fi
+
+    if [ -n "$hx_gd" ]; then
+        if [ -d "$hx_gd/rebase-merge" ] || [ -d "$hx_gd/rebase-apply" ]; then
+            HX_GST='rebase'
+        elif [ -f "$hx_gd/MERGE_HEAD" ]; then
+            HX_GST='merge'
+        elif [ -f "$hx_gd/CHERRY_PICK_HEAD" ]; then
+            HX_GST='cherry'
+        elif [ -f "$hx_gd/REVERT_HEAD" ]; then
+            HX_GST='revert'
+        elif [ -f "$hx_gd/BISECT_LOG" ]; then
+            HX_GST='bisect'
+        fi
+        # A linked worktree's git-dir lives under the main repo's worktrees/.
+        case "$hx_gd" in
+            */worktrees/*) HX_GWT=1 ;;
+        esac
+    fi
+
+    git diff --cached --quiet 2>/dev/null || { HX_GF="${HX_GF}+"; HX_GDIRTY=1; }
+    git diff --quiet 2>/dev/null        || { HX_GF="${HX_GF}~"; HX_GDIRTY=1; }
+    # No pipe: a command substitution is one fork, `... | head -1` is three.
+    [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ] && {
+        HX_GF="${HX_GF}?"; HX_GDIRTY=1
+    }
+    [ -n "$(git ls-files --unmerged 2>/dev/null)" ] && {
+        HX_GF="${HX_GF}!"; HX_GDIRTY=1
+    }
+
+    # Two more forks, and the only ones that touch the object store. Turn
+    # them off with `hx conf set HX_GIT_DEEP 0` in a very large repository.
+    if [ "$HX_GIT_DEEP" = "1" ]; then
+        hx_ab=$(git rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)
+        if [ -n "$hx_ab" ]; then
+            HX_GBH="${hx_ab%%	*}"
+            HX_GA="${hx_ab##*	}"
+            case "$HX_GBH" in ''|*[!0-9]*) HX_GBH=0 ;; esac
+            case "$HX_GA"  in ''|*[!0-9]*) HX_GA=0 ;;  esac
+        fi
+        HX_GS=$(git rev-list --walk-reflogs --count refs/stash 2>/dev/null || echo 0)
+        case "$HX_GS" in ''|*[!0-9]*) HX_GS=0 ;; esac
+    fi
+
+    hx_pct "$HX_GB"; HX_GB="$HX_RET"
+    unset hx_gi hx_gd hx_top hx_ab
+}
+
+# Composed git label used by most themes: main+~ ↑2 ↓1 ⚑3 (merge)
+hx_git_label() {
+    HX_GLABEL=''
+    [ -n "$HX_GB" ] || return 0
+    HX_GLABEL="$HX_GB$HX_GF"
+    [ "$HX_GA"  -gt 0 ] 2>/dev/null && HX_GLABEL="$HX_GLABEL $HX_G_UP$HX_GA"
+    [ "$HX_GBH" -gt 0 ] 2>/dev/null && HX_GLABEL="$HX_GLABEL $HX_G_DN$HX_GBH"
+    [ "$HX_GS"  -gt 0 ] 2>/dev/null && HX_GLABEL="$HX_GLABEL $HX_G_STASH$HX_GS"
+    [ "$HX_GWT" = "1" ] && HX_GLABEL="$HX_GLABEL $HX_G_BOX"
+    [ -n "$HX_GST" ] && HX_GLABEL="$HX_GLABEL ($HX_GST)"
+    :
+}
+
+# --- language / toolchain ---------------------------------------------------
+# Only probe when a marker file sits in $PWD, and only run the version command
+# for the ONE toolchain that matched. At most one fork, usually zero.
+hx_env_collect() {
+    HX_VENV=''
+    [ -n "${VIRTUAL_ENV-}" ] && HX_VENV="${VIRTUAL_ENV##*/}"
+    [ -n "${CONDA_DEFAULT_ENV-}" ] && HX_VENV="${CONDA_DEFAULT_ENV}"
+    [ -n "${IN_NIX_SHELL-}" ] && HX_VENV="nix:${IN_NIX_SHELL}"
+    [ -n "$HX_VENV" ] && { hx_pct "$HX_VENV"; HX_VENV="$HX_RET"; }
+
+    HX_LANG=''
+    if [ -f package.json ]; then
+        if [ -f bun.lockb ] && hx_has bun; then
+            HX_LANG="bun $(bun --version 2>/dev/null)"
+        elif hx_has node; then
+            HX_LANG="node $(node -v 2>/dev/null)"
+        fi
+    elif [ -f deno.json ] || [ -f deno.jsonc ]; then
+        hx_has deno && HX_LANG="deno $(deno --version 2>/dev/null | head -1 | cut -d' ' -f2)"
+    elif [ -f Cargo.toml ] && hx_has rustc; then
+        HX_LANG="rust $(rustc --version 2>/dev/null | cut -d' ' -f2)"
+    elif [ -f go.mod ] && hx_has go; then
+        HX_LANG="go $(go env GOVERSION 2>/dev/null)"
+    elif { [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f setup.py ]; } && hx_has python3; then
+        HX_LANG="py $(python3 -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null)"
+    elif [ -f Gemfile ] && hx_has ruby; then
+        HX_LANG="rb $(ruby -e 'print RUBY_VERSION' 2>/dev/null)"
+    elif [ -f composer.json ] && hx_has php; then
+        HX_LANG="php $(php -r 'echo PHP_VERSION;' 2>/dev/null)"
+    elif { [ -f pom.xml ] || [ -f build.gradle ] || [ -f build.gradle.kts ]; }; then
+        HX_LANG="jvm"
+    elif [ -f build.zig ] && hx_has zig; then
+        HX_LANG="zig $(zig version 2>/dev/null)"
+    elif [ -f mix.exs ]; then
+        HX_LANG="elixir"
+    elif [ -f Dockerfile ] || [ -f compose.yaml ] || [ -f docker-compose.yml ]; then
+        HX_LANG="docker"
+    elif [ -f Makefile ] || [ -f makefile ] || [ -f GNUmakefile ]; then
+        HX_LANG="make"
+    fi
+    :
+}
+
+# --- kubernetes -------------------------------------------------------------
+# `kubectl config current-context` costs ~100ms; far too slow for a prompt.
+# Read the kubeconfig directly instead: the current context is a single
+# top-level `current-context:` key, so a bounded grep finds it.
+hx_k8s_collect() {
+    HX_KCTX=''
+    [ "$HX_K8S" = "1" ] || return 0
+    hx_kc="${KUBECONFIG:-$HOME/.kube/config}"
+    case "$hx_kc" in *:*) hx_kc="${hx_kc%%:*}" ;; esac
+    [ -r "$hx_kc" ] || { unset hx_kc; return 0; }
+    while IFS= read -r hx_line; do
+        case "$hx_line" in
+            current-context:*)
+                HX_KCTX="${hx_line#current-context:}"
+                HX_KCTX="${HX_KCTX# }"
+                HX_KCTX="${HX_KCTX%\"}"
+                HX_KCTX="${HX_KCTX#\"}"
+                break
+                ;;
+        esac
+    done < "$hx_kc"
+    [ -n "${HX_KNS-}" ] && HX_KCTX="$HX_KCTX/$HX_KNS"
+    [ -n "$HX_KCTX" ] && { hx_pct "$HX_KCTX"; HX_KCTX="$HX_RET"; }
+    unset hx_kc hx_line
+}
+
+# --- cloud profile ----------------------------------------------------------
+hx_cloud_collect() {
+    HX_CLOUDP=''
+    [ "$HX_CLOUD" = "1" ] || return 0
+    if [ -n "${AWS_PROFILE-}" ]; then
+        HX_CLOUDP="aws:$AWS_PROFILE"
+    elif [ -n "${AWS_VAULT-}" ]; then
+        HX_CLOUDP="aws:$AWS_VAULT"
+    elif [ -n "${CLOUDSDK_ACTIVE_CONFIG_NAME-}" ]; then
+        HX_CLOUDP="gcp:$CLOUDSDK_ACTIVE_CONFIG_NAME"
+    elif [ -n "${AZURE_CONFIG_DIR-}" ]; then
+        HX_CLOUDP="az"
+    fi
+    [ -n "$HX_CLOUDP" ] && { hx_pct "$HX_CLOUDP"; HX_CLOUDP="$HX_RET"; }
+    :
+}
+
+# --- where am I really running ----------------------------------------------
+# All file tests and variable reads. No forks, so this is safe every prompt.
+hx_where_collect() {
+    HX_CTR=''
+    if [ -f /.dockerenv ]; then
+        HX_CTR=docker
+    elif [ -f /run/.containerenv ]; then
+        HX_CTR=podman
+    elif [ -n "${container-}" ]; then
+        HX_CTR="$container"
+    elif [ -n "${SINGULARITY_NAME-}" ]; then
+        HX_CTR=singularity
+    fi
+    [ -n "${debian_chroot-}" ] && HX_CTR="chroot:$debian_chroot"
+
+    HX_MUX=''
+    if [ -n "${TMUX-}" ]; then
+        HX_MUX=tmux
+    elif [ -n "${STY-}" ]; then
+        HX_MUX=screen
+    elif [ -n "${ZELLIJ-}" ]; then
+        HX_MUX=zellij
+    fi
+
+    HX_SSHF=0
+    { [ -n "${SSH_CONNECTION-}" ] || [ -n "${SSH_TTY-}" ]; } && HX_SSHF=1
+    :
+}
+
+# --- system health ----------------------------------------------------------
+# Off by default. Both readings come from sysfs/procfs, so no forks either.
+hx_sys_collect() {
+    HX_LOAD=''; HX_BAT=''; HX_BATST=''
+    [ "$HX_SYS" = "1" ] || return 0
+
+    if [ -r /proc/loadavg ]; then
+        read -r hx_l1 hx_l5 hx_l15 hx_rest < /proc/loadavg 2>/dev/null
+        HX_LOAD="$hx_l1"
+        unset hx_l1 hx_l5 hx_l15 hx_rest
+    fi
+
+    for hx_b in /sys/class/power_supply/BAT0 /sys/class/power_supply/BAT1; do
+        if [ -r "$hx_b/capacity" ]; then
+            read -r HX_BAT < "$hx_b/capacity" 2>/dev/null
+            [ -r "$hx_b/status" ] && read -r HX_BATST < "$hx_b/status" 2>/dev/null
+            break
+        fi
+    done
+    unset hx_b
+    :
+}
+
+# --- identity, jobs, clocks -------------------------------------------------
+# $USER/$HOSTNAME are read once at load; they cannot change mid-session and
+# `id -un` / `hostname` are forks nobody should pay for on every prompt.
+HX_U="${USER:-${LOGNAME:-$(id -un 2>/dev/null || echo user)}}"
+HX_H="${HOSTNAME:-$(hostname 2>/dev/null || echo localhost)}"
+HX_H="${HX_H%%.*}"
+HX_ROOT=0
+HX_PRIV='$'
+if [ "$(id -u 2>/dev/null || echo 1000)" = "0" ]; then
+    HX_PRIV='#'
+    HX_ROOT=1
+fi
+
+# Exit statuses worth naming. 128+n is the shell's encoding of "killed by
+# signal n", and `✘ 139` is much less useful than `✘ SIGSEGV`.
+hx_signame() {
+    case "$1" in
+        126) HX_RET='NOEXEC' ;;
+        127) HX_RET='NOTFOUND' ;;
+        129) HX_RET='SIGHUP'  ;; 130) HX_RET='SIGINT'  ;;
+        131) HX_RET='SIGQUIT' ;; 132) HX_RET='SIGILL'  ;;
+        134) HX_RET='SIGABRT' ;; 136) HX_RET='SIGFPE'  ;;
+        137) HX_RET='SIGKILL' ;; 139) HX_RET='SIGSEGV' ;;
+        141) HX_RET='SIGPIPE' ;; 143) HX_RET='SIGTERM' ;;
+        *)   HX_RET='' ;;
+    esac
+}
+
+hx_misc_collect() {
+    # Two forks, not four. `jobs | grep -c .` is a subshell plus a grep, and
+    # two `date` calls are two more; one date with a separator and a counting
+    # loop over the jobs output does the same work for half the price.
+    #
+    # printf '%(%H:%M:%S)T' would cost nothing at all, but hellish accepts
+    # that format and prints NOTHING - not even the literal text around it -
+    # so date(1) it is.
+    hx_j=$(jobs 2>/dev/null)
+    HX_JOBS=0
+    while [ -n "$hx_j" ]; do
+        HX_JOBS=$((HX_JOBS + 1))
+        case "$hx_j" in
+            *"$HX_NL"*) hx_j="${hx_j#*"$HX_NL"}" ;;
+            *) hx_j='' ;;
+        esac
+    done
+
+    hx_d=$(date '+%H:%M:%S|%d %b' 2>/dev/null)
+    HX_TIME="${hx_d%%|*}"
+    HX_DATE="${hx_d#*|}"
+    unset hx_j hx_d
+    :
+}
+
+# ============================================================================
+# 9. CACHE
+# ============================================================================
+#
+# Only values that cannot change without leaving the directory are cached.
+# Dirty state, ahead/behind and stash counts are NOT: a command that edits a
+# file must be reflected by the very next prompt, and a stale git segment is
+# worse than a slow one.
+#
+# What this removes is the toolchain probe - `node -v` and `rustc --version`
+# are 30-60ms forks, paid on every prompt in every project directory. Keyed
+# on $PWD, they are paid once per directory instead.
+#
+# The kubeconfig is keyed on its own mtime with `-nt`, which is a shell
+# builtin test, so refresh detection itself costs nothing.
+
+HX_CSTAMP="$HX_STATE/.cache-stamp"
+HX_CPWD=''
+HX_CLANG=''
+HX_CVENV=''
+HX_CKCTX=''
+HX_CKCONF=''
+
+hx_cache_stamp() {
+    # `: >file` updates mtime without forking touch(1).
+    : > "$HX_CSTAMP" 2>/dev/null
+}
+
+hx_cached_collect() {
+    if [ "$HX_CACHE" != "1" ]; then
+        hx_env_collect
+        hx_k8s_collect
+        return 0
+    fi
+
+    if [ "$HX_CPWD" = "$PWD" ]; then
+        HX_LANG="$HX_CLANG"
+        HX_VENV="$HX_CVENV"
+    else
+        hx_env_collect
+        HX_CPWD="$PWD"
+        HX_CLANG="$HX_LANG"
+        HX_CVENV="$HX_VENV"
+    fi
+
+    # A virtualenv can be activated without changing directory, so re-read
+    # the (fork-free) environment part every time and let it win.
+    if [ -n "${VIRTUAL_ENV-}${CONDA_DEFAULT_ENV-}${IN_NIX_SHELL-}" ]; then
+        HX_VENV="${VIRTUAL_ENV##*/}"
+        [ -n "${CONDA_DEFAULT_ENV-}" ] && HX_VENV="$CONDA_DEFAULT_ENV"
+        [ -n "${IN_NIX_SHELL-}" ] && HX_VENV="nix:$IN_NIX_SHELL"
+    else
+        HX_VENV=''
+    fi
+    HX_CVENV="$HX_VENV"
+
+    if [ "$HX_K8S" = "1" ]; then
+        hx_kc="${KUBECONFIG:-$HOME/.kube/config}"
+        case "$hx_kc" in *:*) hx_kc="${hx_kc%%:*}" ;; esac
+        if [ "$hx_kc" != "$HX_CKCONF" ] || [ "$hx_kc" -nt "$HX_CSTAMP" ]; then
+            hx_k8s_collect
+            HX_CKCTX="$HX_KCTX"
+            HX_CKCONF="$hx_kc"
+            hx_cache_stamp
+        else
+            HX_KCTX="$HX_CKCTX"
+        fi
+        unset hx_kc
+    else
+        HX_KCTX=''
+    fi
+    :
+}
+
+# `hx cache drop` and every `cd`-invalidating command route through this.
+hx_cache_drop() {
+    HX_CPWD=''; HX_CLANG=''; HX_CVENV=''; HX_CKCTX=''; HX_CKCONF=''
+    :
+}
+
+# ============================================================================
+# 10. THEMES
+# ============================================================================
+#
+# Contract for every theme function:
+#
+#   INPUT  (globals, already escaped and safe to interpolate)
+#     HX_X        last exit code            HX_XOK    1 if success
+#     HX_XSIG     signal name for 128+n     HX_P      display path
+#     HX_U/HX_H   user / host               HX_PRIV   $ or #
+#     HX_GLABEL   git label ('' if none)    HX_GDIRTY 1 if worktree dirty
+#     HX_GB/HX_GF branch / flag chars       HX_GREPO  repository name
+#     HX_GA/HX_GBH/HX_GS  ahead/behind/stash counts
+#     HX_GST      merge|rebase|cherry|revert|bisect
+#     HX_VENV     virtualenv name           HX_LANG   toolchain hint
+#     HX_KCTX     kubernetes context        HX_CLOUDP aws/gcp profile
+#     HX_CTR      container/chroot          HX_MUX    tmux/screen/zellij
+#     HX_LOAD     1-min load average        HX_BAT    battery percent
+#     HX_TIME     HH:MM:SS                  HX_DATE   dd Mon
+#     HX_DURSTR   command duration          HX_JOBS   background job count
+#     HX_SSHF     1 if over ssh             HX_ROOT   1 if uid 0
+#     HX_NL       newline
+#
+#   OUTPUT
+#     HX_PS1      left prompt
+#     HX_RPS1     right prompt (emulated everywhere; see section 11)
+#
+# Every theme must be legible with HX_COLOR=none. `hx demo` renders all of
+# them against live data, which is the only way to check that claim.
+
+HX_THEMES="hellish minimal pure powerline agnoster lambda classic bracket
+arrow dots matrix neon rails compact zen dev boxed ascii hex night ocean
+sunset mono gitfocus kernel ops status cyber pill quantum"
+# --- 1. hellish: the canonical three-line box -------------------------------
+hx_theme_hellish() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="${HX_fyellow}[git: $HX_GLABEL]$HX_r"
+    hx_x=''
+    [ "$HX_XOK" = "0" ] && hx_x="$HX_fred$HX_G_BAD $HX_X$HX_r "
+    hx_v=''
+    [ -n "$HX_VENV" ] && hx_v="$HX_fviolet($HX_VENV)$HX_r "
+    HX_PS1="$HX_fblue$HX_G_TL$HX_G_H$HX_r $HX_fcyan$HX_U$HX_r$HX_fdark@$HX_r$HX_fgrey$HX_H$HX_r $HX_fdark in$HX_r $HX_fmagenta$HX_P$HX_r$HX_NL"
+    HX_PS1="$HX_PS1$HX_fblue$HX_G_V$HX_r  $hx_v$hx_g $hx_x$HX_dm$HX_DURSTR$HX_r$HX_NL"
+    HX_PS1="$HX_PS1$HX_fblue$HX_G_BL$HX_G_H$HX_r $HX_fyellow$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdark$HX_TIME$HX_r"
+}
+
+# --- 2. minimal -------------------------------------------------------------
+hx_theme_minimal() {
+    hx_c="$HX_fgreen"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fred"
+    HX_PS1="$hx_c$HX_G_ARR$HX_r "
+    HX_RPS1=''
+}
+
+# --- 3. pure: two-line, muted, sindresorhus-ish -----------------------------
+hx_theme_pure() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" $HX_fdark$HX_GLABEL$HX_r"
+    hx_c="$HX_fviolet"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fred"
+    HX_PS1="$HX_fblue$HX_P$HX_r$hx_g $HX_dm$HX_DURSTR$HX_r$HX_NL$hx_c$HX_G_ARR$HX_r "
+    HX_RPS1=''
+}
+
+# --- 4. powerline -----------------------------------------------------------
+hx_theme_powerline() {
+    hx_s=""
+    hx_s="$hx_s$HX_bblue$HX_fsnow $HX_U "
+    if [ -n "$HX_GLABEL" ]; then
+        hx_s="$hx_s$HX_bmagenta$HX_fblue$HX_G_PL$HX_fsnow $HX_P "
+        if [ "$HX_GDIRTY" = "1" ]; then
+            hx_s="$hx_s$HX_byellow$HX_fmagenta$HX_G_PL$HX_fblack $HX_GLABEL "
+            hx_s="$hx_s$HX_r$HX_fyellow$HX_G_PL$HX_r "
+        else
+            hx_s="$hx_s$HX_bgreen$HX_fmagenta$HX_G_PL$HX_fsnow $HX_GLABEL "
+            hx_s="$hx_s$HX_r$HX_fgreen$HX_G_PL$HX_r "
+        fi
+    else
+        hx_s="$hx_s$HX_bmagenta$HX_fblue$HX_G_PL$HX_fsnow $HX_P "
+        hx_s="$hx_s$HX_r$HX_fmagenta$HX_G_PL$HX_r "
+    fi
+    [ "$HX_XOK" = "0" ] && hx_s="$HX_bred$HX_fsnow $HX_X $HX_r$HX_fred$HX_G_PL$HX_r $hx_s"
+    HX_PS1="$hx_s"
+    HX_RPS1="$HX_fdark$HX_TIME$HX_r"
+}
+
+# --- 5. agnoster (single line, no bg fills) ---------------------------------
+hx_theme_agnoster() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" $HX_fdark$HX_G_PLT$HX_r $HX_fgreen$HX_G_BR $HX_GLABEL$HX_r"
+    [ "$HX_GDIRTY" = "1" ] && hx_g=" $HX_fdark$HX_G_PLT$HX_r $HX_fyellow$HX_G_BR $HX_GLABEL$HX_r"
+    hx_c="$HX_fcyan"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fred"
+    HX_PS1="$HX_fsteel$HX_U$HX_r $HX_fdark$HX_G_PLT$HX_r $HX_fsky$HX_P$HX_r$hx_g $hx_c$HX_G_PL$HX_r "
+    HX_RPS1="$HX_fdark$HX_JOBS jobs$HX_r"
+}
+
+# --- 6. lambda --------------------------------------------------------------
+hx_theme_lambda() {
+    hx_c="$HX_facid"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fcrim"
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fdark:$HX_r$HX_fteal$HX_GLABEL$HX_r"
+    HX_PS1="$hx_c$HX_G_LAM$HX_r $HX_fwhite$HX_P$HX_r$hx_g $hx_c$HX_G_ARR$HX_r "
+    HX_RPS1=''
+}
+
+# --- 7. classic sh ----------------------------------------------------------
+hx_theme_classic() {
+    HX_PS1="$HX_fgreen$HX_U@$HX_H$HX_r:$HX_fblue$HX_P$HX_r$HX_PRIV "
+    HX_RPS1=''
+}
+
+# --- 8. bracket -------------------------------------------------------------
+hx_theme_bracket() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" $HX_fyellow($HX_GLABEL)$HX_r"
+    hx_x=''
+    [ "$HX_XOK" = "0" ] && hx_x="${HX_fred}[$HX_X]$HX_r"
+    HX_PS1="$hx_x${HX_fgrey}[$HX_r$HX_fcyan$HX_U$HX_r $HX_fwhite$HX_P$HX_r$hx_g$HX_fgrey]$HX_r$HX_PRIV "
+    HX_RPS1="$HX_fdark$HX_DATE $HX_TIME$HX_r"
+}
+
+# --- 9. arrow ---------------------------------------------------------------
+hx_theme_arrow() {
+    hx_c="$HX_fblue"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_forange"
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" $HX_fmoss$HX_G_BR $HX_GLABEL$HX_r"
+    HX_PS1="$HX_fsand$HX_P$HX_r$hx_g$HX_NL$hx_c$HX_G_H$HX_G_H$HX_G_TRI$HX_r "
+    HX_RPS1="$HX_dm$HX_DURSTR$HX_r"
+}
+
+# --- 10. dots ---------------------------------------------------------------
+hx_theme_dots() {
+    hx_c="$HX_fgreen"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fred"
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fdark $HX_G_DOT $HX_r$HX_fteal$HX_GLABEL$HX_r"
+    HX_PS1="$hx_c$HX_G_DOT$HX_r $HX_fslate$HX_P$HX_r$hx_g $HX_fdark$HX_G_DOT$HX_r "
+    HX_RPS1="$HX_fdark$HX_TIME$HX_r"
+}
+
+# --- 11. matrix -------------------------------------------------------------
+hx_theme_matrix() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fmoss::$HX_facid$HX_GLABEL$HX_r"
+    hx_x=''
+    [ "$HX_XOK" = "0" ] && hx_x="${HX_fmoss}[$HX_facid$HX_X$HX_fmoss]"
+    HX_PS1="${HX_fmoss}[$HX_facid$HX_U$HX_fmoss@$HX_facid$HX_H$HX_fmoss]$HX_r$HX_fgreen$HX_P$HX_r$hx_g$hx_x$HX_NL$HX_facid$HX_G_ARR$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fmoss$HX_TIME$HX_r"
+}
+
+# --- 12. neon ---------------------------------------------------------------
+hx_theme_neon() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" $HX_fpink$HX_G_STAR$HX_r$HX_fneon$HX_GLABEL$HX_r"
+    hx_c="$HX_fneon"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fcrim"
+    HX_PS1="$HX_fpink$HX_G_HALF$HX_fviolet$HX_G_HALF$HX_fneon$HX_G_HALF$HX_r $HX_fsnow$HX_P$HX_r$hx_g$HX_NL$hx_c$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fviolet$HX_TIME$HX_r"
+}
+
+# --- 13. rails --------------------------------------------------------------
+hx_theme_rails() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fdark$HX_G_H$HX_r$HX_fgold$HX_GLABEL$HX_r"
+    HX_PS1="$HX_fsteel$HX_G_TLB$HX_G_H$HX_r$HX_fwhite$HX_P$HX_r$hx_g$HX_NL$HX_fsteel$HX_G_BLB$HX_G_H$HX_G_H$HX_r$HX_fsky$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdark$HX_DURSTR $HX_TIME$HX_r"
+}
+
+# --- 14. compact ------------------------------------------------------------
+hx_theme_compact() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fdark:$HX_fgreen${HX_GB}${HX_GF}$HX_r"
+    hx_c="$HX_fsnow"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fred"
+    HX_PS1="$HX_fblue${HX_P##*/}$HX_r$hx_g $hx_c$HX_G_ARR$HX_r "
+    HX_RPS1=''
+}
+
+# --- 15. zen ----------------------------------------------------------------
+hx_theme_zen() {
+    hx_c="$HX_fslate"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fsand"
+    HX_PS1="$HX_NL$hx_c  $HX_G_DIAM$HX_r  "
+    HX_RPS1="$HX_fblack$HX_P$HX_r"
+}
+
+# --- 16. dev: toolchain-aware -----------------------------------------------
+hx_theme_dev() {
+    hx_l=''
+    [ -n "$HX_LANG" ] && hx_l="${HX_fdark}[$HX_r$HX_forange$HX_LANG$HX_r$HX_fdark]$HX_r "
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="${HX_fdark}[$HX_r$HX_fgreen$HX_GLABEL$HX_r$HX_fdark]$HX_r "
+    hx_v=''
+    [ -n "$HX_VENV" ] && hx_v="$HX_fviolet($HX_VENV)$HX_r "
+    hx_x=''
+    [ "$HX_XOK" = "0" ] && hx_x="$HX_fred$HX_G_BAD$HX_X$HX_r "
+    HX_PS1="$hx_v$HX_fcyan$HX_P$HX_r $hx_g$hx_l$hx_x$HX_NL$HX_fsteel$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdark$HX_DURSTR$HX_r"
+}
+
+# --- 17. boxed --------------------------------------------------------------
+hx_theme_boxed() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" $HX_G_V $HX_fgold$HX_GLABEL$HX_r"
+    HX_PS1="$HX_fdark$HX_G_TLB$HX_G_H$HX_r $HX_fwhite$HX_U@$HX_H$HX_r $HX_G_V $HX_fsky$HX_P$HX_r$hx_g$HX_NL"
+    HX_PS1="$HX_PS1$HX_fdark$HX_G_BLB$HX_G_H$HX_r$HX_fgreen$HX_PRIV$HX_r "
+    HX_RPS1="$HX_fdark$HX_TIME$HX_r"
+}
+
+# --- 18. ascii (safe everywhere, no unicode, no color needed) ---------------
+hx_theme_ascii() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" ($HX_GLABEL)"
+    hx_x=''
+    [ "$HX_XOK" = "0" ] && hx_x=" [$HX_X]"
+    HX_PS1="$HX_U@$HX_H $HX_P$hx_g$hx_x$HX_PRIV "
+    HX_RPS1=''
+}
+
+# --- 19. hex ----------------------------------------------------------------
+hx_theme_hex() {
+    hx_x="$HX_fmoss0x0"
+    [ "$HX_XOK" = "0" ] && hx_x="$HX_fcrim0x$HX_X"
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" $HX_fdark<$HX_r$HX_fteal$HX_GLABEL$HX_r$HX_fdark>$HX_r"
+    HX_PS1="$hx_x$HX_r $HX_fdark|$HX_r $HX_fslate$HX_P$HX_r$hx_g $HX_fteal$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdark$HX_TIME$HX_r"
+}
+
+# --- 20. night --------------------------------------------------------------
+hx_theme_night() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fdark on $HX_r$HX_fmauve$HX_GLABEL$HX_r"
+    hx_c="$HX_fmauve"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fpink"
+    HX_PS1="$HX_fdeep$HX_G_SQ$HX_r $HX_fslate$HX_P$HX_r $hx_g$HX_NL$hx_c$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fblack$HX_DATE$HX_r"
+}
+
+# --- 21. ocean --------------------------------------------------------------
+hx_theme_ocean() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g=" $HX_fteal$HX_G_BR $HX_GLABEL$HX_r"
+    HX_PS1="$HX_fdeep$HX_G_H$HX_G_H$HX_r$HX_fsky $HX_P$HX_r$hx_g $HX_fteal$HX_G_H$HX_G_H$HX_r$HX_NL$HX_fcyan$HX_G_ARR$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdeep$HX_TIME$HX_r"
+}
+
+# --- 22. sunset -------------------------------------------------------------
+hx_theme_sunset() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fsand $HX_GLABEL$HX_r"
+    hx_c="$HX_forange"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fblood"
+    HX_PS1="$HX_fgold$HX_G_HALF$HX_forange$HX_G_HALF$HX_fcrim$HX_G_HALF$HX_r $HX_fsand$HX_P$HX_r $hx_g$HX_NL$hx_c$HX_G_TRI$HX_r "
+    HX_RPS1="$HX_fdark$HX_DURSTR$HX_r"
+}
+
+# --- 23. mono ---------------------------------------------------------------
+hx_theme_mono() {
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fdark ($HX_GLABEL)$HX_r"
+    hx_x=''
+    [ "$HX_XOK" = "0" ] && hx_x="$HX_bd!$HX_r"
+    HX_PS1="$HX_fwhite$HX_P$HX_r$hx_g $hx_x$HX_fgrey$HX_G_ARR$HX_r "
+    HX_RPS1=''
+}
+
+# --- 24. gitfocus -----------------------------------------------------------
+hx_theme_gitfocus() {
+    if [ -n "$HX_GB" ]; then
+        hx_c="$HX_fgreen"
+        [ "$HX_GDIRTY" = "1" ] && hx_c="$HX_fyellow"
+        [ -n "$HX_GST" ] && hx_c="$HX_fcrim"
+        HX_PS1="$hx_c$HX_G_BR $HX_GB$HX_r"
+        [ -n "$HX_GF" ] && HX_PS1="$HX_PS1 $HX_forange$HX_GF$HX_r"
+        [ "$HX_GA"  -gt 0 ] 2>/dev/null && HX_PS1="$HX_PS1 $HX_fsky$HX_G_UP$HX_GA$HX_r"
+        [ "$HX_GBH" -gt 0 ] 2>/dev/null && HX_PS1="$HX_PS1 $HX_fpink$HX_G_DN$HX_GBH$HX_r"
+        [ "$HX_GS"  -gt 0 ] 2>/dev/null && HX_PS1="$HX_PS1 $HX_fviolet$HX_G_STASH$HX_GS$HX_r"
+        [ -n "$HX_GST" ] && HX_PS1="$HX_PS1 $HX_fcrim$HX_GST$HX_r"
+        HX_PS1="$HX_PS1 $HX_fdark$HX_G_V$HX_r $HX_fslate$HX_P$HX_r$HX_NL"
+    else
+        HX_PS1="$HX_fdark(no repo)$HX_r $HX_fslate$HX_P$HX_r$HX_NL"
+    fi
+    HX_PS1="$HX_PS1$HX_fgreen$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdark$HX_TIME$HX_r"
+}
+
+# --- 25. kernel -------------------------------------------------------------
+hx_theme_kernel() {
+    hx_ok="$HX_fgreen$HX_G_OK"
+    [ "$HX_XOK" = "0" ] && hx_ok="$HX_fred$HX_G_BAD $HX_X"
+    hx_s=''
+    [ "$HX_SSHF" = "1" ] && hx_s="${HX_forange}[ssh]$HX_r "
+    [ "$HX_ROOT" = "1" ] && hx_s="$hx_s${HX_fcrim}[root]$HX_r "
+    hx_j=''
+    [ "$HX_JOBS" -gt 0 ] 2>/dev/null && hx_j="${HX_fviolet}[$HX_JOBS&]$HX_r "
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fgold$HX_GLABEL$HX_r "
+    HX_PS1="${HX_fdark}[$hx_ok$HX_fdark]$HX_r $hx_s$hx_j$HX_fsteel$HX_U$HX_r$HX_fdark:$HX_r$HX_fsnow$HX_P$HX_r $hx_g$HX_NL$HX_fsteel$HX_PRIV$HX_r "
+    HX_RPS1="$HX_fdark$HX_DURSTR $HX_TIME$HX_r"
+}
+
+# --- 26. ops: the one you want when the blast radius is not your laptop -----
+hx_theme_ops() {
+    hx_w=''
+    [ "$HX_SSHF" = "1" ] && hx_w="$hx_w$HX_bblue$HX_fsnow ssh $HX_r"
+    [ -n "$HX_CTR" ]     && hx_w="$hx_w$HX_bsteel$HX_fsnow $HX_CTR $HX_r"
+    [ "$HX_ROOT" = "1" ] && hx_w="$hx_w$HX_bred$HX_fsnow root $HX_r"
+    [ -n "$hx_w" ] && hx_w="$hx_w "
+    hx_k=''
+    [ -n "$HX_KCTX" ]   && hx_k="$HX_fteal$HX_G_HELM $HX_KCTX$HX_r "
+    [ -n "$HX_CLOUDP" ] && hx_k="$hx_k$HX_forange$HX_G_CLOUD $HX_CLOUDP$HX_r "
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fgreen$HX_G_BR $HX_GLABEL$HX_r "
+    [ "$HX_GDIRTY" = "1" ] && hx_g="$HX_fyellow$HX_G_BR $HX_GLABEL$HX_r "
+    hx_c="$HX_fteal"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fcrim"
+    HX_PS1="$hx_w$hx_k$HX_fsky$HX_P$HX_r $hx_g$HX_NL$hx_c$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdark$HX_DURSTR $HX_TIME$HX_r"
+}
+
+# --- 27. status: a full-width status line, everything visible at once -------
+hx_theme_status() {
+    hx_x="$HX_fgreen$HX_G_OK$HX_r"
+    if [ "$HX_XOK" = "0" ]; then
+        hx_x="$HX_fcrim$HX_G_BAD $HX_X$HX_r"
+        [ -n "$HX_XSIG" ] && hx_x="$HX_fcrim$HX_G_BAD $HX_XSIG$HX_r"
+    fi
+    hx_s=''
+    [ -n "$HX_VENV" ]  && hx_s="$hx_s$HX_fviolet$HX_VENV$HX_r $HX_fdark$HX_G_V$HX_r "
+    [ -n "$HX_LANG" ]  && hx_s="$hx_s$HX_forange$HX_LANG$HX_r $HX_fdark$HX_G_V$HX_r "
+    [ -n "$HX_KCTX" ]  && hx_s="$hx_s$HX_fteal$HX_KCTX$HX_r $HX_fdark$HX_G_V$HX_r "
+    [ -n "$HX_MUX" ]   && hx_s="$hx_s$HX_fslate$HX_MUX$HX_r $HX_fdark$HX_G_V$HX_r "
+    [ "$HX_JOBS" -gt 0 ] 2>/dev/null && hx_s="$hx_s$HX_fpink${HX_JOBS}&$HX_r $HX_fdark$HX_G_V$HX_r "
+    [ -n "$HX_LOAD" ]  && hx_s="$hx_s$HX_fsand$HX_LOAD$HX_r $HX_fdark$HX_G_V$HX_r "
+    hx_g="$HX_fdark(no repo)$HX_r"
+    if [ -n "$HX_GLABEL" ]; then
+        hx_g="$HX_fgreen$HX_GLABEL$HX_r"
+        [ "$HX_GDIRTY" = "1" ] && hx_g="$HX_fgold$HX_GLABEL$HX_r"
+    fi
+    HX_PS1="$HX_fdark$HX_G_TL$HX_G_H$HX_r $hx_x $HX_fdark$HX_G_V$HX_r $HX_fsnow$HX_P$HX_r $HX_fdark$HX_G_V$HX_r $hx_g$HX_NL"
+    HX_PS1="$HX_PS1$HX_fdark$HX_G_V$HX_r  $hx_s$HX_NL"
+    HX_PS1="$HX_PS1$HX_fdark$HX_G_BL$HX_G_H$HX_r $HX_fteal$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdark$HX_DATE $HX_TIME$HX_r"
+}
+
+# --- 28. cyber --------------------------------------------------------------
+hx_theme_cyber() {
+    hx_c="$HX_fneon"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fcrim"
+    hx_g=''
+    [ -n "$HX_GLABEL" ] && hx_g="$HX_fdark//$HX_r$HX_fpink$HX_GLABEL$HX_r"
+    hx_s=''
+    [ -n "$HX_CTR" ] && hx_s="$HX_fviolet$HX_G_BOX$HX_r "
+    HX_PS1="$hx_c$HX_G_HALF$HX_G_HALF$HX_r $hx_s$HX_fsnow$HX_P$HX_r $hx_g$HX_NL$hx_c$HX_G_TRI$HX_G_TRI$HX_r "
+    HX_RPS1="$HX_fviolet$HX_G_CLK $HX_TIME$HX_r"
+}
+
+# --- 29. pill: rounded segments, no nerd font required ----------------------
+hx_theme_pill() {
+    hx_p="$HX_bsteel$HX_fsnow $HX_P $HX_r"
+    hx_g=''
+    if [ -n "$HX_GLABEL" ]; then
+        if [ "$HX_GDIRTY" = "1" ]; then
+            hx_g=" $HX_byellow$HX_fblack $HX_GLABEL $HX_r"
+        else
+            hx_g=" $HX_bgreen$HX_fsnow $HX_GLABEL $HX_r"
+        fi
+    fi
+    hx_x=''
+    [ "$HX_XOK" = "0" ] && hx_x=" $HX_bred$HX_fsnow ${HX_XSIG:-$HX_X} $HX_r"
+    hx_v=''
+    [ -n "$HX_VENV" ] && hx_v=" $HX_bviolet$HX_fsnow $HX_VENV $HX_r"
+    HX_PS1="$hx_p$hx_g$hx_v$hx_x$HX_NL$HX_fsteel$HX_G_ARR$HX_r "
+    HX_RPS1="$HX_fdark$HX_DURSTR$HX_r"
+}
+
+# --- 30. quantum: single line, right-heavy, everything in the right prompt --
+hx_theme_quantum() {
+    hx_c="$HX_fdeep"
+    [ "$HX_XOK" = "0" ] && hx_c="$HX_fblood"
+    HX_PS1="$hx_c$HX_G_DIAM$HX_r $HX_fslate${HX_P##*/}$HX_r $hx_c$HX_G_ARR$HX_r "
+    hx_r=''
+    [ -n "$HX_GLABEL" ] && hx_r="$HX_fmoss$HX_GLABEL$HX_r  "
+    [ -n "$HX_LANG" ] && hx_r="$hx_r$HX_fdark$HX_LANG$HX_r  "
+    [ -n "$HX_DURSTR" ] && hx_r="$hx_r$HX_fsand$HX_DURSTR$HX_r  "
+    HX_RPS1="$hx_r$HX_fdark$HX_TIME$HX_r"
+}
+
+# ============================================================================
+# 11. RENDERER + HOOKS
+# ============================================================================
+
+HX_T0=''
+HX_MS=0
+HX_DURSTR=''
+HX_ARMED=0
+
+# --- preexec ----------------------------------------------------------------
+#
+# THE DOUBLE-FIRE. hellish runs the DEBUG trap twice per command: once before
+# the command, and again immediately before PROMPT_COMMAND. bash fires it once
+# per simple command, which is a different wrong. Either way, a naive
+#
+#     trap 'HX_T0=$(now)' DEBUG
+#
+# re-stamps the start time after the command has already finished, so every
+# duration reads as zero and the feature silently does nothing.
+#
+# The fix is a one-bit state machine. hx_precmd disarms; the first DEBUG fire
+# after that arms and stamps; every later fire in the same command line is
+# ignored. Measured against `sleep 2` in the test suite, so it stays fixed.
+hx_preexec() {
+    [ "$HX_ARMED" = "1" ] && return 0
+    HX_ARMED=1
+    hx_now_ms
+    HX_T0="$HX_RET"
+    :
+}
+
+hx_timing() {
+    HX_MS=0
+    HX_DURSTR=''
+    if [ -n "$HX_T0" ]; then
+        hx_now_ms
+        HX_MS=$((HX_RET - HX_T0))
+        [ "$HX_MS" -lt 0 ] && HX_MS=0
+        if [ "$HX_MS" -ge "$HX_DUR_MIN" ]; then
+            hx_dur "$HX_MS"
+            HX_DURSTR="$HX_RET"
+        fi
+    fi
+    HX_T0=''
+    HX_ARMED=0
+}
+
+hx_collect() {
+    HX_X="$1"
+    case "$HX_X" in ''|*[!0-9]*) HX_X=0 ;; esac
+    HX_XOK=1
+    [ "$HX_X" = "0" ] || HX_XOK=0
+    hx_signame "$HX_X"
+    HX_XSIG="$HX_RET"
+
+    hx_shorten "$PWD"
+    hx_pct "$HX_RET"
+    HX_P="$HX_RET"
+
+    hx_misc_collect
+    hx_where_collect
+    hx_git_collect
+    hx_git_label
+    hx_cached_collect
+    hx_cloud_collect
+    hx_sys_collect
+    :
+}
+
+hx_title() {
+    [ "$HX_TITLE" = "1" ] || return 0
+    case "${TERM-}" in
+        xterm*|rxvt*|screen*|tmux*|alacritty*|foot*|kitty*|wezterm*|ghostty*)
+            printf '\033]0;%s@%s: %s\007' "$HX_U" "$HX_H" "$PWD"
+            ;;
+    esac
+}
+
+# Build HX_PS1/HX_RPS1 for the active theme, with a hard fallback if the
+# theme function is missing or explodes.
+hx_build() {
+    HX_PS1=''
+    HX_RPS1=''
+    if hx_has "hx_theme_$HX_THEME"; then
+        "hx_theme_$HX_THEME" 2>/dev/null
+    fi
+    if [ -z "$HX_PS1" ]; then
+        HX_PS1="$HX_U@$HX_H $HX_P$HX_PRIV "
+        HX_RPS1=''
+    fi
+}
+
+# --- right prompt -----------------------------------------------------------
+#
+# Only zsh has a real RPROMPT. Everywhere else the 30 themes' right prompts
+# were simply discarded. They need not be: printing the string right-aligned
+# and then returning the cursor to column 0 with a carriage return leaves it
+# on screen, and the left prompt is drawn over the left of the same line.
+#
+# The left prompt's first line must be short enough not to collide, so the
+# emulation stands down when the two would overlap. Padding uses a width
+# estimate that only ever errs large (see hx_vwidth), which shifts the right
+# prompt left rather than wrapping the line.
+hx_rprompt_emit() {
+    [ "$HX_RPROMPT" = "1" ] || return 0
+    [ -n "$HX_RPS1" ] || return 0
+    [ "$HX_SHELL" = "zsh" ] && return 0
+    [ -t 1 ] || return 0
+
+    hx_vwidth "$HX_RPS1"
+    hx_rw="$HX_W"
+
+    # First line of the left prompt is what shares the row.
+    hx_l1="${HX_PS1%%"$HX_NL"*}"
+    hx_vwidth "$hx_l1"
+    hx_lw="$HX_W"
+
+    hx_pad=$((HX_COLS - hx_rw))
+    if [ "$hx_pad" -le "$hx_lw" ] || [ "$hx_pad" -lt 1 ]; then
+        unset hx_rw hx_l1 hx_lw hx_pad
+        return 0
+    fi
+    printf '%*s%s\r' "$hx_pad" '' "$HX_RPS1"
+    unset hx_rw hx_l1 hx_lw hx_pad
+}
+
+hx_precmd() {
+    HX_LAST=$?
+    hx_timing
+    hx_collect "$HX_LAST"
+    hx_build
+    hx_title
+    PS1="$HX_PS1"
+    PS2="$HX_fdark$HX_G_H$HX_G_H$HX_G_TRI$HX_r "
+    if [ "$HX_SHELL" = "zsh" ]; then
+        RPS1="$HX_RPS1"
+        RPROMPT="$HX_RPS1"
+    else
+        hx_rprompt_emit
+    fi
+    :
+}
+
+# One-shot renderer for shells with no precmd hook (dash, and anything else
+# without PROMPT_COMMAND). PS1 is expanded per POSIX with parameter expansion
+# + command substitution, so this runs on every prompt.
+hx_render() {
+    hx_collect "${1:-0}"
+    hx_build
+    printf '%s' "$HX_PS1"
+}
+
+hx_hooks_install() {
+    if [ "$HX_SHELL" = "zsh" ]; then
+        setopt PROMPT_SUBST 2>/dev/null
+        setopt PROMPT_PERCENT 2>/dev/null
+        setopt TRANSIENT_RPROMPT 2>/dev/null
+        # Defined as plain functions so this file stays POSIX-parseable.
+        # If you already use add-zsh-hook elsewhere, drop these two defs.
+        precmd() { hx_precmd; }
+        preexec() { hx_preexec; }
+        hx_precmd
+    elif [ "$HX_SHELL" = "bash" ]; then
+        PROMPT_COMMAND=hx_precmd
+        # NOTE: the DEBUG trap is NOT installed here. hellish silently
+        # discards a DEBUG trap set inside a function body (a WINCH trap set
+        # the same way survives, so this is specific to DEBUG), which left
+        # HX_T0 unset and every command duration reading 0. It is installed
+        # at top level in section 14 instead. See `hx doctor`.
+        hx_precmd
+    else
+        PS1='$(hx_render "$?")'
+        PS2='> '
+    fi
+    :
+}
+
+# ============================================================================
+# 12. COMMAND SUITE: hx
+# ============================================================================
+#
+# `hxp` is deliberately NOT used here. In a full install that name belongs to
+# the plugin manager in ~/.hellish/lib/plugin.hsh, and claiming it would
+# shadow `hxp list` / `hxp install`. This file owns `hx` and nothing else.
+
+hx_theme_valid() {
+    [ "$HX_SHELL" = "zsh" ] && setopt localoptions shwordsplit 2>/dev/null
+    for hx_t in $HX_THEMES; do
+        [ "$hx_t" = "$1" ] && { unset hx_t; return 0; }
+    done
+    unset hx_t
+    return 1
+}
+
+hx_theme_set() {
+    if hx_theme_valid "$1"; then
+        HX_THEME="$1"
+        hx_hooks_install
+        printf '%s\n' "$HX_THEME" > "$HX_STATE/theme" 2>/dev/null
+        return 0
+    fi
+    printf 'hx: unknown theme: %s\n' "$1" >&2
+    printf 'hx: try `hx theme list`\n' >&2
+    return 1
+}
+
+hx_theme_index() {
+    [ "$HX_SHELL" = "zsh" ] && setopt localoptions shwordsplit 2>/dev/null
+    hx_i=0
+    hx_found=-1
+    for hx_t in $HX_THEMES; do
+        [ "$hx_t" = "$HX_THEME" ] && hx_found=$hx_i
+        hx_i=$((hx_i + 1))
+    done
+    HX_COUNT=$hx_i
+    HX_IDX=$hx_found
+    unset hx_i hx_found hx_t
+}
+
+hx_theme_at() {
+    [ "$HX_SHELL" = "zsh" ] && setopt localoptions shwordsplit 2>/dev/null
+    hx_i=0
+    for hx_t in $HX_THEMES; do
+        if [ "$hx_i" = "$1" ]; then
+            HX_RET="$hx_t"
+            unset hx_i hx_t
+            return 0
+        fi
+        hx_i=$((hx_i + 1))
+    done
+    HX_RET=hellish
+    unset hx_i hx_t
+    return 1
+}
+
+# Render one theme against the live context, without disturbing the session.
+hx_demo_one() {
+    hx_old="$HX_THEME"
+    HX_THEME="$1"
+    hx_build
+    printf '%s %s%s\n' "$HX_fdark$HX_G_H$HX_G_H" "$1" "$HX_r"
+    printf '%s\n' "$HX_PS1"
+    if [ -n "$HX_RPS1" ]; then
+        printf '   %sright:%s %s\n' "$HX_fdark" "$HX_r" "$HX_RPS1"
+    fi
+    HX_THEME="$hx_old"
+    hx_build
+    unset hx_old
+}
+
+hx_head() { printf '\n%s%s%s\n' "$HX_bd$HX_forange" "$*" "$HX_r"; }
+hx_row()  { printf '  %s%-16s%s %s\n' "$HX_fsteel" "$1" "$HX_r" "$2"; }
+
+hx_rule() {
+    hx_repeat "$HX_G_H" "$((HX_COLS - 2))"
+    printf '%s%s%s\n' "$HX_fdark" "$HX_RET" "$HX_r"
+}
+
+hx_banner() {
+    hx_rule
+    printf '%s  hellish%s %s   %stheme%s %s   %sshell%s %s   %scolor%s %s   %sthemes%s %s\n' \
+        "$HX_bd$HX_fcrim" "$HX_r" "$HX_VERSION" \
+        "$HX_fdark" "$HX_r" "$HX_THEME" \
+        "$HX_fdark" "$HX_r" "$([ "$HX_IS_HELLISH" = 1 ] && echo hellish || echo "$HX_SHELL")" \
+        "$HX_fdark" "$HX_r" "$HX_COLOR" \
+        "$HX_fdark" "$HX_r" "$(printf '%s\n' $HX_THEMES | grep -c .)"
+    hx_rule
+}
+
+# hx bench [N] — how long does one prompt actually take?
+#
+# Measures hx_collect + hx_build, which is everything between the shell
+# handing us control and PS1 being ready. The number that matters is the
+# per-prompt figure: anything above ~50ms is felt as lag while typing.
+hx_bench() {
+    hx_n="${1:-50}"
+    case "$hx_n" in ''|*[!0-9]*) hx_n=50 ;; esac
+
+    printf '%sbenchmarking %s prompt renders in %s%s\n' \
+        "$HX_fdark" "$hx_n" "$PWD" "$HX_r"
+
+    hx_now_ms; hx_b0="$HX_RET"
+    hx_i=0
+    while [ "$hx_i" -lt "$hx_n" ]; do
+        hx_collect 0
+        hx_build
+        hx_i=$((hx_i + 1))
+    done
+    hx_now_ms; hx_b1="$HX_RET"
+    hx_tot=$((hx_b1 - hx_b0))
+
+    # Again with the collectors skipped, to separate rendering from probing.
+    hx_now_ms; hx_b0="$HX_RET"
+    hx_i=0
+    while [ "$hx_i" -lt "$hx_n" ]; do
+        hx_build
+        hx_i=$((hx_i + 1))
+    done
+    hx_now_ms; hx_b1="$HX_RET"
+    hx_ren=$((hx_b1 - hx_b0))
+
+    hx_head 'bench'
+    hx_row 'iterations' "$hx_n"
+    hx_row 'total' "${hx_tot}ms"
+    hx_ms10 $hx_tot $hx_n;              hx_row 'per prompt' "$HX_RET"
+    hx_ms10 $hx_ren $hx_n;              hx_row 'of which render' "$HX_RET"
+    hx_ms10 $((hx_tot - hx_ren)) $hx_n; hx_row 'of which collect' "$HX_RET"
+    hx_row 'cache' "$([ "$HX_CACHE" = 1 ] && echo on || echo off)"
+    hx_row 'clock source' "$HX_CLOCK"
+    printf '\n  %sthe collect figure is dominated by git; try it outside a repo%s\n' \
+        "$HX_fdark" "$HX_r"
+    unset hx_n hx_i hx_b0 hx_b1 hx_tot hx_ren
+}
+
+hx_doctor() {
+    hx_head "hellishrc $HX_VERSION"
+    hx_row 'shell'      "$HX_SHELL$([ "$HX_IS_HELLISH" = 1 ] && echo ' (hellish)')"
+    hx_row 'interactive' "$HX_INTERACTIVE"
+    hx_row 'color'      "$HX_COLOR"
+    hx_row 'unicode'    "$HX_UNICODE$([ "$HX_NERD" = 1 ] && echo ' +nerd')"
+    hx_row 'columns'    "$HX_COLS"
+    hx_row 'clock'      "$HX_CLOCK"
+    hx_row 'theme'      "$HX_THEME ($(printf '%s\n' $HX_THEMES | grep -c .) available)"
+    hx_row 'hooks'      "$([ "$HX_SHELL" = posix ] && echo 'PS1 substitution' || echo 'PROMPT_COMMAND + DEBUG')"
+    hx_row 'rprompt'    "$([ "$HX_SHELL" = zsh ] && echo native || { [ "$HX_RPROMPT" = 1 ] && echo emulated || echo off; })"
+    hx_row 'cache'      "$([ "$HX_CACHE" = 1 ] && echo on || echo off)"
+
+    hx_head 'paths'
+    hx_row 'config'     "$HX_PROMPT_CONF$([ -r "$HX_PROMPT_CONF" ] || echo '  (not written yet)')"
+    hx_row 'state'      "$HX_STATE"
+    hx_row 'framework'  "$HX_HOME$([ -d "$HX_HOME/lib" ] && echo '  (plugin framework present)')"
+
+    hx_head 'tools'
+    for hx_t in git tput less kubectl docker fzf rg; do
+        if hx_has "$hx_t"; then
+            hx_row "$hx_t" "$HX_fgreen$HX_G_OK$HX_r"
+        else
+            hx_row "$hx_t" "$HX_fdark$HX_G_BAD not found$HX_r"
+        fi
+    done
+    unset hx_t
+
+    hx_head 'warnings'
+    hx_w=0
+    if [ "$HX_IS_HELLISH" = "1" ]; then
+        printf '  %s%s%s hellish reports BASH_VERSION but is not bash:\n' "$HX_fyellow" "$HX_G_BOLT" "$HX_r"
+        printf '      shopt is accepted and ignored, bind is missing,\n'
+        printf '      COLUMNS is never set, and ${#s} counts bytes not characters.\n'
+        printf '      This file works around all four; see `hx keys`.\n'
+        hx_w=$((hx_w + 1))
+    fi
+    if [ -f "$HX_HOME/hellish.conf" ] && [ ! -r "$HX_PROMPT_CONF" ]; then
+        printf '  %s%s%s prompt config not written yet; `hx conf save` creates it.\n' "$HX_fdark" "$HX_G_DOT" "$HX_r"
+    fi
+    if [ "$HX_UNICODE" = "0" ] && [ "$HX_THEME" != "ascii" ]; then
+        printf '  %s%s%s no UTF-8 locale detected; `hx theme set ascii` is the safe one.\n' "$HX_fyellow" "$HX_G_BOLT" "$HX_r"
+        hx_w=$((hx_w + 1))
+    fi
+    [ "$hx_w" = "0" ] && printf '  %s%s nothing to report%s\n' "$HX_fgreen" "$HX_G_OK" "$HX_r"
+    unset hx_w
+    printf '\n'
+}
+
+hx_segments() {
+    hx_collect "${1:-0}"
+    hx_head 'exit'
+    hx_row 'HX_X'      "$HX_X"
+    hx_row 'HX_XSIG'   "${HX_XSIG:-$HX_fdark(none)$HX_r}"
+    hx_head 'location'
+    hx_row 'HX_P'      "$HX_P"
+    hx_row 'HX_U/HX_H' "$HX_U@$HX_H"
+    hx_row 'HX_CTR'    "${HX_CTR:-$HX_fdark(none)$HX_r}"
+    hx_row 'HX_MUX'    "${HX_MUX:-$HX_fdark(none)$HX_r}"
+    hx_row 'HX_SSHF'   "$HX_SSHF"
+    hx_head 'git'
+    hx_row 'HX_GREPO'  "${HX_GREPO:-$HX_fdark(not a repo)$HX_r}"
+    hx_row 'HX_GB'     "${HX_GB:-$HX_fdark-$HX_r}"
+    hx_row 'HX_GF'     "${HX_GF:-$HX_fdark(clean)$HX_r}"
+    hx_row 'ahead/behind' "$HX_GA/$HX_GBH"
+    hx_row 'HX_GS'     "$HX_GS"
+    hx_row 'HX_GST'    "${HX_GST:-$HX_fdark(none)$HX_r}"
+    hx_row 'HX_GLABEL' "${HX_GLABEL:-$HX_fdark-$HX_r}"
+    hx_head 'toolchain'
+    hx_row 'HX_LANG'   "${HX_LANG:-$HX_fdark(none)$HX_r}"
+    hx_row 'HX_VENV'   "${HX_VENV:-$HX_fdark(none)$HX_r}"
+    hx_row 'HX_KCTX'   "${HX_KCTX:-$HX_fdark(off)$HX_r}"
+    hx_row 'HX_CLOUDP' "${HX_CLOUDP:-$HX_fdark(off)$HX_r}"
+    hx_head 'system'
+    hx_row 'HX_JOBS'   "$HX_JOBS"
+    hx_row 'HX_LOAD'   "${HX_LOAD:-$HX_fdark(off)$HX_r}"
+    hx_row 'HX_BAT'    "${HX_BAT:-$HX_fdark(none)$HX_r}${HX_BATST:+ $HX_BATST}"
+    hx_row 'HX_TIME'   "$HX_TIME"
+    hx_row 'HX_DURSTR' "${HX_DURSTR:-$HX_fdark(under threshold)$HX_r}"
+    printf '\n'
+}
+
+hx_colors_card() {
+    printf '%smode %s   unicode %s   shell %s   columns %s%s\n\n' \
+        "$HX_fdark" "$HX_COLOR" "$HX_UNICODE" "$HX_SHELL" "$HX_COLS" "$HX_r"
+    printf '%spalette%s\n' "$HX_bd$HX_forange" "$HX_r"
+    for hx_spec in fred:red fcrim:crim fpink:pink forange:orange fsand:sand \
+        fgold:gold fyellow:yellow flime:lime facid:acid fgreen:green fmoss:moss \
+        fteal:teal fcyan:cyan fneon:neon fsky:sky fblue:blue fsteel:steel \
+        fdeep:deep fviolet:violet fpurple:purple fmagenta:magenta fmauve:mauve \
+        fslate:slate fgrey:grey fdark:dark
+    do
+        eval "hx_v=\$HX_${hx_spec%%:*}"
+        printf '%s%s %-8s%s' "$hx_v" "$HX_G_HALF$HX_G_HALF" "${hx_spec#*:}" "$HX_r"
+        hx_i=$((${hx_i:-0} + 1))
+        [ $((hx_i % 5)) = 0 ] && printf '\n'
+    done
+    unset hx_spec hx_v
+    [ $((hx_i % 5)) = 0 ] || printf '\n'
+    hx_i=0
+    printf '\n%s256 ramp%s\n' "$HX_bd$HX_forange" "$HX_r"
+    while [ "$hx_i" -lt 256 ]; do
+        printf '%s %3d %s' "$(hx_esc 48 "$hx_i")" "$hx_i" "$HX_r"
+        hx_i=$((hx_i + 1))
+        [ $((hx_i % 8)) = 0 ] && printf '\n'
+    done
+    unset hx_i
+}
+
+hx_glyphs_card() {
+    printf '%sunicode=%s nerd=%s%s\n' "$HX_fdark" "$HX_UNICODE" "$HX_NERD" "$HX_r"
+    hx_head 'box'
+    printf '   %s %s %s %s   %s %s %s %s\n' \
+        "$HX_G_TL" "$HX_G_TR" "$HX_G_BL" "$HX_G_V" \
+        "$HX_G_H" "$HX_G_TLB" "$HX_G_BLB" "$HX_G_SQ"
+    hx_head 'prompt'
+    printf '   %s %s %s %s %s %s\n' \
+        "$HX_G_ARR" "$HX_G_LAM" "$HX_G_TRI" "$HX_G_PL" "$HX_G_PLT" "$HX_G_DIAM"
+    hx_head 'status'
+    printf '   %s %s %s %s %s %s %s\n' \
+        "$HX_G_OK" "$HX_G_BAD" "$HX_G_UP" "$HX_G_DN" \
+        "$HX_G_STASH" "$HX_G_BOLT" "$HX_G_CLK"
+    hx_head 'context'
+    printf '   %s %s %s %s %s %s\n' \
+        "$HX_G_BR" "$HX_G_HELM" "$HX_G_CLOUD" "$HX_G_BOX" "$HX_G_LOCK" "$HX_G_PLUG"
+    printf '\n  %sif any of the above is a box or a blank, the font lacks it;%s\n' "$HX_fdark" "$HX_r"
+    printf '  %s`hx conf set HX_UNICODE 0` falls the whole file back to ASCII.%s\n\n' "$HX_fdark" "$HX_r"
+}
+
+hx_keys_card() {
+    hx_head 'what this shell honors'
+    if [ "$HX_SHELL" = "zsh" ]; then
+        hx_row 'history search' 'Up / Down (prefix-matched)'
+        hx_row 'word motion'    'Ctrl+Left / Ctrl+Right'
+        hx_row 'completion'     'menu select, case-insensitive'
+        hx_row 'rprompt'        'native RPROMPT'
+    elif [ "$HX_IS_HELLISH" = "1" ]; then
+        hx_row 'rprompt'        'emulated (pad + carriage return)'
+        hx_row 'prompt hook'    'PROMPT_COMMAND'
+        hx_row 'timing hook'    'DEBUG trap, double-fire guarded'
+        printf '\n  %shellish has no `bind` builtin and its `shopt` is a no-op,%s\n' "$HX_fdark" "$HX_r"
+        printf '  %sso keybindings and shell options cannot be set from an rc.%s\n' "$HX_fdark" "$HX_r"
+        printf '  %sEverything above is done without them.%s\n' "$HX_fdark" "$HX_r"
+    else
+        hx_row 'history search' 'Up / Down (via bind)'
+        hx_row 'rprompt'        'emulated (pad + carriage return)'
+        hx_row 'shell options'  'autocd, globstar, checkwinsize'
+    fi
+    printf '\n'
+}
+
+hx_conf_cmd() {
+    hx_sub="${1-}"
+    [ $# -gt 0 ] && shift
+    case "$hx_sub" in
+        ''|list|ls)
+            hx_head 'configuration'
+            for hx_k in $HX_KEYS; do
+                eval "hx_v=\${$hx_k-}"
+                hx_row "$hx_k" "$hx_v"
+            done
+            printf '\n  %sfile: %s%s\n\n' "$HX_fdark" "$HX_PROMPT_CONF" "$HX_r"
+            unset hx_k hx_v
+            ;;
+        get)
+            if hx_key_valid "${1-}"; then
+                eval "printf '%s\\n' \"\${$1-}\""
+            else
+                printf 'hx conf: not a settable key: %s\n' "${1-}" >&2
+                return 1
+            fi
+            ;;
+        set)
+            if ! hx_key_valid "${1-}"; then
+                printf 'hx conf: not a settable key: %s\n' "${1-}" >&2
+                printf 'hx conf: `hx conf list` shows every key\n' >&2
+                return 1
+            fi
+            eval "$1=\$2"
+            hx_conf_save && printf '%s=%s\n' "$1" "$2"
+            # Colors, glyphs and the theme all need rebuilding on change.
+            hx_palette
+            hx_cache_drop
+            hx_hooks_install
+            ;;
+        save)
+            hx_conf_save && printf 'saved to %s\n' "$HX_PROMPT_CONF"
+            ;;
+        edit)
+            "${EDITOR:-vi}" "$HX_PROMPT_CONF"
+            hx_conf_load
+            hx_hooks_install
+            ;;
+        reset)
+            rm -f "$HX_PROMPT_CONF" 2>/dev/null
+            printf 'removed %s; `hx reload` to return to defaults\n' "$HX_PROMPT_CONF"
+            ;;
+        *)
+            printf 'hx conf: unknown subcommand: %s\n' "$hx_sub" >&2
+            return 1
+            ;;
+    esac
+    unset hx_sub
+}
+
+hx_theme_cmd() {
+    hx_sub="${1-}"
+    [ $# -gt 0 ] && shift
+    case "$hx_sub" in
+        ''|show|current)
+            printf '%s\n' "$HX_THEME"
+            ;;
+        list|ls)
+            for hx_t in $HX_THEMES; do
+                if [ "$hx_t" = "$HX_THEME" ]; then
+                    printf '%s  %s %s%s\n' "$HX_fgreen" "$HX_G_TRI" "$hx_t" "$HX_r"
+                else
+                    printf '    %s\n' "$hx_t"
+                fi
+            done
+            unset hx_t
+            ;;
+        set|use)
+            hx_theme_set "${1-}"
+            ;;
+        next)
+            hx_theme_index
+            hx_theme_at $(( (HX_IDX + 1) % HX_COUNT ))
+            hx_theme_set "$HX_RET" && printf '%s\n' "$HX_THEME"
+            ;;
+        prev)
+            hx_theme_index
+            hx_theme_at $(( (HX_IDX + HX_COUNT - 1) % HX_COUNT ))
+            hx_theme_set "$HX_RET" && printf '%s\n' "$HX_THEME"
+            ;;
+        random|rand)
+            hx_theme_index
+            hx_now_ms
+            hx_theme_at $(( (HX_RET + $$) % HX_COUNT ))
+            hx_theme_set "$HX_RET" && printf '%s\n' "$HX_THEME"
+            ;;
+        demo|preview)
+            if [ -n "${1-}" ]; then
+                hx_demo_one "$1"
+            else
+                hx_collect 0
+                for hx_t in $HX_THEMES; do hx_demo_one "$hx_t"; done
+                unset hx_t
+            fi
+            ;;
+        *)
+            hx_theme_set "$hx_sub"
+            ;;
+    esac
+    unset hx_sub
+}
+
+hx_help() {
+    hx_banner
+    hx_head 'commands'
+    hx_row 'hx'              'this card'
+    hx_row 'hx theme'        'show the active theme'
+    hx_row 'hx theme list'   'every theme, active one marked'
+    hx_row 'hx theme set X'  'switch (also: hx theme X)'
+    hx_row 'hx theme next'   'cycle forward; prev, random'
+    hx_row 'hx theme demo'   'render every theme with live data'
+    hx_row 'hx conf'         'list configuration'
+    hx_row 'hx conf get K'   'read one key'
+    hx_row 'hx conf set K V' 'write one key and persist'
+    hx_row 'hx conf edit'    "open $HX_PROMPT_CONF in \$EDITOR"
+    hx_row 'hx conf reset'   'delete the config file'
+    hx_row 'hx doctor'       'capability and health report'
+    hx_row 'hx bench [N]'    'measure prompt render cost'
+    hx_row 'hx segments'     'dump every collected value, right now'
+    hx_row 'hx colors'       'palette and 256 ramp'
+    hx_row 'hx glyphs'       'unicode / nerd font test card'
+    hx_row 'hx keys'         'what this shell actually honors'
+    hx_row 'hx banner'       'the boot card'
+    hx_row 'hx reload'       're-source this file'
+    hx_row 'hx version'      'version only'
+
+    hx_head 'aliases'
+    hx_row 'theme, prompt'   'hx theme'
+
+    if [ "$HX_ERGONOMICS" = "1" ]; then
+        hx_head 'shortcuts'
+        hx_row 'll, la, lt'      'long / all / by time'
+        hx_row '.. ... ....'     'climb one, two, three'
+        hx_row 'g, gs, gl'       'git, status, log graph'
+        hx_row 'gd, gds'         'diff, diff --staged'
+        hx_row 'mkcd DIR'        'make it, enter it'
+        hx_row 'up N'            'climb N directories'
+        hx_row 'ff PATTERN'      'find files by name below .'
+        hx_row 'fd PATTERN'      'find directories by name below .'
+        hx_row 'extract FILE'    'one command for every archive format'
+        hx_row 'bak FILE'        'timestamped copy beside it'
+        hx_row 'serve [PORT]'    'http server on the current directory'
+        hx_row 'path'            '$PATH, one entry per line'
+    fi
+
+    hx_head 'configuration'
+    printf '  %severy key below is settable with `hx conf set KEY VALUE`%s\n\n' \
+        "$HX_fdark" "$HX_r"
+    hx_row 'HX_THEME'        'theme name'
+    hx_row 'HX_COLOR'        'auto | 24 | 256 | 8 | none'
+    hx_row 'HX_UNICODE'      'auto | 1 | 0'
+    hx_row 'HX_NERD'         'powerline glyphs (needs a patched font)'
+    hx_row 'HX_GIT'          'vcs segment'
+    hx_row 'HX_GIT_DEEP'     'ahead / behind / stash counts'
+    hx_row 'HX_PATH_STYLE'   'full | short | tail | fish'
+    hx_row 'HX_PATH_MAX'     'components before eliding'
+    hx_row 'HX_DUR_MIN'      'ms before a duration is shown'
+    hx_row 'HX_TITLE'        'set the terminal title'
+    hx_row 'HX_RPROMPT'      'right prompt emulation'
+    hx_row 'HX_ERGONOMICS'   'aliases and helper functions'
+    hx_row 'HX_BANNER'       'print the boot card at startup'
+    hx_row 'HX_CACHE'        'per-directory toolchain cache'
+    hx_row 'HX_K8S'          'kubernetes context segment'
+    hx_row 'HX_CLOUD'        'aws / gcp profile segment'
+    hx_row 'HX_SYS'          'load average and battery'
+    printf '\n'
+}
+
+hx() {
+    [ "$HX_SHELL" = "zsh" ] && setopt localoptions shwordsplit 2>/dev/null
+    hx_cmd="${1-}"
+    [ $# -gt 0 ] && shift
+    case "$hx_cmd" in
+        '')            hx_banner; printf '\n  %shx help%s for everything\n\n' "$HX_fdark" "$HX_r" ;;
+        theme|t)       hx_theme_cmd "$@" ;;
+        conf|config|c) hx_conf_cmd "$@" ;;
+        doctor|dr)     hx_doctor ;;
+        bench)         hx_bench "$@" ;;
+        segments|seg)  hx_segments "$@" ;;
+        colors|color)  hx_colors_card ;;
+        glyphs|glyph)  hx_glyphs_card ;;
+        keys)          hx_keys_card ;;
+        banner)        hx_banner ;;
+        cache)
+            case "${1-}" in
+                drop|clear) hx_cache_drop; printf 'cache dropped\n' ;;
+                *) printf 'pwd=%s lang=%s venv=%s\n' \
+                    "${HX_CPWD:--}" "${HX_CLANG:--}" "${HX_CVENV:--}" ;;
+            esac
+            ;;
+        reload)        hx_cache_drop; . "${HX_RC:-$HOME/.hellishrc}" ;;
+        version|-v|--version) printf '%s\n' "$HX_VERSION" ;;
+        help|-h|--help) hx_help ;;
+        *)
+            # `hx neon` is shorthand for `hx theme set neon`.
+            if hx_theme_valid "$hx_cmd"; then
+                hx_theme_set "$hx_cmd"
+            else
+                printf 'hx: unknown command: %s\n' "$hx_cmd" >&2
+                printf 'hx: try `hx help`\n' >&2
+                unset hx_cmd
+                return 1
+            fi
+            ;;
+    esac
+    unset hx_cmd
+}
+
+alias theme='hx theme'
+alias prompt='hx theme'
+
+# ============================================================================
+# 13. ERGONOMICS
+# ============================================================================
+#
+# Split three ways, because the three shells genuinely differ:
+#
+#   zsh      setopt / zstyle / bindkey all work
+#   bash     shopt / bind work
+#   hellish  NEITHER works. `shopt -s anything` returns 0 and does nothing,
+#            and `bind` is not a builtin at all. Aliases and functions are
+#            all that survive, so that is all this branch defines.
+
+if [ "$HX_ERGONOMICS" = "1" ] && [ "$HX_SHELL" = "zsh" ]; then
+    HISTFILE="$HX_STATE/history"
+    HISTSIZE=100000
+    SAVEHIST=100000
+
+    setopt APPEND_HISTORY INC_APPEND_HISTORY SHARE_HISTORY 2>/dev/null
+    setopt HIST_IGNORE_DUPS HIST_IGNORE_ALL_DUPS HIST_IGNORE_SPACE 2>/dev/null
+    setopt HIST_REDUCE_BLANKS HIST_VERIFY EXTENDED_HISTORY 2>/dev/null
+    setopt AUTO_CD AUTO_PUSHD PUSHD_IGNORE_DUPS PUSHD_SILENT 2>/dev/null
+    setopt EXTENDED_GLOB GLOB_DOTS NO_CASE_GLOB NUMERIC_GLOB_SORT 2>/dev/null
+    setopt INTERACTIVE_COMMENTS LONG_LIST_JOBS NOTIFY 2>/dev/null
+    setopt NO_BEEP NO_FLOW_CONTROL 2>/dev/null
+    unsetopt CORRECT_ALL 2>/dev/null
+
+    autoload -Uz compinit 2>/dev/null && compinit -C 2>/dev/null
+    zstyle ':completion:*' menu select 2>/dev/null
+    zstyle ':completion:*' matcher-list 'm:{a-z}={A-Z}' 2>/dev/null
+    zstyle ':completion:*' list-colors '' 2>/dev/null
+    zstyle ':completion:*:descriptions' format '%F{242}%d%f' 2>/dev/null
+
+    bindkey -e 2>/dev/null
+    bindkey '^[[A' history-search-backward 2>/dev/null
+    bindkey '^[[B' history-search-forward 2>/dev/null
+    bindkey '^[[1;5C' forward-word 2>/dev/null
+    bindkey '^[[1;5D' backward-word 2>/dev/null
+
+elif [ "$HX_ERGONOMICS" = "1" ] && [ "$HX_SHELL" = "bash" ] && [ "$HX_IS_HELLISH" = "0" ]; then
+    HISTFILE="$HX_STATE/history"
+    HISTSIZE=100000
+    HISTFILESIZE=100000
+    HISTCONTROL=ignoreboth:erasedups
+    HISTTIMEFORMAT='%F %T  '
+
+    shopt -s histappend cmdhist 2>/dev/null
+    shopt -s autocd cdspell dirspell 2>/dev/null
+    shopt -s checkwinsize globstar nocaseglob 2>/dev/null
+    shopt -s no_empty_cmd_completion 2>/dev/null
+
+    bind 'set completion-ignore-case on' 2>/dev/null
+    bind 'set show-all-if-ambiguous on' 2>/dev/null
+    bind '"\e[A": history-search-backward' 2>/dev/null
+    bind '"\e[B": history-search-forward' 2>/dev/null
+fi
+
+if [ "$HX_ERGONOMICS" = "1" ]; then
+    alias ll='ls -lhF'
+    alias la='ls -lAhF'
+    alias lt='ls -lhFt'
+    alias ..='cd ..'
+    alias ...='cd ../..'
+    alias ....='cd ../../..'
+    alias g='git'
+    alias gs='git status --short --branch'
+    alias gl='git log --oneline --graph --decorate -20'
+    alias gd='git diff'
+    alias gds='git diff --staged'
+
+    # mkcd DIR — make it, enter it.
+    mkcd() { mkdir -p "$1" && cd "$1" || return 1; }
+
+    # up N — climb N directories.
+    up() {
+        hx_n="${1:-1}"
+        hx_p=''
+        while [ "$hx_n" -gt 0 ]; do
+            hx_p="../$hx_p"
+            hx_n=$((hx_n - 1))
+        done
+        cd "$hx_p" || return 1
+        unset hx_n hx_p
+    }
+
+    # ff / fd PATTERN — find files / directories by name below $PWD.
+    ff() { find . -type f -name "*$1*" 2>/dev/null; }
+    fd() { find . -type d -name "*$1*" 2>/dev/null; }
+
+    # bak FILE — timestamped copy beside the original.
+    bak() {
+        [ -e "$1" ] || { printf 'bak: no such file: %s\n' "$1" >&2; return 1; }
+        cp -a "$1" "$1.$(date +%Y%m%d-%H%M%S).bak" && printf '%s.%s.bak\n' "$1" "$(date +%Y%m%d-%H%M%S)"
+    }
+
+    # path — $PATH, one entry per line.
+    path() { printf '%s\n' "$PATH" | tr ':' '\n'; }
+
+    # serve [PORT] — http server rooted at $PWD.
+    serve() {
+        hx_p="${1:-8000}"
+        if command -v python3 >/dev/null 2>&1; then
+            printf 'serving %s on http://localhost:%s\n' "$PWD" "$hx_p"
+            python3 -m http.server "$hx_p"
+        else
+            printf 'serve: needs python3\n' >&2
+            return 1
+        fi
+        unset hx_p
+    }
+
+    # extract FILE — one command for every archive format.
+    extract() {
+        [ -f "$1" ] || { printf 'extract: no such file: %s\n' "$1" >&2; return 1; }
+        case "$1" in
+            *.tar.bz2|*.tbz2) tar xjf "$1" ;;
+            *.tar.gz|*.tgz)   tar xzf "$1" ;;
+            *.tar.xz|*.txz)   tar xJf "$1" ;;
+            *.tar.zst)        tar --zstd -xf "$1" ;;
+            *.tar)            tar xf "$1" ;;
+            *.bz2)            bunzip2 "$1" ;;
+            *.gz)             gunzip "$1" ;;
+            *.xz)             unxz "$1" ;;
+            *.zst)            unzstd "$1" ;;
+            *.zip)            unzip "$1" ;;
+            *.7z)             7z x "$1" ;;
+            *.rar)            unrar x "$1" ;;
+            *) printf 'extract: unknown format: %s\n' "$1" >&2; return 1 ;;
+        esac
+    }
+fi
+
+# ============================================================================
+# 14. INIT
+# ============================================================================
+
+# Restore the persisted theme, unless the environment overrode it.
+if [ -z "${HX_THEME-}" ] && [ -r "$HX_STATE/theme" ]; then
+    read -r HX_THEME < "$HX_STATE/theme" 2>/dev/null
+fi
+HX_THEME="${HX_THEME:-hellish}"
+hx_theme_valid "$HX_THEME" || HX_THEME=hellish
+
+hx_hooks_install
+
+# Top level, deliberately: see the note in hx_hooks_install. This is the one
+# statement in the file that cannot be moved into a function.
+if [ "$HX_SHELL" = "bash" ]; then
+    trap 'hx_preexec' DEBUG 2>/dev/null
+fi
+
+[ -r "$HX_PROMPT_CONF" ] || hx_conf_save
+
+# Local overrides, loaded last so they always win. Anything machine-specific
+# belongs here rather than in this file.
+[ -r "$HX_HOME/local.sh" ] && . "$HX_HOME/local.sh"
+
+[ "$HX_BANNER" = "1" ] && hx_banner
+
+fi
+
+# ============================================================================
+# Sourcing must never poison the first prompt's exit status.
+# ============================================================================
+:

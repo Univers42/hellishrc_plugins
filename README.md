@@ -78,8 +78,24 @@ After that line the plugin is enabled; declare dependencies with
 `hx_func_doc` so `hxp info` and `help_conf` can explain you. `hxp new <name>`
 scaffolds all of this.
 
+## Examples
+
+`examples/hellishrc` is a standalone, single-file `~/.hellishrc` — 30 prompt
+themes, a context collector layer and an `hx` command suite, with no dependency
+on `~/.hellish/lib` or anything else here. It is the "one file, drop it in"
+counterpart to the framework above.
+
+```sh
+cp examples/hellishrc ~/.hellishrc && exec hellish
+hx help
+```
+
+See `examples/README.md` for what it collects, how it is configured, and the
+four hellish-vs-bash differences it works around.
+
 ## Test
 
 ```sh
 hellish test/run.hsh        # loads the real config, asserts the registry
+hellish test/prompt.hsh     # 31 checks against examples/hellishrc
 ```
