@@ -1222,8 +1222,11 @@ hx_theme_ascii() {
 
 # --- 19. hex ----------------------------------------------------------------
 hx_theme_hex() {
-    hx_x="$HX_fmoss0x0"
-    [ "$HX_XOK" = "0" ] && hx_x="$HX_fcrim0x$HX_X"
+    # Braces are load-bearing. Without them the name runs on into the "0x0"
+    # that follows and the shell looks up a variable that does not exist, so
+    # the marker rendered as nothing. test/prompt.hsh checks for this class.
+    hx_x="${HX_fmoss}0x0"
+    [ "$HX_XOK" = "0" ] && hx_x="${HX_fcrim}0x$HX_X"
     hx_g=''
     [ -n "$HX_GLABEL" ] && hx_g=" $HX_fdark<$HX_r$HX_fteal$HX_GLABEL$HX_r$HX_fdark>$HX_r"
     HX_PS1="$hx_x$HX_r $HX_fdark|$HX_r $HX_fslate$HX_P$HX_r$hx_g $HX_fteal$HX_G_ARR$HX_r "
@@ -1632,9 +1635,12 @@ hx_demo_one() {
     hx_build
     printf '%s %s%s\n' "$HX_fdark$HX_G_H$HX_G_H" "$1" "$HX_r"
     printf '%s\n' "$HX_PS1"
-    if [ -n "$HX_RPS1" ]; then
-        printf '   %sright:%s %s\n' "$HX_fdark" "$HX_r" "$HX_RPS1"
-    fi
+    # HX_RPS1 is never empty once colour is on - it is at least a reset
+    # sequence - so test what it actually renders, not the raw string.
+    hx_strip "$HX_RPS1"
+    case "$HX_RET" in
+        *[!\ ]*) printf '   %sright:%s %s\n' "$HX_fdark" "$HX_r" "$HX_RPS1" ;;
+    esac
     HX_THEME="$hx_old"
     hx_build
     unset hx_old

@@ -65,6 +65,22 @@ ck 'with HX_COLOR=none, no escapes' "$hx_bad" ''
 HX_COLOR=24; hx_palette
 HX_THEME=hellish
 
+# A colour variable written without braces runs on into whatever follows it:
+# the shell then looks up one long undefined name, expands it to nothing, and
+# the text disappears with no error. That is what ate the hex theme's marker.
+# Every HX_ name the file mentions must therefore resolve to a real variable.
+printf '\n%sno undefined HX_ references%s\n' "$HX_bd$HX_forange" "$HX_r"
+hx_vwidth x                     # defines HX_W, which is set on first use
+HX_KNS="${HX_KNS-}"             # optional kube namespace override
+HX_RC="${HX_RC-}"               # optional path override for `hx reload`
+hx_undef=''
+for hx_n in $(grep -o '\$HX_[A-Za-z_][A-Za-z0-9_]*\|\${HX_[A-Za-z_][A-Za-z0-9_]*' \
+                  "$HX_RC_UNDER_TEST" | sed 's/^\${*//' | sort -u); do
+    eval "hx_v=\${$hx_n+set}"
+    [ -n "$hx_v" ] || hx_undef="$hx_undef $hx_n"
+done
+ck 'every $HX_ name resolves' "$hx_undef" ''
+
 printf '\n%sutilities%s\n' "$HX_bd$HX_forange" "$HX_r"
 hx_dur 500;    ck 'hx_dur 500'    "$HX_RET" '500ms'
 hx_dur 1500;   ck 'hx_dur 1500'   "$HX_RET" '1.5s'
