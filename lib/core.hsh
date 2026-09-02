@@ -155,11 +155,15 @@ hx_source() {
     return 0
 }
 
-# hx_load_dir <dir> — source *.hsh in lexical order (00-, 10-, ... 99-).
+# hx_load_dir <dir> — source *.hsh and *.zsh in lexical order (00-, 10-, ...).
+# A .zsh module is read by hellish in its zsh dialect (the same rule `source`
+# applies), which is how a zsh-flavoured file -- `precmd() { vcs_info }`,
+# zstyle, PROMPT -- lives next to the .hsh ones without a marker (issue #112).
 hx_load_dir() {
     local d="$1" f
     [ -d "$d" ] || return 0
-    for f in "$d"/*.hsh; do
+    for f in "$d"/*; do
+        case "$f" in *.hsh|*.zsh) ;; *) continue ;; esac
         [ -r "$f" ] || continue      # hellish has no working nullglob: guard by hand
         HX_CURRENT_MODULE="$(hx_module_name "$f")"
         hx_source "$f"
@@ -172,7 +176,24 @@ hx_load_dir() {
 hx_module_name() {
     local b="${1##*/}"
     b="${b%.hsh}"
+    b="${b%.zsh}"
     printf '%s' "${b#*-}"
+}
+
+# hx_shell_bin — the hellish this configuration runs in. Never assumed to be
+# /usr/bin/hellish: a user-mode install (every 42 machine) lives in
+# ~/.local/bin, and `forge lint` hardcoding /usr/bin failed every plugin there
+# with "does not parse: /usr/bin/hellish: No such file or directory".
+hx_shell_bin() {
+    if [ -n "${HELLISH_BIN:-}" ] && [ -x "$HELLISH_BIN" ]; then
+        printf '%s' "$HELLISH_BIN"
+    elif command -v hellish >/dev/null 2>&1; then
+        command -v hellish
+    elif [ -n "${SHELL:-}" ] && [ -x "$SHELL" ]; then
+        printf '%s' "$SHELL"
+    else
+        printf '%s' /usr/bin/hellish
+    fi
 }
 
 HX_CURRENT_MODULE=core

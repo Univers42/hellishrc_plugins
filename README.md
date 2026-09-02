@@ -32,7 +32,8 @@ a timestamped backup beside the original.
 ~/.hellishrc        the loader — deliberately tiny, everything real lives in:
 ~/.hellish/
   lib/              ui.hsh core.hsh plugin.hsh conf.hsh   (the framework)
-  rc.d/             10-env … 99-local                     (config modules, in order)
+  rc.d/             10-env … 99-local                     (config modules, in order;
+                                                           a .zsh module is read with zsh rules)
   plugins/          one directory per plugin + catalog.tsv
   bin/              hx-fetch-plugin                       (the external-plugin fetcher)
   hellish.conf      which features are on                 (managed by `conf`)
