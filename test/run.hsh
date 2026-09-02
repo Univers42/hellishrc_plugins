@@ -134,7 +134,11 @@ _td=$(mktemp -d)
 ( cd "$_td/a/b" && up 2 >/dev/null && [ "$PWD" = "$_td" ] ) && t_ok "up climbs N levels" || t_bad "up"
 rm -rf "$_td"
 
-t_eq "7.0" "$(calc '3.5 * 2')" "calc does floating point"
+if command -v bc >/dev/null 2>&1; then
+    t_eq "7.0" "$(calc '3.5 * 2')" "calc does floating point"
+else
+    t_skip "calc does floating point — no bc on this machine"
+fi
 printf 'y\n' | confirm x >/dev/null 2>&1 && t_ok "confirm accepts y" || t_bad "confirm accepts y"
 printf 'n\n' | confirm x >/dev/null 2>&1 && t_bad "confirm rejects n" || t_ok "confirm rejects n"
 
@@ -191,58 +195,79 @@ t_false "conf rejects an unknown subcommand"   conf no_such_cmd
 t_false "help_conf rejects an unknown section" help_conf no_such_section
 
 # ── plugins ─────────────────────────────────────────────────────────────────
+# This suite tests what is actually configured. Every builtin plugin is
+# REGISTERED whatever its state (the hx_plugin line runs before `|| return
+# 0`), but a plugin switched off in hellish.conf defines nothing -- and an
+# installer that was told `--plugins="git jump"` leaves the other five off.
+# Asserting their functions anyway reported 16 failures on a perfectly
+# healthy install. So: registration is checked for all, behaviour only for
+# the plugins that are on, and a plugin that is off is a skip, not a fail.
 t_head "plugins"
 for _p in git devkit jump docker net sentinel forge; do
     if hx_known "$_p"; then t_ok "plugin '$_p' registered"; else t_bad "plugin '$_p' missing"; fi
 done
-t_defined ginfo     "git: ginfo defined"
-t_defined gsweep    "git: gsweep defined"
-t_defined proj_type "devkit: proj_type defined"
-t_defined j         "jump: j defined"
-t_defined marks     "jump: marks defined"
-t_defined dps       "docker: dps defined"
-t_defined waitport  "net: waitport defined"
-t_defined sentinel  "sentinel: sentinel defined"
-t_defined forge     "forge: forge defined"
+# t_on <plugin> -> 0 when its checks should run, else records one skip
+t_on() { if hx_enabled "$1"; then return 0; fi; t_skip "plugin '$1' is off -- its checks are skipped"; return 1; }
 
-t_eq "unknown" "$(proj_type /tmp)"        "devkit detects an unknown directory"
-# a project of our own making, so the test does not assume anything about
-# this machine's home directory
-_pt=$(mktemp -d); : > "$_pt/Makefile"
-t_eq "make"    "$(proj_type $_pt)"        "devkit detects a Makefile project"
-rm -rf "$_pt"
-
-# jump database round-trip
-_jbak=$(mktemp); cp "$HX_JUMP_DB" "$_jbak" 2>/dev/null
-_jump_record /tmp
-t_true "jump records a directory" grep -q '|/tmp$' "$HX_JUMP_DB"
-# rank in THIS shell: the functions are loaded, so asking a child sh to
-# re-source everything only tested the child's dialect
-if [ -n "$(_jump_rank tmp)" ]; then t_ok "jump ranks candidates"
-else t_bad "jump ranks candidates"
+if t_on git; then
+    t_defined ginfo     "git: ginfo defined"
+    t_defined gsweep    "git: gsweep defined"
 fi
-cp "$_jbak" "$HX_JUMP_DB" 2>/dev/null; rm -f "$_jbak"
-
-# net: waitport must fail fast on a dead port
-t_false "waitport fails on a closed port" waitport localhost 59997 1
+if t_on devkit; then
+    t_defined proj_type "devkit: proj_type defined"
+    t_eq "unknown" "$(proj_type /tmp)"        "devkit detects an unknown directory"
+    # a project of our own making, so the test does not assume anything about
+    # this machine's home directory
+    _pt=$(mktemp -d); : > "$_pt/Makefile"
+    t_eq "make"    "$(proj_type $_pt)"        "devkit detects a Makefile project"
+    rm -rf "$_pt"
+fi
+if t_on jump; then
+    t_defined j         "jump: j defined"
+    t_defined marks     "jump: marks defined"
+    # jump database round-trip
+    _jbak=$(mktemp); cp "$HX_JUMP_DB" "$_jbak" 2>/dev/null
+    _jump_record /tmp
+    t_true "jump records a directory" grep -q '|/tmp$' "$HX_JUMP_DB"
+    # rank in THIS shell: the functions are loaded, so asking a child sh to
+    # re-source everything only tested the child's dialect
+    if [ -n "$(_jump_rank tmp)" ]; then t_ok "jump ranks candidates"
+    else t_bad "jump ranks candidates"
+    fi
+    cp "$_jbak" "$HX_JUMP_DB" 2>/dev/null; rm -f "$_jbak"
+fi
+if t_on docker; then
+    t_defined dps       "docker: dps defined"
+fi
+if t_on net; then
+    t_defined waitport  "net: waitport defined"
+    # net: waitport must fail fast on a dead port
+    t_false "waitport fails on a closed port" waitport localhost 59997 1
+fi
+if t_on sentinel; then
+    t_defined sentinel  "sentinel: sentinel defined"
+fi
 
 # ── forge lint over every plugin ────────────────────────────────────────────
 t_head "forge lint (the contract) over every plugin"
-for _p in git devkit jump docker net sentinel forge; do
-    if forge_lint "$_p" >/dev/null 2>&1; then t_ok "forge lint: $_p"
-    else t_bad "forge lint: $_p — run: forge lint $_p"; fi
-done
+if t_on forge; then
+    t_defined forge     "forge: forge defined"
+    for _p in git devkit jump docker net sentinel forge; do
+        if forge_lint "$_p" >/dev/null 2>&1; then t_ok "forge lint: $_p"
+        else t_bad "forge lint: $_p — run: forge lint $_p"; fi
+    done
 
-# forge new produces a plugin that itself passes lint
-_tmpname="forgetest$$"
-if forge_new "$_tmpname" "a generated test plugin" >/dev/null 2>&1; then
-    t_ok "forge new scaffolds a plugin"
-    if forge_lint "$_tmpname" >/dev/null 2>&1; then t_ok "forge new output passes forge lint"
-    else t_bad "forge new output FAILS forge lint"; fi
-    t_true "forge new writes a README" test -r "$HX_PLUGIN_DIR/$_tmpname/README.md"
-    rm -rf "$HX_PLUGIN_DIR/$_tmpname"
-else
-    t_bad "forge new failed"
+    # forge new produces a plugin that itself passes lint
+    _tmpname="forgetest$$"
+    if forge_new "$_tmpname" "a generated test plugin" >/dev/null 2>&1; then
+        t_ok "forge new scaffolds a plugin"
+        if forge_lint "$_tmpname" >/dev/null 2>&1; then t_ok "forge new output passes forge lint"
+        else t_bad "forge new output FAILS forge lint"; fi
+        t_true "forge new writes a README" test -r "$HX_PLUGIN_DIR/$_tmpname/README.md"
+        rm -rf "$HX_PLUGIN_DIR/$_tmpname"
+    else
+        t_bad "forge new failed"
+    fi
 fi
 
 # ── prompt ──────────────────────────────────────────────────────────────────
