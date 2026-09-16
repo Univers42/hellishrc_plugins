@@ -1,0 +1,34 @@
+# themes/20-classic.hsh — prompts that already existed.
+#
+# Five shells' default prompts, reproduced rather than reinterpreted. They are
+# here for three reasons: muscle memory, screenshots that have to look like the
+# shell someone expects, and as a baseline -- if a theme in another family
+# looks wrong, rendering `classic` tells you whether the problem is the theme
+# or the terminal.
+#
+# `classic` and `plain` keep the names the previous five-theme `theme` command
+# used, so anything that called `theme classic` still gets what it asked for.
+
+# classic — bash's own: green user@host, blue path, a bare $.
+hx_theme classic classic '' "bash's default: green user@host, blue path" \
+    '{f:34}{user}@{host}{r}:{f:33}{cwd}{r}{priv} '
+
+# plain — sh. The path and a dollar. No colour, no badges, nothing.
+hx_theme plain classic '' 'sh: the path and a dollar sign, no colour' \
+    '{cwd}{priv} '
+
+# tcsh — [host:dir]% . The percent is written %% because a single one starts a
+# prompt escape; this is the one place a theme file has to think about it.
+hx_theme tcsh classic '' 'tcsh: [host:directory]% with a sand-coloured frame' \
+    '{f:180}[{host}:{base}]{r}%% '
+
+# dos — the drive-letter prompt. It keeps forward slashes, because a prompt
+# that rewrote your paths into backslashes would give you strings you cannot
+# paste back into the shell. The shape is the joke; the path stays honest.
+hx_theme dos classic '' 'C:path> — the joke that is still a working prompt' \
+    '{bold}{f:252}C:{cwd}{/bold}{f:250}>{r} '
+
+# sunos — the old commercial-unix look: bold host, colon, path, dollar, and
+# not a single colour beyond the terminal's bold.
+hx_theme sunos classic '' 'bold host, colon, path — monochrome, 1990' \
+    '{bold}{host}{/bold}{f:240}:{r}{cwd}{priv} '

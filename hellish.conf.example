@@ -2,10 +2,11 @@
 # Written by `conf save`. Hand-editing is fine: one directive per line.
 #   feature <name> <on|off>   toggle a module or plugin
 #   set     <VAR> <value>     set a configuration variable
-# Generated 2026-08-27 12:54:21
+# Generated 2026-09-16 14:46:10
 
 feature ai               on
 feature aliases          on
+feature clean            on
 feature completion       on
 feature devkit           on
 feature docker           on
@@ -21,6 +22,9 @@ feature options          on
 feature prompt           on
 feature sentinel         on
 
-set HX_THEME         box
+set HX_THEME         vault
 set HX_COLOR         auto
+set HX_NERD          0
+set HX_PATH_STYLE    smart
+set HX_PATH_MAX      4
 set HX_HIST_SIZE     20000

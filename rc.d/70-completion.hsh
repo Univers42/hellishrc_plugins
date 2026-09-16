@@ -1,22 +1,26 @@
-# 70-completion.hsh — programmable completion: NOT AVAILABLE, and what to do instead.
+# 70-completion.hsh — programmable completion.
 #
-# ── THE SITUATION (hellish 2.7.6) ───────────────────────────────────────────
-# hellish HAS completion — src/completion/ completes commands, files and
-# variables, and it works well at the prompt. What it does not have is any way
-# for a config or a plugin to EXTEND it:
+# ── WHAT CHANGED ────────────────────────────────────────────────────────────
+# This module used to be a REGISTRY and nothing else. On hellish 2.7.6 there
+# was no way for a configuration to extend completion:
 #
-#     $ hellish -c 'complete -W "a b" foo'   -> complete: command not found
-#     $ hellish -c 'compgen -W "a b"'        -> compgen: command not found
-#     $ hellish -c 'bind -p'                 -> bind: command not found
+#     hellish -c 'complete -W "a b" foo'   -> complete: command not found
+#     hellish -c 'compgen -W "a b"'        -> compgen: command not found
 #
-# `shopt -s progcomp` is accepted (the option name exists) but there is nothing
-# behind it. Reported upstream as issue #71 §3.
+# So plugins declared the completions they WOULD install, and the day
+# `complete` landed, one function would install the lot.
 #
-# Everything below is therefore a REGISTRY, not working completion: plugins
-# declare the completions they WOULD install, `help_conf` can show them, and the
-# day `complete` lands, hx_complete_flush() installs the lot in one call with no
-# change to any plugin.
-hx_feature completion on core "completion registry (hellish cannot install completions yet)"
+# That day has been and gone: `complete`, `compgen` and `shopt -s progcomp`
+# are all real now. hx_complete_flush is no longer a no-op, and the wordlists
+# every plugin has been declaring all along light up on TAB without a single
+# plugin changing a line. That is the whole point of having declared them
+# against an interface that did not exist yet.
+#
+# The registry stays, for three reasons: it still documents what a command
+# accepts (help_conf reads it), it still works on an old binary, and
+# hx_complete_show is a useful "what are this command's subcommands again?"
+# even where TAB already answers.
+hx_feature completion on core "TAB completion for this configuration's own commands"
 hx_guard completion || return 0
 
 declare -A HX_COMPL_WORDS
@@ -27,30 +31,37 @@ hx_complete() {
     shift
     hx_key_ok "$cmd" || return 1
     hx_aset HX_COMPL_WORDS "$cmd" "$*"
+    # Install immediately when the shell can, so a plugin that calls
+    # hx_complete after the flush below is not left out.
+    if hx_cap builtin_complete && [ -n "$*" ]; then
+        complete -W "$*" "$cmd" 2>/dev/null
+    fi
     return 0
 }
-hx_func_doc hx_complete "declare a completion wordlist for a command (stored until hellish supports it)" "hx_complete <cmd> <word>..."
+hx_func_doc hx_complete "declare (and install) a completion wordlist for a command" "hx_complete <cmd> <word>..."
 
-# hx_complete_flush — install every declared completion. A no-op today; the
-# single place that needs to change when `complete` arrives.
+# hx_complete_flush — install every declared completion.
 hx_complete_flush() {
-    command -v complete >/dev/null 2>&1 || return 0
+    hx_cap builtin_complete || return 0
     local c
     for c in "${!HX_COMPL_WORDS[@]}"; do
-        complete -W "${HX_COMPL_WORDS[$c]}" "$c"
+        [ -n "${HX_COMPL_WORDS[$c]}" ] || continue
+        complete -W "${HX_COMPL_WORDS[$c]}" "$c" 2>/dev/null
     done
+    return 0
 }
-hx_func_doc hx_complete_flush "install declared completions once hellish gains 'complete'"
+hx_func_doc hx_complete_flush "install every declared completion wordlist"
 
-# hx_complete_show [cmd] — what WOULD be completed. Useful right now as a
-# reminder of a command's subcommands.
+# hx_complete_show [cmd] — what a command accepts, without pressing TAB.
 hx_complete_show() {
     local c
     if [ -n "${1:-}" ]; then
         printf '%s\n' "${HX_COMPL_WORDS[$1]:-<none declared>}"
         return 0
     fi
-    hx_head "declared completions (not active - see issue #71 §3)"
+    hx_head "completions"
+    hx_kv "installed" "$(hx_cap builtin_complete && echo "yes — this hellish has \`complete\`" || echo "no — declared only, this hellish has no \`complete\`")"
+    printf '\n'
     for c in $(printf '%s\n' "${!HX_COMPL_WORDS[@]}" | sort); do
         hx_kv "$c" "${HX_COMPL_WORDS[$c]}"
     done
@@ -58,16 +69,55 @@ hx_complete_show() {
 }
 hx_func_doc hx_complete_show "show declared completion wordlists" "hx_complete_show [cmd]"
 
-# Declare the ones this configuration itself would install.
-hx_complete conf  list on off toggle get set save reload reset edit path doctor profile modules help
-hx_complete hxp   list info enable disable doctor path new help
-hx_complete theme box pure minimal classic plain
+# progcomp is what makes an installed `complete` spec actually reach TAB.
+# It is off by default in hellish, so a configuration that installs
+# completions has to arm it -- otherwise every spec below is inert and there
+# is nothing to say so.
+hx_cap builtin_complete && shopt -s progcomp 2>/dev/null
+hx_opt_doc "progcomp" "armed here: without it an installed \`complete\` spec never reaches TAB"
 
-hx_complete_flush     # no-op today, correct tomorrow
+# ── this configuration's own commands ───────────────────────────────────────
+hx_complete conf  list on off toggle get set save reload reset edit path doctor profile modules caps help
+hx_complete hxp   list info enable disable install remove update catalog doctor path new help
+hx_complete forge new lint doc list api help
+hx_complete prompt list preview gallery next prev random save edit new export tokens palette colors width nerd doctor reload help
+hx_complete theme list preview gallery next prev random save edit new export tokens palette colors width nerd doctor reload help
+hx_complete help_conf features aliases functions commands plugins vars options
 
-# ── KEYBINDINGS — also unavailable ──────────────────────────────────────────
-# `bind` does not exist, so none of this can be set from an rc. Kept verbatim so
-# it can be uncommented the day it lands.
+# Functions defined in 40-functions.hsh. They are completed HERE rather than
+# there because hx_complete does not exist yet at 40-: calling it from that
+# module printed "hx_complete: command not found" on every shell start.
+hx_complete extract
+hx_complete pack
+hx_complete note
+hx_complete cheat nav find git dev disk prompt conf all
+hx_complete guide tour prompt plugins arch trouble reference
+
+# Themes and features are the two wordlists worth generating from the live
+# registry rather than hard-coding: they change when a plugin is installed or
+# a theme is written, and a stale completion list is worse than none.
+hx_complete_dynamic() {
+    hx_cap builtin_complete || return 0
+    local names
+    names=$(hx_theme_names 2>/dev/null | tr '\n' ' ')
+    [ -n "$names" ] && {
+        complete -W "$names list preview gallery next prev random save edit new export tokens palette colors width nerd doctor reload help" prompt 2>/dev/null
+        complete -W "$names list preview gallery next prev random save edit new export tokens palette colors width nerd doctor reload help" theme 2>/dev/null
+    }
+    names=$(hx_feat_names_sorted 2>/dev/null | tr '\n' ' ')
+    [ -n "$names" ] && {
+        complete -W "on off toggle $names" conf 2>/dev/null
+    }
+    return 0
+}
+hx_func_doc hx_complete_dynamic "rebuild the completions that depend on the live registry"
+
+hx_complete_flush
+
+# ── KEYBINDINGS — still unavailable ─────────────────────────────────────────
+# `bind` does not exist on any hellish released so far, so none of this can be
+# set from an rc. Kept verbatim so it can be uncommented the day it lands; the
+# capability probe already reports it as builtin_bind.
 #
 #   bind '"\e[A": history-search-backward'   # Up  = prefix search
 #   bind '"\e[B": history-search-forward'    # Down= prefix search
@@ -76,3 +126,4 @@ hx_complete_flush     # no-op today, correct tomorrow
 #
 # `set -o emacs` / `set -o vi` DO work (20-options.hsh) and are the only line
 # editing control an rc currently has.
+hx_opt_doc "bind" "NOT available: no \`bind\` builtin, so key bindings cannot be set from an rc"

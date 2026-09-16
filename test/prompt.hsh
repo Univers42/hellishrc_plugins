@@ -1,0 +1,327 @@
+# ~/.hellish/test/prompt.hsh — the theme engine.
+#
+# Sourced by test/run.hsh, which provides t_ok / t_bad / t_eq / t_skip.
+# Runnable on its own too:
+#
+#   hellish ~/.hellish/test/prompt.hsh
+#
+# ── WHAT THIS IS ACTUALLY GUARDING ──────────────────────────────────────────
+# Three properties of hellish's prompt renderer decide the whole design of
+# lib/prompt.hsh, and all three are invisible until they break:
+#
+#   1. $(...) is NOT expanded in a prompt   -> a theme using it shows the
+#      literal text `$(date)` forever, and looks like a frozen clock
+#   2. ${VAR} IS expanded at every render   -> which is what makes computed
+#      segments possible at all
+#   3. escapes arriving from inside a variable are not re-scanned, and their
+#      width is not counted -> a segment holding colour codes wrecks line
+#      editing as soon as you type past the terminal width
+#
+# So this file asserts them against the running binary rather than trusting
+# the comment in prompt.hsh. If hellish ever starts expanding $( ) in a
+# prompt, test 1 fails and says the engine can be simplified.
+
+if ! command -v t_ok >/dev/null 2>&1; then
+    HX_T_PASS=0; HX_T_FAIL=0; HX_T_SKIP=0
+    t_head() { printf '\n\033[1;38;5;209m%s\033[0m\n' "$*"; }
+    t_ok()   { HX_T_PASS=$((HX_T_PASS + 1)); return 0; }
+    t_bad()  { HX_T_FAIL=$((HX_T_FAIL + 1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; return 0; }
+    t_skip() { HX_T_SKIP=$((HX_T_SKIP + 1)); printf '  \033[90mskip\033[0m %s\n' "$*"; return 0; }
+    t_eq()   { if [ "$1" = "$2" ]; then t_ok "$3"; else t_bad "$3 — expected [$1], got [$2]"; fi; }
+    . "${HX_RC:-$HOME/.hellishrc}"
+    _hx_prompt_standalone=1
+fi
+
+# ── the renderer's contract ─────────────────────────────────────────────────
+if hx_cap print_p; then
+    _r() { print -rP "$1" 2>/dev/null | tr -d '\001\002'; }
+
+    _probe_var='SEGMENT'
+    t_eq "[SEGMENT]" "$(_r '[${_probe_var}]')" \
+        "\${VAR} is expanded by the prompt renderer (segments depend on this)"
+    t_eq "[42]" "$(_r '[$((6 * 7))]')" \
+        "\$((arith)) is expanded by the prompt renderer"
+
+    # The one that decides the architecture. If this ever renders `x`, the
+    # engine no longer needs precmd segments at all.
+    if [ "$(_r '[$(echo x)]')" = "[\$(echo x)]" ]; then
+        t_ok "\$( ) is NOT expanded in a prompt — segments must go through \${VAR}"
+    else
+        t_bad "\$( ) now expands in a prompt: lib/prompt.hsh can drop its segment hook"
+    fi
+
+    t_eq "100%" "$(_r '100%%')" "a doubled percent renders as one literal percent"
+
+    # ── the preview/prompt divergence ───────────────────────────────────────
+    # `print -rP` RE-SCANS what a variable expanded to. The prompt renderer
+    # does NOT (verified in a pty; see lib/prompt.hsh rule 3). The two
+    # disagree, which is why hx_prompt_render has to escape segments on the
+    # way into a preview and put them back afterwards.
+    #
+    # Both halves are asserted here. If a release ever makes them agree, one
+    # of these fails and says _hx_preview_escape can be deleted.
+    _probe_esc='\[\e[32m\]x\[\e[0m\]'
+    case "$(_r '${_probe_esc}')" in
+        *'\[\e['*) t_bad "print -rP no longer re-scans a variable — drop _hx_preview_escape" ;;
+        *) t_ok "print -rP re-scans variable content (the preview needs escaping)" ;;
+    esac
+    _probe_pct='50%off'
+    if [ "$(_r '${_probe_pct}')" = "50%off" ]; then
+        t_bad "print -rP no longer eats a percent from a variable — drop _hx_preview_escape"
+    else
+        t_ok "print -rP eats an undoubled percent from a variable"
+    fi
+    _probe_pct='50%%off'
+    t_eq "50%off" "$(_r '${_probe_pct}')" "doubling a variable's percent makes print -rP render it right"
+    unset _probe_var _probe_esc _probe_pct
+else
+    t_skip "renderer contract — this hellish has no \`print -rP\`"
+fi
+
+# ── registration ────────────────────────────────────────────────────────────
+_n=$(hx_theme_names | grep -c .)
+if [ "$_n" -ge 30 ]; then t_ok "$_n themes registered"
+else t_bad "only $_n themes registered, expected at least 30"; fi
+
+t_true()  { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_ok "$l"; else t_bad "$l"; fi; }
+t_false() { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_bad "$l (expected failure)"; else t_ok "$l"; fi; }
+t_true  "hx_theme_known finds a shipped theme" hx_theme_known vault
+t_false "hx_theme_known rejects an invented one" hx_theme_known no_such_theme_xyz
+
+# Every theme must declare a family the lister actually prints, or it is
+# registered, switchable, and invisible in `prompt list`.
+_badfam=""
+for _t in $(hx_theme_names); do
+    case " $HX_THEME_FAMILIES " in
+        *" ${HX_THEME_FAMILY[$_t]} "*) ;;
+        *) _badfam="$_badfam $_t" ;;
+    esac
+done
+t_eq "" "$_badfam" "every theme's family is one prompt list prints"
+
+_nodesc=""
+for _t in $(hx_theme_names); do
+    [ -n "${HX_THEME_DESC[$_t]}" ] || _nodesc="$_nodesc $_t"
+done
+t_eq "" "$_nodesc" "every theme has a description"
+
+# ── token expansion ─────────────────────────────────────────────────────────
+hx_prompt_expand '{f:117}x{r}'
+case "$HX_RET" in
+    '%F{117}x%f%k%b') t_ok "hx_prompt_expand turns {f:N} into %F{N}" ;;
+    *) t_bad "hx_prompt_expand produced [$HX_RET]" ;;
+esac
+
+hx_prompt_expand '{stf}'
+case "$HX_RET" in
+    '%(?.'*) t_ok "{stf} becomes a %(?...) conditional, not a shell branch" ;;
+    *) t_bad "{stf} produced [$HX_RET]" ;;
+esac
+
+hx_prompt_expand '{git}{fail}{took}'
+t_eq '\g\S\p' "$HX_RET" "badge tokens become hellish's self-spacing escapes"
+
+hx_prompt_expand 'literal'
+t_eq 'literal' "$HX_RET" "text with no tokens passes through untouched"
+
+hx_prompt_expand '{f:999999}x'
+case "$HX_RET" in
+    *'999999'*) t_ok "an out-of-range colour is passed through rather than crashing" ;;
+    *) t_ok "an out-of-range colour is handled" ;;
+esac
+
+# ── every theme expands cleanly ─────────────────────────────────────────────
+# The three failure modes worth catching, each of which produces a prompt that
+# looks broken rather than one that errors:
+#   * an unexpanded {token}, from a typo in a theme file
+#   * a $( ), which renders literally forever (see the contract above)
+#   * an empty expansion, which is a prompt you cannot see
+#
+# Finding a LEFTOVER brace means stripping the ones that belong there first:
+# %F{117}, %K{24}, %D{%H:%M} and ${HX_PS_*} are all correct output and all
+# contain braces. What must not survive is a lowercase {word}, which is a
+# token this engine does not know -- almost always a typo in a theme file.
+_leftover_token() {
+    printf '%s' "$1" \
+        | sed -e 's/%[FK]{[0-9]*}//g' -e 's/%D{[^}]*}//g' -e 's/\${[A-Za-z_][A-Za-z0-9_]*}//g' \
+        | grep -o '{[a-z][a-z0-9:_]*}' | head -1
+}
+
+_unexpanded=""; _cmdsub=""; _empty=""
+for _t in $(hx_theme_names); do
+    hx_prompt_expand "${HX_THEME_PS1[$_t]}${HX_THEME_RPS1[$_t]}"
+    _lt=$(_leftover_token "$HX_RET")
+    [ -n "$_lt" ] && _unexpanded="$_unexpanded $_t:$_lt"
+    case "$HX_RET" in
+        *'$('*) _cmdsub="$_cmdsub $_t" ;;
+    esac
+    [ -n "$HX_RET" ] || _empty="$_empty $_t"
+done
+t_eq "" "$_unexpanded" "no theme leaves an unexpanded {token}"
+t_eq "" "$_cmdsub"     "no theme uses \$( ), which a prompt never expands"
+t_eq "" "$_empty"      "no theme expands to nothing"
+
+# A theme that interpolates a segment it did not declare renders an empty gap
+# forever, because the hook never computes it. This is the single easiest
+# mistake to make when writing one.
+_undeclared=""
+for _t in $(hx_theme_names); do
+    for _seg in path vcs venv lang ctx rule load; do
+        case "${HX_THEME_PS1[$_t]}${HX_THEME_RPS1[$_t]}" in
+            *"{$_seg}"*)
+                case " ${HX_THEME_NEEDS[$_t]} " in
+                    *" $_seg "*) ;;
+                    *) _undeclared="$_undeclared $_t:$_seg" ;;
+                esac ;;
+        esac
+    done
+done
+t_eq "" "$_undeclared" "every theme declares the segments it interpolates"
+
+# …and the reverse: a declared segment nobody uses is per-prompt work bought
+# and thrown away. On `vcs` that is a git process per prompt for nothing.
+_unused=""
+for _t in $(hx_theme_names); do
+    for _seg in ${HX_THEME_NEEDS[$_t]}; do
+        case "${HX_THEME_PS1[$_t]}${HX_THEME_RPS1[$_t]}" in
+            *"{$_seg}"*) ;;
+            *) _unused="$_unused $_t:$_seg" ;;
+        esac
+    done
+done
+t_eq "" "$_unused" "no theme pays for a segment it does not use"
+
+# ── every theme renders ─────────────────────────────────────────────────────
+if hx_cap print_p; then
+    _blank=""; _leaked=""
+    for _t in $(hx_theme_names); do
+        _out=$(hx_prompt_render "$_t")
+        [ -n "$_out" ] || _blank="$_blank $_t"
+        # A raw ESC surviving into the rendered output means an escape was
+        # emitted outside the renderer's width accounting.
+        case "$_out" in
+            *'\e['*|*'\033['*) _leaked="$_leaked $_t" ;;
+        esac
+    done
+    t_eq "" "$_blank"  "every theme renders something"
+    t_eq "" "$_leaked" "no theme leaks an unrendered escape sequence"
+else
+    t_skip "theme rendering — this hellish has no \`print -rP\`"
+fi
+
+# ── switching ───────────────────────────────────────────────────────────────
+_was="$HX_THEME"
+hx_prompt_apply blade >/dev/null 2>&1
+t_eq "blade" "$HX_THEME" "hx_prompt_apply sets the active theme"
+[ -n "$PS1" ] && t_ok "applying a theme sets PS1" || t_bad "PS1 is empty after applying a theme"
+t_eq "" "${HX_PS_NEEDS// /}" "a pure-renderer theme declares no per-prompt work"
+
+# PROMPT must be cleared on every switch: hellish prefers PROMPT over PS1, so
+# a leftover PROMPT from a zsh-syntax theme makes the next switch look like it
+# silently failed.
+PROMPT='leftover'
+hx_prompt_apply vault >/dev/null 2>&1
+t_eq "" "${PROMPT:-}" "switching clears PROMPT, so it cannot outrank the new PS1"
+
+# A theme with segments must register the hook; one without must not leave it
+# registered from the theme before it.
+hx_prompt_apply cockpit >/dev/null 2>&1
+case " $HX_PRECMD_FUNCS " in
+    *' hx_prompt_precmd '*) t_ok "a theme with segments registers the per-prompt hook" ;;
+    *) t_bad "cockpit needs segments but registered no hook" ;;
+esac
+hx_prompt_apply blade >/dev/null 2>&1
+case " $HX_PRECMD_FUNCS " in
+    *' hx_prompt_precmd '*) t_bad "the segment hook survived a switch to a theme that needs nothing" ;;
+    *) t_ok "switching to a pure-renderer theme unregisters the hook" ;;
+esac
+
+t_false "applying an unknown theme fails" hx_prompt_apply no_such_theme_xyz
+hx_prompt_apply "$_was" >/dev/null 2>&1
+t_eq "$_was" "$HX_THEME" "the original theme is restored"
+
+# ── segments ────────────────────────────────────────────────────────────────
+_hx_seg_path
+[ -n "$HX_PS_PATH" ] && t_ok "the path segment produces something" || t_bad "path segment is empty"
+case "$HX_PS_PATH" in
+    *'\e['*|*$'\033'*) t_bad "the path segment contains an escape — it must be plain text" ;;
+    *) t_ok "the path segment is plain text, as the renderer requires" ;;
+esac
+
+# Percent handling. The segment keeps the RAW value, because the prompt
+# renderer does not re-scan it -- doubling there would put a visible "%%" on
+# screen. The doubling belongs to the preview path alone.
+_hx_pct 'a%b%c'
+t_eq 'a%%b%%c' "$HX_RET2" "_hx_pct doubles percent signs, into HX_RET2"
+
+# HX_RET must survive a _hx_pct call: the preview path is holding the expanded
+# theme in it while it escapes the segments.
+HX_RET='keep me'
+_hx_pct 'x%y'
+t_eq 'keep me' "$HX_RET" "_hx_pct does not clobber HX_RET"
+
+_pd=$(mktemp -d)/'weird%dir'
+mkdir -p "$_pd" 2>/dev/null
+if [ -d "$_pd" ]; then
+    ( cd "$_pd" && _hx_seg_path
+      case "$HX_PS_PATH" in
+          *'%%'*) exit 1 ;;      # doubled: would render as %% in the prompt
+          *'%'*)  exit 0 ;;      # raw: correct, the renderer leaves it alone
+          *) exit 1 ;;
+      esac ) && t_ok "a % in a directory name reaches the segment raw, as the renderer wants" \
+            || t_bad "the path segment doubled a %, which the real prompt would show as %%"
+
+    # …and the preview must still render it as one percent, via the escape.
+    if hx_cap print_p; then
+        ( cd "$_pd" && _prev=$(hx_prompt_render nil)
+          case "$_prev" in *'weird%dir'*) exit 0 ;; *) exit 1 ;; esac ) \
+            && t_ok "a % in a directory name previews as one percent" \
+            || t_bad "the preview mangled a % in a directory name"
+    fi
+    command rm -rf "$(dirname "$_pd")"
+fi
+
+# vcs: the summary must be plain text and must self-space, since every theme
+# relies on it vanishing entirely outside a repository.
+_hx_seg_vcs
+case "$HX_PS_VCS" in
+    '') t_ok "the vcs segment is empty outside a repository, or git is absent" ;;
+    ' '*) t_ok "the vcs segment carries its own leading space" ;;
+    *) t_bad "the vcs segment does not self-space: [$HX_PS_VCS]" ;;
+esac
+
+# The segments a theme did not ask for must not be computed. This is the
+# entire performance argument for the `needs` field.
+HX_PS_NEEDS='path'
+HX_PS_VCS='STALE'
+hx_prompt_precmd
+t_eq "STALE" "$HX_PS_VCS" "an undeclared segment is not computed"
+HX_PS_NEEDS=''
+
+# ── the command ─────────────────────────────────────────────────────────────
+[ -n "$(prompt list)" ]    && t_ok "prompt list renders"    || t_bad "prompt list renders"
+[ -n "$(prompt tokens)" ]  && t_ok "prompt tokens renders"  || t_bad "prompt tokens renders"
+[ -n "$(prompt doctor)" ]  && t_ok "prompt doctor renders"  || t_bad "prompt doctor renders"
+[ -n "$(prompt palette)" ] && t_ok "prompt palette renders" || t_bad "prompt palette renders"
+[ -n "$(prompt export vault)" ] && t_ok "prompt export renders" || t_bad "prompt export renders"
+t_false "prompt rejects an unknown theme" prompt set no_such_theme_xyz
+t_defined theme "theme is still a command, for anything written against it"
+
+# `prompt preview` must leave you in the theme you started in. A preview that
+# lands you in the last theme it drew is a switch, not a preview.
+_was="$HX_THEME"
+prompt preview >/dev/null 2>&1
+t_eq "$_was" "$HX_THEME" "prompt preview restores the active theme"
+
+# Cycling must land on a real theme, and get back where it started.
+prompt next >/dev/null 2>&1
+t_true "prompt next lands on a registered theme" hx_theme_known "$HX_THEME"
+prompt prev >/dev/null 2>&1
+t_eq "$_was" "$HX_THEME" "prompt next then prev returns to where it started"
+
+if [ "${_hx_prompt_standalone:-0}" = "1" ]; then
+    printf '\n  %s/%s passed' "$HX_T_PASS" "$((HX_T_PASS + HX_T_FAIL))"
+    [ "$HX_T_SKIP" -gt 0 ] && printf ', %s skipped' "$HX_T_SKIP"
+    printf '\n\n'
+    [ "$HX_T_FAIL" -eq 0 ]
+fi

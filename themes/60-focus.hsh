@@ -1,0 +1,47 @@
+# themes/60-focus.hsh — prompts that answer a question.
+#
+# Each of these is built around ONE question you are asking all day, and
+# everything else is pushed to the margin or dropped. That is the difference
+# between a dense prompt and a cluttered one: density is fine as long as the
+# most important field is in the same place every time.
+#
+# These are the themes that use the computed segments, so they are also the
+# only ones in this configuration that do per-prompt work. Each declares
+# exactly what it needs, and `prompt doctor` prints what the active theme
+# actually costs.
+
+# cockpit — "what is the full state of this directory?" Path, environment,
+# toolchain and a full git summary on the top row; failures, timing and jobs
+# on the bottom; who and where on the right, but only over ssh or as root.
+hx_theme cockpit focus 'path vcs venv lang ctx' \
+    'everything at once: path, venv, toolchain, full git, timing, jobs' \
+    '{f:239}{tl}{h}{r} {f:117}{bold}{path}{/bold}{r}{f:141}{venv}{r}{f:179}{lang}{r}{f:150}{vcs}{r}{nl}{f:239}{bl}{h}{r}{f:203}{fail}{r}{f:179}{took}{r}{f:110}{jobsb}{r} {stf}{bold}{arr}{/bold}{r} ' \
+    '{f:238}{ctx} {time}{r}'
+
+# gitlab — "where am I in this repository?" The full branch summary comes
+# first and in bold, because in a repo it is the thing that changes under you;
+# the path is demoted to a grey suffix.
+#
+# {vcs} is the real summary, not the \g badge: branch, staged, dirty,
+# untracked, conflicts, ahead and behind. One `git status --porcelain=v2` per
+# prompt buys all seven.
+hx_theme gitlab focus 'vcs' 'branch first and in full: +staged ~dirty ?new up/down' \
+    '{f:35}{branch}{r}{f:150}{bold}{vcs}{/bold}{r}{f:203}{fail}{r} {f:240}{cwd:2}{r}{nl}{stf}{arr}{r} '
+
+# telemetry — "nothing, until I ask." The left prompt is one arrow, so every
+# command you type starts in column three, forever. Everything else lives in
+# the right prompt, which the shell erases as soon as the line gets long
+# enough to need the room.
+hx_theme telemetry focus 'path vcs' 'a bare arrow; path, git and timing all on the right' \
+    '{stf}{bold}{arr}{/bold}{r} ' \
+    '{f:244}{path}{r}{f:150}{vcs}{r}{f:179}{took}{r}{f:239} {time}{r}'
+
+# lab — "which interpreter is this?" Virtualenv and toolchain lead, because
+# running the wrong python is the mistake this theme exists to prevent.
+hx_theme lab focus 'venv lang' 'virtualenv and toolchain first, for switching between them' \
+    '{f:117}{cwd:2}{r}{f:141}{venv}{r}{f:214}{lang}{r} {f:108}{git}{r}{f:203}{fail}{r}{nl}{stf}{lam}{r} '
+
+# triage — "did that work?" A filled status block, coloured by the exit code
+# and carrying a tick or a cross, at the far left where the eye starts.
+hx_theme triage focus '' 'a filled pass/fail block leading the line' \
+    '{stb}{f:16}{bold} {stg} {/bold}{r}{stf}{sep}{r} {f:252}{cwd:2}{r} {f:150}{git}{r}{f:179}{took}{r}{f:110}{jobsb}{r} {f:244}{arr}{r} '

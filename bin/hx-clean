@@ -1,0 +1,348 @@
+#!/usr/bin/env bash
+# hx-clean — reclaim regenerable space in $HOME.
+#
+# Dry-run by default: it never deletes unless you pass -y. Every candidate is
+# something the system rebuilds on demand (caches, thumbnails, trash, package
+# download caches) or debris (core dumps, failed dconf writes, stale /tmp).
+#
+# Written in bash rather than as a hellish function on purpose: the logic needs
+# arrays, nullglob and `find -print0`, all of which are the gaps that
+# rc.d/40-functions.hsh exists to shim around.
+
+set -u
+shopt -s nullglob 2>/dev/null || true
+
+H="${HOME%/}"
+[ -n "$H" ] && [ "$H" != "/" ] || { echo "hx-clean: refusing to run, HOME='$H'" >&2; exit 1; }
+
+APPLY=0 WANT_TOP=0 WITH_DOCKER=0 WITH_FONTS=0 WITH_HEAVY=0
+ONLY=""
+
+usage() {
+    cat <<'EOF'
+usage: clean [options] [group ...]
+
+  Dry-run by default. Nothing is deleted without -y.
+
+options
+  -y, --apply      actually delete (default: only report)
+  -t, --top        also list the 25 largest directories in $HOME
+      --docker     include docker prune (images/containers/build cache)
+      --fonts      trim installed Nerd Font variants down to the 4 a
+                   terminal needs (Regular/Bold/Italic/BoldItalic Mono)
+      --heavy      include slow-to-rebuild caches (~/.m2, cargo registry)
+  -a, --all        --docker --fonts --heavy
+  -h, --help       this text
+
+groups (default: all safe ones)
+  trash cache thumbs pkg logs cores tmp dconf nvim
+  rust node vscode browser apps
+
+  Totals are reported per filesystem: /tmp is often a separate mount, and
+  clearing it will not free a single byte on a full $HOME.
+
+examples
+  clean                 # report only — always start here
+  clean -y              # free the safe categories
+  clean --fonts -y      # also reclaim ~200M of unused font weights
+  clean -a -y           # everything, including docker
+EOF
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -y|--apply)  APPLY=1 ;;
+        -t|--top)    WANT_TOP=1 ;;
+        --docker)    WITH_DOCKER=1 ;;
+        --fonts)     WITH_FONTS=1 ;;
+        --heavy)     WITH_HEAVY=1 ;;
+        -a|--all)    WITH_DOCKER=1; WITH_FONTS=1; WITH_HEAVY=1 ;;
+        -h|--help)   usage; exit 0 ;;
+        -*)          echo "hx-clean: unknown option '$1'" >&2; usage >&2; exit 2 ;;
+        *)           ONLY="$ONLY $1" ;;
+    esac
+    shift
+done
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+    R=$'\033[0m'; B=$'\033[1m'; DIM=$'\033[2m'
+    GRN=$'\033[32m'; YEL=$'\033[33m'; BLU=$'\033[34m'; RED=$'\033[31m'
+else
+    R= B= DIM= GRN= YEL= BLU= RED=
+fi
+
+# ── safety ──────────────────────────────────────────────────────────────────
+# A path is deletable only if it lives under $HOME or /tmp, is not on the
+# protected list, and is not inside a git working tree (that would be source,
+# not cache).
+protected() {
+    case "$1" in
+        "$H"/.ssh|"$H"/.ssh/*|"$H"/.gnupg|"$H"/.gnupg/*) return 0 ;;
+        "$H"/Documents|"$H"/Documents/*)                 return 0 ;;
+        "$H"/Desktop|"$H"/Desktop/*)                     return 0 ;;
+        "$H"/Downloads|"$H"/Downloads/*)                 return 0 ;;
+        "$H"/Pictures|"$H"/Pictures/*|"$H"/Videos/*)     return 0 ;;
+        "$H"/.local/share/keyrings*)                     return 0 ;;
+        "$H"/.config/dconf/user)                         return 0 ;;
+        "$H"/.hellish|"$H"/.hellish/*)                   return 0 ;;
+        "$H"|"$H"/|"$H"/.config|"$H"/.local|"$H"/.cache) return 0 ;;
+    esac
+    return 1
+}
+
+safe_path() {
+    local p="$1"
+    case "$p" in "$H"/*|/tmp/*) ;; *) return 1 ;; esac
+    case "$p" in *..*) return 1 ;; esac
+    protected "$p" && return 1
+    [ -e "$p" ] || return 1
+    return 0
+}
+
+bytes() { du -sxb "$1" 2>/dev/null | cut -f1; }
+
+human() {
+    local b="${1:-0}"
+    if   [ "$b" -ge 1073741824 ]; then awk -v b="$b" 'BEGIN{printf "%.1fG", b/1073741824}'
+    elif [ "$b" -ge 1048576 ];    then awk -v b="$b" 'BEGIN{printf "%.0fM", b/1048576}'
+    elif [ "$b" -ge 1024 ];       then awk -v b="$b" 'BEGIN{printf "%.0fK", b/1024}'
+    else echo "${b}B"; fi
+}
+
+wanted() {
+    [ -z "${ONLY// /}" ] && return 0
+    case " $ONLY " in *" $1 "*) return 0 ;; esac
+    return 1
+}
+
+TOTAL=0
+declare -a DOOMED=()
+declare -a ITEMS=()
+declare -A SEEN=()
+declare -A FSBYTES=() FSMOUNT=()
+
+HOME_DEV="$(stat -c %d "$H" 2>/dev/null || echo 0)"
+
+# consider <group> <path>...
+# A path can match several groups (~/.cache/pip is both "cache" and "pkg");
+# SEEN keeps it counted and deleted exactly once.
+#
+# Every candidate is tallied against the filesystem it actually lives on. This
+# matters: /tmp is frequently a different mount from $HOME, and reporting one
+# combined total there promises space that freeing it will never deliver.
+consider() {
+    local group="$1"; shift
+    wanted "$group" || return 0
+    local p sz dev
+    for p in "$@"; do
+        safe_path "$p" || continue
+        [ -n "${SEEN[$p]:-}" ] && continue
+        SEEN[$p]=1
+        sz="$(bytes "$p")"; [ -n "$sz" ] || continue
+        [ "$sz" -gt 0 ] || continue
+
+        dev="$(stat -c %d "$p" 2>/dev/null || echo 0)"
+        if [ -z "${FSMOUNT[$dev]:-}" ]; then
+            FSMOUNT[$dev]="$(df -P "$p" 2>/dev/null | awk 'NR==2{print $6}')"
+        fi
+        FSBYTES[$dev]=$(( ${FSBYTES[$dev]:-0} + sz ))
+
+        [ "$dev" = "$HOME_DEV" ] && TOTAL=$((TOTAL + sz))
+        DOOMED+=("$p")
+        ITEMS+=("$sz|$group|$p|$dev")
+    done
+}
+
+# Print candidates largest-first, collapsing the long tail of tiny entries —
+# 300 lines of 12K scratch files buries the one 128M item that matters.
+report_items() {
+    local shown=0 small=0 smallbytes=0 line sz group p dev
+    while IFS='|' read -r sz group p dev; do
+        [ -n "$sz" ] || continue
+        if [ "$sz" -lt 1048576 ]; then
+            small=$((small + 1)); smallbytes=$((smallbytes + sz)); continue
+        fi
+        local mark=""
+        [ "$dev" != "$HOME_DEV" ] && mark=" ${YEL}(other fs: ${FSMOUNT[$dev]:-?})${R}"
+        printf '  %s%-9s%s %7s  %s%s\n' "$DIM" "$group" "$R" "$(human "$sz")" "${p/#$H/\~}" "$mark"
+        shown=$((shown + 1))
+    done < <(printf '%s\n' "${ITEMS[@]}" | sort -t'|' -k1,1nr)
+
+    [ "$small" -gt 0 ] && printf '  %s%-9s%s %7s  %s%d smaller items%s\n' \
+        "$DIM" "misc" "$R" "$(human "$smallbytes")" "$DIM" "$small" "$R"
+    [ "$shown" = 0 ] && [ "$small" = 0 ] && printf '  %snothing to reclaim%s\n' "$DIM" "$R"
+    return 0
+}
+
+echo
+printf '%s== hx-clean ==%s  %s\n' "$B" "$R" "$([ "$APPLY" = 1 ] && echo "${RED}APPLY — will delete${R}" || echo "${YEL}dry run — nothing deleted${R}")"
+echo
+df -h "$H" | awk 'NR==1{print "  "$0} NR==2{print "  "$0}'
+echo
+printf '%scandidates%s\n' "$B" "$R"
+
+# ── groups ──────────────────────────────────────────────────────────────────
+consider trash  "$H"/.local/share/Trash/files "$H"/.local/share/Trash/info
+consider thumbs "$H"/.cache/thumbnails "$H"/.thumbnails
+
+# ~/.cache: sweep the children, so the directory itself survives.
+if wanted cache; then
+    for d in "$H"/.cache/*; do
+        case "${d##*/}" in thumbnails) continue ;; esac
+        consider cache "$d"
+    done
+fi
+
+consider pkg "$H"/.npm/_cacache "$H"/.cache/pip "$H"/.cache/yarn \
+             "$H"/.cache/go-build "$H"/.local/share/pnpm/store \
+             "$H"/.gradle/caches "$H"/.cache/pre-commit
+
+[ "$WITH_HEAVY" = 1 ] && consider heavy "$H"/.m2/repository "$H"/.cargo/registry/cache
+
+if wanted logs; then
+    while IFS= read -r -d '' f; do consider logs "$f"; done < <(
+        find "$H"/.local/state "$H"/.config -maxdepth 3 -type f \
+             \( -name '*.log' -o -name '*.log.[0-9]*' \) -size +1M -print0 2>/dev/null)
+    consider logs "$H"/.xsession-errors "$H"/.xsession-errors.old
+fi
+
+if wanted cores; then
+    while IFS= read -r -d '' f; do consider cores "$f"; done < <(
+        find "$H" -maxdepth 2 -type f \( -name 'core' -o -name 'core.[0-9]*' \) -print0 2>/dev/null)
+fi
+
+# /tmp debris owned by us. Two passes: anything untouched for a day, plus any
+# large file regardless of age — a 124M JetBrainsMono.zip downloaded an hour
+# ago is exactly the thing you want back, and -mtime +0 would skip it.
+if wanted tmp; then
+    while IFS= read -r -d '' f; do consider tmp "$f"; done < <(
+        find /tmp -maxdepth 1 -user "$(id -u)" -mtime +0 \
+             \( -type f -o -type d \) -print0 2>/dev/null)
+    while IFS= read -r -d '' f; do consider tmp "$f"; done < <(
+        find /tmp -maxdepth 1 -user "$(id -u)" -type f -size +20M -print0 2>/dev/null)
+fi
+
+# Half-written dconf databases left behind by "No space left on device".
+if wanted dconf; then
+    for f in "$H"/.config/dconf/user.??????; do consider dconf "$f"; done
+fi
+
+consider nvim "$H"/.local/state/nvim/swap "$H"/.local/state/nvim/backup \
+              "$H"/.local/state/nvim/shada/main.shada.tmp.* "$H"/.cache/nvim
+
+# Toolchain and app caches. All of these re-download or regenerate on demand;
+# none of them hold anything you authored. On a 42 machine these are usually
+# the difference between a full home partition and a working one.
+consider rust    "$H"/.cargo/registry/cache "$H"/.cargo/registry/src \
+                 "$H"/.cargo/git/checkouts "$H"/.rustup/downloads "$H"/.rustup/tmp
+
+consider node    "$H"/.nvm/.cache "$H"/.cache/node-gyp "$H"/.electron "$H"/.electron-gyp
+
+consider vscode  "$H"/.config/Code/Cache "$H"/.config/Code/CachedData \
+                 "$H"/.config/Code/CachedExtensionVSIXs "$H"/.config/Code/logs \
+                 "$H"/.config/Code/User/workspaceStorage "$H"/.config/Code/Crashpad \
+                 "$H"/.vscode/extensions/.obsolete
+
+if wanted browser; then
+    for d in "$H"/.config/google-chrome/*/ "$H"/.config/chromium/*/; do
+        consider browser "$d"Cache "$d"Code\ Cache "$d"GPUCache "$d"Service\ Worker/CacheStorage
+    done
+    consider browser "$H"/snap/firefox/common/.cache "$H"/.mozilla/firefox/*/cache2 \
+                     "$H"/.var/app/org.mozilla.firefox/cache
+fi
+
+# Flatpak and snap keep per-app caches plus superseded revisions.
+if wanted apps; then
+    for d in "$H"/.var/app/*/cache; do consider apps "$d"; done
+    for d in "$H"/snap/*/[0-9]*; do
+        # keep the revision the "current" symlink points at
+        cur="$(readlink "${d%/*}/current" 2>/dev/null)"
+        [ -n "$cur" ] && [ "${d##*/}" = "$cur" ] && continue
+        consider apps "$d"
+    done
+fi
+
+# ── font trim (opt-in) ──────────────────────────────────────────────────────
+FONT_DIR="$H/.local/share/fonts"
+declare -a FONT_DOOMED=()
+FONT_BYTES=0
+if [ "$WITH_FONTS" = 1 ] && [ -d "$FONT_DIR" ]; then
+    while IFS= read -r -d '' f; do
+        case "${f##*/}" in
+            *NerdFontMono-Regular.ttf|*NerdFontMono-Bold.ttf) continue ;;
+            *NerdFontMono-Italic.ttf|*NerdFontMono-BoldItalic.ttf) continue ;;
+        esac
+        case "${f##*/}" in *NerdFont*) ;; *) continue ;; esac
+        sz="$(bytes "$f")"
+        FONT_BYTES=$((FONT_BYTES + ${sz:-0}))
+        FONT_DOOMED+=("$f")
+    done < <(find "$FONT_DIR" -type f -name '*.ttf' -print0 2>/dev/null)
+
+    if [ "${#FONT_DOOMED[@]}" -gt 0 ]; then
+        TOTAL=$((TOTAL + FONT_BYTES))
+        printf '  %s%-9s%s %7s  %s (%d unused weights, keeping Mono Regular/Bold/Italic/BoldItalic)\n' \
+            "$DIM" "fonts" "$R" "$(human "$FONT_BYTES")" "${FONT_DIR/#$H/\~}" "${#FONT_DOOMED[@]}"
+    fi
+fi
+
+report_items
+
+echo
+printf '%sreclaimable, by filesystem%s\n' "$B" "$R"
+for dev in "${!FSBYTES[@]}"; do
+    mp="${FSMOUNT[$dev]:-?}"
+    if [ "$dev" = "$HOME_DEV" ]; then
+        printf '  %s%-24s %8s  <- your $HOME lives here%s\n' "$GRN" "$mp" "$(human "${FSBYTES[$dev]}")" "$R"
+    else
+        printf '  %s%-24s %8s  (frees nothing on %s)%s\n' "$YEL" "$mp" "$(human "${FSBYTES[$dev]}")" "$(df -P "$H" | awk 'NR==2{print $6}')" "$R"
+    fi
+done
+
+# ── docker (opt-in) ─────────────────────────────────────────────────────────
+if [ "$WITH_DOCKER" = 1 ]; then
+    echo
+    if command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+        printf '%sdocker%s\n' "$B" "$R"
+        docker system df 2>/dev/null | sed 's/^/  /'
+    else
+        printf '  %sdocker not running — skipped%s\n' "$DIM" "$R"
+        WITH_DOCKER=0
+    fi
+fi
+
+# ── act ─────────────────────────────────────────────────────────────────────
+if [ "$APPLY" != 1 ]; then
+    echo
+    printf '  %sre-run with %s-y%s%s to delete the above.%s\n' "$DIM" "$B" "$R" "$DIM" "$R"
+    echo
+    [ "$WANT_TOP" = 1 ] && { printf '%slargest directories in %s%s\n' "$B" "${H/#$H/\~}" "$R"
+        du -xh --max-depth=2 "$H" 2>/dev/null | sort -rh | head -25 | sed 's/^/  /'; echo; }
+    exit 0
+fi
+
+echo
+freed=0
+for p in "${DOOMED[@]}"; do
+    safe_path "$p" || continue
+    if rm -rf -- "$p" 2>/dev/null; then freed=$((freed + 1)); fi
+done
+
+if [ "${#FONT_DOOMED[@]}" -gt 0 ]; then
+    for f in "${FONT_DOOMED[@]}"; do rm -f -- "$f" 2>/dev/null && freed=$((freed + 1)); done
+    command -v fc-cache >/dev/null 2>&1 && fc-cache -f >/dev/null 2>&1 && \
+        printf '  %sfont cache rebuilt%s\n' "$DIM" "$R"
+fi
+
+if [ "$WITH_DOCKER" = 1 ]; then
+    docker system prune -af --volumes 2>/dev/null | tail -2 | sed 's/^/  /'
+fi
+
+printf '%sok%s removed %d item(s), ~%s reclaimed\n' "$GRN" "$R" "$freed" "$(human "$TOTAL")"
+echo
+df -h "$H" | awk 'NR==2{print "  "$0}'
+echo
+
+[ "$WANT_TOP" = 1 ] && { printf '%slargest directories in ~%s\n' "$B" "$R"
+    du -xh --max-depth=2 "$H" 2>/dev/null | sort -rh | head -25 | sed 's/^/  /'; echo; }
+
+exit 0

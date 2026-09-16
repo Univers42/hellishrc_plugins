@@ -161,7 +161,7 @@ _hxp_list() {
         miss="${HX_PLUG_MISSING[$n]:-}"
         printf '  '
         hx_badge "${HX_FEAT_STATE[$n]:-off}"
-        printf ' %s%-10s%s %s' "$HX_B" "$n" "$HX_R" "${HX_PLUG_DESC[$n]}"
+        printf ' %s%-22s%s %s' "$HX_B" "$n" "$HX_R" "${HX_PLUG_DESC[$n]}"
         [ -n "$miss" ] && printf ' %s(missing:%s)%s' "$HX_YEL" "$miss" "$HX_R"
         printf '\n'
     done

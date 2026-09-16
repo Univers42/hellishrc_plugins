@@ -1,0 +1,191 @@
+#!/usr/bin/env hellish
+# bin/hx-gendoc — generate docs/reference.md from the LIVE registry.
+#
+#   hellish ~/.hellish/bin/hx-gendoc > docs/reference.md
+#
+# ── WHY THIS IS GENERATED ───────────────────────────────────────────────────
+#
+# Every module in this configuration declares what it provides -- hx_func_doc,
+# hx_alias_doc, hx_var_doc, hx_opt_doc -- and that declaration is what
+# `help_conf` and `hxp info` read. A hand-written reference would be a SECOND
+# copy of the same facts, and the second copy is the one that goes stale: a
+# function gets renamed, the code and `help_conf` agree, and the markdown
+# quietly lies for a year.
+#
+# So the exhaustive tables are generated from the registry and the prose is
+# written by hand. If a name appears here, it exists; if its description is
+# wrong, the fix belongs in the hx_func_doc call, not in the markdown.
+#
+# The prose documents -- tour, prompt, plugins, architecture -- are NOT
+# generated. They carry judgement, ordering and worked examples, which no
+# registry can hold.
+
+. "${HX_RC:-$HOME/.hellishrc}" >/dev/null 2>&1
+
+# Owners, in the order a reader should meet them, rather than alphabetically:
+# the shell's own furniture first, then the tools, then the framework's
+# internals. `aliases` and `functions` are what you touch on day one.
+ORDER="help aliases functions env history options completion prompt core
+       git jump devkit clean docker net sentinel forge ai"
+
+_title() {
+    case "$1" in
+        help)       echo "Getting around" ;;
+        aliases)    echo "Aliases" ;;
+        functions)  echo "Everyday functions" ;;
+        env)        echo "Environment and PATH" ;;
+        history)    echo "History" ;;
+        options)    echo "Shell options" ;;
+        completion) echo "Completion" ;;
+        prompt)     echo "Prompt" ;;
+        core)       echo "Framework internals" ;;
+        git)        echo "git plugin" ;;
+        jump)       echo "jump plugin" ;;
+        devkit)     echo "devkit plugin" ;;
+        clean)      echo "clean plugin" ;;
+        docker)     echo "docker plugin" ;;
+        net)        echo "net plugin" ;;
+        sentinel)   echo "sentinel plugin" ;;
+        forge)      echo "forge plugin" ;;
+        ai)         echo "AI block" ;;
+        *)          echo "$1" ;;
+    esac
+}
+
+_blurb() {
+    case "$1" in
+        help)       echo "The way in: a one-screen cheat sheet and the written guides." ;;
+        aliases)    echo "Short forms. An alias is expanded when a file is PARSED, so these are live inside every module and plugin loaded after them -- which is why any function here that moves or deletes a file calls \`command mv\` / \`command rm\`." ;;
+        functions)  echo "The general-purpose set: navigation, files, text, dev utilities, and the shims that paper over interpreter gaps." ;;
+        env)        echo "PATH helpers and the variables this configuration sets for you." ;;
+        history)    echo "What is remembered, what is deliberately forgotten, and how to search it." ;;
+        options)    echo "Every \`set -o\` and \`shopt\` decision, with the reason. Several of these are deliberately OFF and say why." ;;
+        completion) echo "TAB completion. On hellish 2.10 these install for real; on an older binary they are recorded and install themselves the day you upgrade." ;;
+        prompt)     echo "The theme engine's own entry points. See [the prompt guide](prompt.md) for the token language." ;;
+        core)       echo "The registry, the capability probe and the hook system. You need these only when writing a plugin -- see [writing a plugin](plugins.md)." ;;
+        *)          echo "" ;;
+    esac
+}
+
+_rows() {   # _rows <owner> <kind>
+    local owner="$1" kind="$2" key name usage desc n=0
+    for key in $(hx_item_keys_sorted); do
+        [ "${HX_ITEM_OWNER[$key]}" = "$owner" ] || continue
+        [ "${HX_ITEM_KIND[$key]}" = "$kind" ] || continue
+        n=$((n + 1))
+    done
+    [ "$n" -eq 0 ] && return 0
+
+    case "$kind" in
+        func)  printf '\n| function | usage | what it does |\n|---|---|---|\n' ;;
+        alias) printf '\n| alias | expands to | what it does |\n|---|---|---|\n' ;;
+        var)   printf '\n| variable | what it controls |\n|---|---|\n' ;;
+        opt)   printf '\n| option | state and reason |\n|---|---|\n' ;;
+        cmd)   printf '\n| command | usage | what it does |\n|---|---|\n' ;;
+    esac
+
+    for key in $(hx_item_keys_sorted); do
+        [ "${HX_ITEM_OWNER[$key]}" = "$owner" ] || continue
+        [ "${HX_ITEM_KIND[$key]}" = "$kind" ] || continue
+        name="${key#*:}"
+        usage="${HX_ITEM_USAGE[$key]}"
+        desc="${HX_ITEM_DESC[$key]}"
+        # A pipe inside a description would end the table cell.
+        desc="$(printf '%s' "$desc" | sed 's/|/\\|/g')"
+        case "$kind" in
+            func|cmd)
+                if [ -n "$usage" ]; then
+                    printf '| `%s` | `%s` | %s |\n' "$name" "$usage" "$desc"
+                else
+                    printf '| `%s` | | %s |\n' "$name" "$desc"
+                fi ;;
+            alias)
+                printf '| `%s` | `%s` | %s |\n' "$name" \
+                    "$(alias "$name" 2>/dev/null | sed "s/^$name=//; s/^'//; s/'$//; s/|/\\\\|/g")" "$desc" ;;
+            var)  printf '| `%s` | %s |\n' "$name" "$desc" ;;
+            opt)  printf '| `%s` | %s |\n' "$name" "$desc" ;;
+        esac
+    done
+    printf '\n'
+}
+
+# ── the document ────────────────────────────────────────────────────────────
+cat <<'HEADER'
+# Reference
+
+Every alias, function, variable and shell option this configuration defines.
+
+**This file is generated** from the live registry by `bin/hx-gendoc`. Do not
+edit it: change the `hx_func_doc` / `hx_alias_doc` call next to the code and
+regenerate. The same data is available in the shell, where it is searchable:
+
+```sh
+help_conf                 the whole reference, paged
+help_conf functions       one section
+help_conf -s <term>       search every name and description
+hxp info <plugin>         one plugin, in detail
+```
+
+HEADER
+
+printf 'Generated %s from hellish %s, %s items.\n' \
+    "$(date '+%Y-%m-%d')" "$(hx_cap_get version)" "$(hx_item_keys_sorted | grep -c .)"
+
+# Contents
+printf '\n## Contents\n\n'
+for owner in $ORDER; do
+    n=0
+    for key in $(hx_item_keys_sorted); do
+        [ "${HX_ITEM_OWNER[$key]}" = "$owner" ] && n=$((n + 1))
+    done
+    [ "$n" -eq 0 ] && continue
+    t="$(_title "$owner")"
+    [ "$n" = 1 ] && word=item || word=items
+    printf -- '- [%s](#%s) — %s %s\n' "$t" \
+        "$(printf '%s' "$t" | tr 'A-Z ' 'a-z-')" "$n" "$word"
+done
+
+for owner in $ORDER; do
+    n=0
+    for key in $(hx_item_keys_sorted); do
+        [ "${HX_ITEM_OWNER[$key]}" = "$owner" ] && n=$((n + 1))
+    done
+    [ "$n" -eq 0 ] && continue
+
+    printf '\n## %s\n' "$(_title "$owner")"
+    b="$(_blurb "$owner")"
+    [ -n "$b" ] && printf '\n%s\n' "$b"
+
+    # A plugin's own one-line purpose, and what it needs installed.
+    if [ -n "${HX_PLUG_DESC[$owner]:-}" ]; then
+        printf '\n%s\n' "${HX_PLUG_DESC[$owner]}"
+        [ -n "${HX_PLUG_NEEDS[$owner]:-}" ] && \
+            printf '\nRequires: `%s`\n' "${HX_PLUG_NEEDS[$owner]}"
+        printf '\n```sh\nconf on %s && conf reload\n```\n' "$owner"
+    fi
+
+    _rows "$owner" cmd
+    _rows "$owner" func
+    _rows "$owner" alias
+    _rows "$owner" var
+    _rows "$owner" opt
+done
+
+cat <<'FOOTER'
+
+---
+
+## Anything not listed here
+
+If a name is missing from this file it is not registered, which means
+`help_conf` cannot see it either. For your own code that is a bug worth
+fixing — add an `hx_func_doc` line next to it and it appears in both places at
+once.
+
+```sh
+myfunc() { ...; }
+hx_func_doc myfunc "what it does" "myfunc <arg>"
+```
+
+`forge lint <plugin>` warns about a plugin that registers nothing.
+FOOTER

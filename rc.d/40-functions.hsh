@@ -1,56 +1,56 @@
 # 40-functions.hsh — general-purpose functions, plus shims for interpreter gaps.
-hx_feature functions on core "everyday functions: navigation, archives, search, shims"
+#
+# Everything here is documented with hx_func_doc, which is what puts it in
+# `help_conf` and makes `help_conf -s <term>` able to find it. An undocumented
+# function in this file is a bug the test suite catches.
+hx_feature functions on core "everyday functions: navigation, files, dev, text, shims"
 hx_guard functions || return 0
 
-# ═══ SHIMS for things hellish 2.7.6 cannot do ═══════════════════════════════
+# ═══ SHIMS ══════════════════════════════════════════════════════════════════
+#
+# Each of these worked around a gap in hellish 2.7.6. Several of those gaps
+# are now closed -- `conf caps` says which on YOUR binary -- and the shims are
+# kept anyway, because they are the portable spelling: code written against
+# glob_into runs on every hellish, and code written against `a=(glob*)` runs
+# on the new ones only. Where the gap is closed the shim costs one function
+# call, which is not a price worth optimising away.
 
 # glob_into <arrayname> <pattern...>
-#   The `shopt -s nullglob` shim. nullglob works for command words but NOT for
-#   array literals: `a=(/nope*)` yields one element (the literal pattern) instead
-#   of zero. This fills an array with only real matches.
-#     glob_into files /etc/host*  ->  ${files[@]} has 4 entries
+#   The nullglob shim. On an old hellish `a=(/nope*)` yielded ONE element (the
+#   literal pattern) instead of zero; on a new one it yields zero but only
+#   when nullglob is set, and this configuration deliberately leaves it unset
+#   (see 20-options.hsh). Either way this is how you get "only real matches".
+#     glob_into files /etc/host*  ->  ${files[@]} has the real ones
 #     glob_into files /nope*      ->  ${#files[@]} is 0
-#   Writes through eval because a subscripted write from a sourced function is
-#   itself broken (see lib/core.hsh hx_aset).
 glob_into() {
-    local __arr="$1" __p __n=0
+    local __arr="$1" __p
     shift
     eval "$__arr=()"
     for __p in "$@"; do
         [ -e "$__p" ] || [ -L "$__p" ] || continue
         eval "$__arr+=(\"\$__p\")"
-        __n=$((__n + 1))
     done
     return 0
 }
 hx_func_doc glob_into "fill an array with only real glob matches (nullglob shim)" "glob_into <array> <pattern>..."
 
-# rglob <dir> <name-pattern>
-#   The `globstar` / `**` shim. `**` is literal in 2.7.6, so this walks with find.
-#     rglob . '*.c'   ->  every .c file below .
+# rglob <dir> <pattern> — recursive file glob.
+#   `**` works on hellish 2.9+ and is armed in 20-options.hsh, but it is a
+#   GLOB: it walks the whole tree and hands the shell every path at once.
+#   find streams, prunes, and does not care how many files match, so this
+#   stays the right tool for a large tree.
 rglob() {
     local dir="${1:-.}" pat="${2:-*}"
     find "$dir" -type f -name "$pat" 2>/dev/null
 }
-hx_func_doc rglob "recursive file glob (** shim, uses find)" "rglob <dir> <pattern>"
+hx_func_doc rglob "recursive file search by name (streams, unlike **)" "rglob <dir> <pattern>"
 
-# dirs — pushd/popd exist in hellish but `dirs` does not.
-dirs() {
-    # No introspection into the shell's own stack is exposed, so this reports
-    # what it can: the current and previous directory.
-    printf '%s' "$PWD"
-    [ -n "${OLDPWD:-}" ] && printf ' %s' "$OLDPWD"
-    printf '\n'
-}
-hx_func_doc dirs "current and previous directory (partial 'dirs' shim)"
-
-# is_set <VAR> — the `test -v` shim; `[ -v x ]` returns false even when set.
+# is_set <VAR> — the `test -v` shim.
 is_set() { eval "[ -n \"\${$1+x}\" ]"; }
 hx_func_doc is_set "true when a variable is set, even if empty (test -v shim)" "is_set <VARNAME>"
 
-# quote <string> — the `printf %q` shim; %q is an invalid format in 2.7.6.
-# Wraps in single quotes and escapes embedded single quotes, so the result is
-# safe to paste back into the shell.
+# quote <string> — the `printf %q` shim. Wraps in single quotes and escapes
+# embedded single quotes, so the result is safe to paste back into the shell.
 quote() {
     local s="$1" out=
     while [ -n "$s" ]; do
@@ -86,6 +86,21 @@ cdf() {
 }
 hx_func_doc cdf "cd to the first matching directory below here" "cdf <pattern>"
 
+# root — the top of whatever this is: git repo, project marker, or nothing.
+root() {
+    local d="$PWD"
+    while [ -n "$d" ] && [ "$d" != "/" ]; do
+        if [ -e "$d/.git" ] || [ -f "$d/Cargo.toml" ] || [ -f "$d/go.mod" ] \
+           || [ -f "$d/package.json" ] || [ -f "$d/Makefile" ]; then
+            cd "$d" && pwd && return 0
+        fi
+        d="${d%/*}"
+    done
+    hx_err "no repository or project root above here"
+    return 1
+}
+hx_func_doc root "cd to the repository or project root above here"
+
 tmpd() { local d; d=$(mktemp -d) && cd "$d" && pwd; }
 hx_func_doc tmpd "create a temp directory and cd into it"
 
@@ -113,30 +128,79 @@ extract() {
 }
 hx_func_doc extract "extract any archive by extension" "extract <archive>"
 
+# pack <archive> <path...> — the other direction, format chosen by extension.
+pack() {
+    local out="$1"
+    [ -n "$out" ] || { hx_err "usage: pack <archive.tar.gz> <path>..."; return 2; }
+    shift
+    [ $# -gt 0 ] || { hx_err "nothing to pack"; return 2; }
+    case "$out" in
+        *.tar.gz|*.tgz)   tar czf "$out" "$@" ;;
+        *.tar.bz2|*.tbz2) tar cjf "$out" "$@" ;;
+        *.tar.xz|*.txz)   tar cJf "$out" "$@" ;;
+        *.tar.zst)        tar --zstd -cf "$out" "$@" ;;
+        *.tar)            tar cf "$out" "$@" ;;
+        *.zip)            zip -r "$out" "$@" ;;
+        *) hx_err "don't know how to build: $out  (try .tar.gz, .tar.xz, .zip)"; return 1 ;;
+    esac && hx_ok "$out"
+}
+hx_func_doc pack "build an archive; the extension picks the format" "pack <archive.tar.gz> <path>..."
+
 # bak <file> — timestamped copy beside the original.
+#
+# The timestamp is taken ONCE into a variable. Calling date twice -- once for
+# the copy and once for the message -- can straddle a second boundary and
+# report a filename that does not exist.
 bak() {
-    local f
+    local f stamp
     [ $# -gt 0 ] || { hx_err "usage: bak <file>..."; return 2; }
+    stamp=$(date +%Y%m%d-%H%M%S)
     for f in "$@"; do
         [ -e "$f" ] || { hx_err "no such file: $f"; continue; }
-        command cp -a "$f" "$f.bak.$(date +%Y%m%d-%H%M%S)" && hx_ok "$f.bak.$(date +%Y%m%d-%H%M%S)"
+        command cp -a "$f" "$f.bak.$stamp" && hx_ok "$f.bak.$stamp"
     done
 }
 hx_func_doc bak "timestamped backup copy of a file" "bak <file>..."
 
-# ff <pattern> — find files by name, skipping noise directories.
+# ff <pattern> — find files by name, skipping the noise directories.
 ff() {
     [ -n "$1" ] || { hx_err "usage: ff <pattern>"; return 2; }
     find . -type f -iname "*$1*" \
         -not -path '*/.git/*' -not -path '*/node_modules/*' \
-        -not -path '*/target/*' -not -path '*/build/*' 2>/dev/null
+        -not -path '*/target/*' -not -path '*/build/*' \
+        -not -path '*/.venv/*' -not -path '*/__pycache__/*' 2>/dev/null
 }
 hx_func_doc ff "find files by name below here (skips .git, node_modules)" "ff <pattern>"
+
+# fd_ <pattern> — the same for directories. Named fd_ so it never shadows the
+# `fd` tool someone may have installed.
+fd_() {
+    [ -n "$1" ] || { hx_err "usage: fd_ <pattern>"; return 2; }
+    find . -type d -iname "*$1*" -not -path '*/.git/*' -not -path '*/node_modules/*' 2>/dev/null
+}
+hx_func_doc fd_ "find directories by name below here" "fd_ <pattern>"
+
+# grepf <pattern> [dir] — search file CONTENTS, skipping binaries and noise.
+# Uses ripgrep when it is installed, because on a large tree it is not a
+# marginal improvement over grep, it is a different experience.
+grepf() {
+    local pat="$1" dir="${2:-.}"
+    [ -n "$pat" ] || { hx_err "usage: grepf <pattern> [dir]"; return 2; }
+    if hx_have rg; then
+        rg --line-number --color=always "$pat" "$dir"
+    else
+        grep -rnI --color=always \
+            --exclude-dir=.git --exclude-dir=node_modules \
+            --exclude-dir=target --exclude-dir=build --exclude-dir=.venv \
+            -- "$pat" "$dir"
+    fi
+}
+hx_func_doc grepf "search file contents below here (uses ripgrep when installed)" "grepf <pattern> [dir]"
 
 # biggest [n] — largest files below here.
 biggest() {
     local n="${1:-10}"
-    find . -type f -not -path '*/.git/*' -printf '%s\t%p\n' 2>/dev/null \
+    find . -xdev -type f -not -path '*/.git/*' -printf '%s\t%p\n' 2>/dev/null \
         | sort -rn | head -"$n" \
         | while IFS=$(printf '\t') read -r sz path; do
               printf '%8s  %s\n' "$(numfmt --to=iec "$sz" 2>/dev/null || echo "$sz")" "$path"
@@ -144,20 +208,67 @@ biggest() {
 }
 hx_func_doc biggest "largest files below here" "biggest [count]"
 
+# ═══ TEXT ═══════════════════════════════════════════════════════════════════
+# count — lines, words, characters of stdin or a file, labelled. `wc` gives
+# you three numbers in an order nobody remembers.
+# Reading stdin is the NO-REDIRECT case, not a redirect from "-". `wc < -`
+# looks for a file literally called "-" and fails silently into an empty
+# result, which is what `printf 'a\nb\n' | count` used to do.
+count() {
+    if [ $# -eq 0 ]; then wc -lwc; else wc -lwc < "$1"; fi \
+        | while read -r l w c; do
+              printf '  %8s lines\n  %8s words\n  %8s characters\n' "$l" "$w" "$c"
+          done
+}
+hx_func_doc count "lines, words and characters, labelled" "count [file]"
+
+# freq [n] — the most common lines of stdin, with counts. The shape of
+# `sort | uniq -c | sort -rn` that everybody retypes.
+freq() {
+    local n="${1:-20}"
+    sort | uniq -c | sort -rn | head -"$n" | sed 's/^ *//'
+}
+hx_func_doc freq "most frequent lines of stdin, with counts" "... | freq [count]"
+
+# cols <n...> — pick columns out of whitespace-separated input.
+#     ps aux | cols 2 11
+cols() {
+    [ $# -gt 0 ] || { hx_err "usage: ... | cols <n>..."; return 2; }
+    awk -v spec="$*" '
+        BEGIN { n = split(spec, want, " ") }
+        { out = ""
+          for (i = 1; i <= n; i++) out = out (i > 1 ? " " : "") $want[i]
+          print out }'
+}
+hx_func_doc cols "pick whitespace-separated columns out of stdin" "... | cols 2 11"
+
+# trim — strip leading and trailing whitespace from every line.
+trim() { sed 's/^[[:space:]]*//; s/[[:space:]]*$//'; }
+hx_func_doc trim "strip leading and trailing whitespace from each line"
+
 # ═══ DEV UTILITIES ══════════════════════════════════════════════════════════
-# serve [port] — static HTTP server in the current directory.
+# serve [port] [dir] — static HTTP server. Binds to localhost ONLY unless you
+# ask otherwise: `python3 -m http.server` defaults to every interface, which
+# on a shared machine publishes your working directory to the whole network.
 serve() {
-    local port="${1:-8000}"
-    if command -v python3 >/dev/null 2>&1; then
-        hx_info "http://localhost:$port  (ctrl-c to stop)"
-        python3 -m http.server "$port"
+    local port="${1:-8000}" dir="${2:-.}"
+    hx_have python3 || { hx_err "needs python3"; return 1; }
+    hx_info "http://localhost:$port  serving ${dir}  (ctrl-c to stop)"
+    hx_info "bound to localhost only — HX_SERVE_ALL=1 to expose it on the network"
+    if [ "${HX_SERVE_ALL:-0}" = "1" ]; then
+        python3 -m http.server "$port" --directory "$dir"
     else
-        hx_err "needs python3"; return 1
+        python3 -m http.server "$port" --bind 127.0.0.1 --directory "$dir"
     fi
 }
-hx_func_doc serve "static HTTP server for the current directory" "serve [port]"
+hx_func_doc serve "static HTTP server for a directory, localhost-only by default" "serve [port] [dir]"
+hx_var_doc HX_SERVE_ALL "set to 1 to make serve() listen on every interface, not just localhost"
 
-calc() { [ $# -gt 0 ] || { hx_err "usage: calc <expr>"; return 2; }; printf '%s\n' "$*" | bc -l; }
+calc() {
+    [ $# -gt 0 ] || { hx_err "usage: calc <expr>"; return 2; }
+    hx_have bc || { hx_err "needs bc"; return 1; }
+    printf '%s\n' "$*" | bc -l
+}
 hx_func_doc calc "floating-point calculator" "calc '3.5 * 2'"
 
 genpass() {
@@ -167,39 +278,41 @@ genpass() {
 }
 hx_func_doc genpass "random password from /dev/urandom" "genpass [length]"
 
-# retry <n> <command...> — re-run a command until it succeeds.
+# retry <n> <command...> — re-run until it succeeds, backing off.
+#
+# The delay doubles up to a cap. A fixed `sleep 1` is the wrong shape for what
+# this is usually waiting on -- a service coming up, a flaky network -- where
+# the useful behaviour is to ask often at first and then stop hammering.
 retry() {
-    local max="$1" i=1
+    local max="$1" i=1 delay=1
     shift
     case "$max" in ''|*[!0-9]*) hx_err "usage: retry <count> <command>..."; return 2 ;; esac
     while [ "$i" -le "$max" ]; do
         "$@" && return 0
-        hx_warn "attempt $i/$max failed"
+        [ "$i" -eq "$max" ] && break
+        hx_warn "attempt $i/$max failed; retrying in ${delay}s"
+        sleep "$delay"
+        delay=$((delay * 2)); [ "$delay" -gt 30 ] && delay=30
         i=$((i + 1))
-        sleep 1
     done
     hx_err "gave up after $max attempts"
     return 1
 }
-hx_func_doc retry "re-run a command until it succeeds" "retry <count> <command>..."
+hx_func_doc retry "re-run a command until it succeeds, with exponential backoff" "retry <count> <command>..."
 
-# timer <command...> — wall-clock duration of a command.
+# timer <command...> — wall-clock duration, on stderr so it never pollutes a
+# pipe you are capturing.
 timer() {
-    local t0 t1
-    t0=$(hx_now_ms); "$@"; local rc=$?; t1=$(hx_now_ms)
+    local t0 t1 rc
+    t0=$(hx_now_ms); "$@"; rc=$?; t1=$(hx_now_ms)
     printf '%s-> %s ms (exit %s)%s\n' "$HX_GRY" "$(( t1 - t0 ))" "$rc" "$HX_R" >&2
     return $rc
 }
 hx_func_doc timer "time a command in milliseconds" "timer <command>..."
 
-# confirm <prompt> — yes/no gate for destructive scripts.
-# `read -n 1` is broken in 2.7.6 (returns empty), so this reads a whole line.
-confirm() {
-    local reply
-    printf '%s [y/N] ' "${1:-are you sure?}"
-    read -r reply
-    case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
-}
+# confirm <prompt> — yes/no gate. Returns 1 when stdin is not a terminal, so a
+# script that inherits it cannot block forever on a prompt nobody can see.
+confirm() { hx_confirm "$@"; }
 hx_func_doc confirm "ask a yes/no question (returns 0 for yes)" "confirm 'delete everything?'"
 
 # envload [file] — export every KEY=VALUE in a .env file.
@@ -211,6 +324,7 @@ envload() {
         case "$line" in *=*) ;; *) continue ;; esac
         key="${line%%=*}"
         val="${line#*=}"
+        key="${key#export }"
         case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
         # strip one layer of surrounding quotes
         case "$val" in
@@ -224,18 +338,77 @@ envload() {
 }
 hx_func_doc envload "export every KEY=VALUE from a .env file" "envload [file]"
 
-# psgrep / killport
+# envdiff <file> — what envload WOULD change, without changing it. The safe
+# thing to run first when the file came from somewhere else.
+envdiff() {
+    local f="${1:-.env}" line key val cur
+    [ -r "$f" ] || { hx_err "no such file: $f"; return 1; }
+    hx_head "${f} vs this environment"
+    while IFS= read -r line; do
+        case "$line" in ''|'#'*) continue ;; esac
+        case "$line" in *=*) ;; *) continue ;; esac
+        key="${line%%=*}"; key="${key#export }"
+        val="${line#*=}"
+        case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
+        eval "cur=\${$key:-}"
+        if ! is_set "$key"; then
+            printf '  %s+ %-24s%s would be set\n' "$HX_GRN" "$key" "$HX_R"
+        elif [ "$cur" != "$val" ]; then
+            printf '  %s~ %-24s%s would change\n' "$HX_YEL" "$key" "$HX_R"
+        else
+            printf '  %s= %-24s%s already matches\n' "$HX_GRY" "$key" "$HX_R"
+        fi
+    done < "$f"
+    printf '\n'
+}
+hx_func_doc envdiff "what envload would change, without changing it" "envdiff [file]"
+
 killport() {
-    local port="$1" pids
+    local port="$1" pids p
     [ -n "$port" ] || { hx_err "usage: killport <port>"; return 2; }
-    pids=$(lsof -ti tcp:"$port" 2>/dev/null)
+    if hx_have lsof; then
+        pids=$(lsof -ti tcp:"$port" 2>/dev/null)
+    elif hx_have ss; then
+        pids=$(ss -tlpnH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u)
+    fi
     [ -n "$pids" ] || { hx_warn "nothing listening on port $port"; return 1; }
     printf '%s\n' "$pids" | while read -r p; do
-        hx_info "killing pid $p on port $port"
-        kill -9 "$p" 2>/dev/null
+        [ -n "$p" ] || continue
+        hx_info "killing pid $p ($(ps -o comm= -p "$p" 2>/dev/null)) on port $port"
+        kill "$p" 2>/dev/null || kill -9 "$p" 2>/dev/null
     done
 }
 hx_func_doc killport "kill whatever is listening on a TCP port" "killport <port>"
+
+# ═══ THE SHELL ITSELF ═══════════════════════════════════════════════════════
+# note [text] — a scratch log that outlives the terminal. With no argument it
+# prints what you have written.
+note() {
+    local f="$HX_STATE/notes.txt"
+    if [ $# -eq 0 ]; then
+        [ -s "$f" ] || { hx_info "no notes yet — note 'something'"; return 0; }
+        hx_head "notes"; sed 's/^/  /' "$f"; printf '\n'
+        return 0
+    fi
+    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$*" >> "$f"
+    hx_ok "noted"
+}
+hx_func_doc note "jot a timestamped note, or print them all" "note [text]"
+
+# sysinfo — the machine, in ten lines.
+sysinfo() {
+    hx_head "$(hostname 2>/dev/null)"
+    hx_kv "os"      "$(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release 2>/dev/null || uname -s)"
+    hx_kv "kernel"  "$(uname -r)"
+    hx_kv "shell"   "hellish $(hx_cap_get version)  at $(hx_shell_bin)"
+    hx_kv "uptime"  "$(uptime -p 2>/dev/null || echo '?')"
+    hx_kv "cpu"     "$(nproc 2>/dev/null || echo '?') cores"
+    hx_kv "memory"  "$(free -h 2>/dev/null | awk '/^Mem:/ { print $3 " used of " $2 }')"
+    hx_kv "home"    "$(df -h "$HOME" 2>/dev/null | awk 'NR==2 { print $4 " free of " $2 " (" $5 " used)" }')"
+    hx_kv "term"    "${TERM:-?}  ${COLORTERM:+$COLORTERM  }$(hx_color_depth)-colour  $(hx_cols) columns"
+    printf '\n'
+}
+hx_func_doc sysinfo "this machine, in ten lines"
 
 # ═══ CONFIG SELF-SERVICE ════════════════════════════════════════════════════
 hxcd() { cd "$HX_HOME" && pwd; }
@@ -247,3 +420,9 @@ hxnew() {
     return 1
 }
 hx_func_doc hxnew "scaffold a new plugin (via the forge plugin)" "hxnew <name>"
+
+# NOTE: no hx_complete calls here. This module is loaded at 40-, and
+# hx_complete is defined by 70-completion.hsh -- calling it from this file
+# printed three "hx_complete: command not found" lines on every single shell
+# start. The completions for these functions live in 70-completion.hsh, which
+# is the module that owns the question anyway.

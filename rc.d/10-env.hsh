@@ -90,8 +90,10 @@ export XDG_DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 
 # ── this configuration's own vars ───────────────────────────────────────────
-export HX_THEME="${HX_THEME:-box}"
-hx_var_doc HX_THEME     "prompt theme: box | minimal | classic | plain  (conf set HX_THEME ...)"
+# HX_THEME is deliberately NOT defaulted here. rc.d/50-prompt.hsh owns it, and
+# it can only pick a sensible fallback after the theme files have been read --
+# defaulting to a name in this module is how you end up pinned to a theme that
+# was removed two releases ago.
 hx_var_doc HX_COLOR     "colour policy: auto | always | never"
 hx_var_doc HX_HIST_SIZE "history size kept in memory and on disk"
 hx_var_doc HX_HOME      "root of this configuration (~/.hellish)"

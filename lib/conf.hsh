@@ -23,6 +23,7 @@ conf() {
         doctor)       _conf_doctor ;;
         profile)      _conf_profile ;;
         modules)      _conf_modules ;;
+        caps|capabilities) _conf_caps "$@" ;;
         help|-h|--help) _conf_help ;;
         *)            hx_err "conf: unknown command '$cmd'"; _conf_help; return 2 ;;
     esac
@@ -42,6 +43,7 @@ _conf_help() {
     hx_kv "conf edit"            "open hellish.conf in \$EDITOR"
     hx_kv "conf modules"         "list loaded files in load order"
     hx_kv "conf profile"         "re-load with per-module timings"
+    hx_kv "conf caps"            "what this hellish can do (conf caps -r to re-probe)"
     hx_kv "conf doctor"          "health check: errors, missing deps, stale state"
     hx_kv "conf path"            "print the config file path"
     printf '\n  %ssee also: help_conf (full reference), hxp (plugins)%s\n\n' "$HX_GRY" "$HX_R"
@@ -153,7 +155,7 @@ _conf_profile() {
 _conf_doctor() {
     local e n bad=0
     hx_head "configuration doctor"
-    hx_kv "hellish"   "$(/usr/bin/hellish --version 2>/dev/null | head -1)"
+    hx_kv "hellish"   "$(hx_cap_get version)  at $(hx_shell_bin)"
     hx_kv "config"    "v$HX_VERSION at ${HX_HOME/#$HOME/\~}"
     hx_kv "conf file" "$([ -r "$HX_CONF" ] && echo present || echo "${HX_YEL}absent (using defaults)${HX_R}")"
     hx_kv "files"     "${#HX_LOADED[@]} loaded"
@@ -177,10 +179,62 @@ _conf_doctor() {
     done
     [ "$bad" -eq 0 ] && printf '    %snone%s\n' "$HX_GRN" "$HX_R"
 
-    printf '\n%s  known interpreter gaps worked around%s\n' "$HX_ORA" "$HX_R"
-    printf '    %s%s%s\n' "$HX_GRY" "see ~/.context_conf.md for the full list" "$HX_R"
+    printf '\n%s  interpreter gaps still being worked around%s\n' "$HX_ORA" "$HX_R"
+    _conf_gaps
     printf '\n'
     return 0
+}
+
+# _conf_gaps — only the capabilities this hellish LACKS, and what the
+# configuration does about each. A list of what works is noise; a list of what
+# does not is a to-do that shrinks with every release.
+_conf_gaps() {
+    local any=0
+    _gap() {
+        hx_cap "$1" && return 0
+        printf '    %s%-16s%s %s\n' "$HX_YEL" "$1" "$HX_R" "$2"
+        any=1
+    }
+    _gap builtin_complete "no \`complete\`: completions are declared but never installed"
+    _gap builtin_bind     "no \`bind\`: key bindings cannot be set from an rc"
+    _gap extglob          "@() +() are a lexer error even though shopt reports them on"
+    _gap procsub          "no <(...): use a temp file or a here-document"
+    _gap nullglob_array   "a=(glob*) yields the pattern on no match -- use glob_into"
+    _gap assoc_sourced    "subscripted writes from a sourced function need hx_aset"
+    _gap printf_q         "no printf %%q -- use the quote() shim"
+    _gap introspect       "declare -F / alias -p return nothing; the registry is the only index"
+    _gap test_v           "[ -v VAR ] is always false -- use is_set"
+    _gap read_n           "read -n N returns empty -- confirm() reads a whole line"
+    _gap nameref          "local -n yields the NAME, not the value"
+    _gap hooks            "no HELLISH_PRECMD_FUNCS: hooks run through PROMPT_COMMAND"
+    _gap rprompt          "no RPROMPT: themes with a right prompt render only their left half"
+    printf '    %s%-16s%s %s\n' "$HX_YEL" "prompt \$( )" "$HX_R" \
+        "command substitution is never expanded in PS1 -- segments use \${VAR}"
+    printf '    %s%-16s%s %s\n' "$HX_YEL" "PS2" "$HX_R" \
+        "the continuation prompt is fixed at '> '; setting PS2 does nothing"
+    printf '    %s%-16s%s %s\n' "$HX_YEL" "COLUMNS" "$HX_R" \
+        "never set, so terminal width costs a \`tput cols\` fork (hx_cols caches it)"
+    return 0
+}
+
+# _conf_caps — the full probe result, pass and fail.
+_conf_caps() {
+    [ "${1:-}" = "-r" ] && { hx_caps_refresh; return 0; }
+    local k v
+    hx_head "capabilities of $(hx_shell_bin)"
+    hx_kv "version" "$(hx_cap_get version)"
+    hx_kv "probed"  "once, cached in ${HX_STATE/#$HOME/\~}/capabilities"
+    printf '\n'
+    for k in $(printf '%s\n' "${!HX_CAP[@]}" | sort); do
+        [ "$k" = version ] && continue
+        v="${HX_CAP[$k]}"
+        if [ "$v" = 1 ]; then
+            printf '    %s%s%s %s\n' "$HX_GRN" "$HX_G_OK" "$HX_R" "$k"
+        else
+            printf '    %s%s%s %s%s%s\n' "$HX_YEL" "$HX_G_BAD" "$HX_R" "$HX_GRY" "$k" "$HX_R"
+        fi
+    done
+    hx_note "conf caps -r re-probes (do this after: update --now)"
 }
 
 # ── help_conf: the full, professional reference ─────────────────────────────
@@ -208,7 +262,7 @@ _help_conf_banner() {
     printf '  hellish configuration%s %sv%s%s\n' "$HX_R" "$HX_GRY" "$HX_VERSION" "$HX_R"
     printf '  %s%s | %s files | %s features | %s documented items%s\n' \
         "$HX_GRY" \
-        "$(/usr/bin/hellish --version 2>/dev/null | head -1 | cut -d, -f1)" \
+        "hellish $(hx_cap_get version)" \
         "${#HX_LOADED[@]}" \
         "$(hx_feat_names_sorted | wc -l | tr -d ' ')" \
         "$(hx_item_keys_sorted | wc -l | tr -d ' ')" \

@@ -1,0 +1,40 @@
+# themes/40-blocks.hsh — prompts built from filled colour, not from text.
+#
+# Reverse-video segments read as objects rather than as words, which is what
+# makes them scannable at a glance: you find "the blue one" faster than you
+# read "dlesieur". The cost is that a block is only as good as its edges.
+#
+# ── THE SEPARATOR, AND WHY IT IS NOT A NERD FONT BY DEFAULT ─────────────────
+# The powerline look needs U+E0B0, a private-use codepoint that exists only in
+# a patched font. Without one it is not ugly, it is TOFU -- an empty rectangle
+# where the join should be. So {sep} is a left half-block by default, which
+# every UTF-8 font has: drawn in the outgoing segment's colour over the
+# incoming segment's background, it renders as a hard vertical edge. The real
+# triangles are one command away, `prompt nerd on`, and {sep} becomes U+E0B0
+# in every theme at once.
+
+# powerline — the canonical three-segment bar: who, where, and a tail.
+hx_theme powerline blocks '' 'the classic bar: user, host, path, in filled segments' \
+    '{b:24}{f:255}{bold} {user} {/bold}{r}{f:24}{b:60}{sep}{r}{b:60}{f:255} {host} {r}{f:60}{b:238}{sep}{r}{b:238}{f:252} {cwd} {r}{f:238}{sep}{r} {f:150}{git}{r}{f:203}{fail}{r} '
+
+# slab — blocks with no separators at all. The colour change IS the edge, so
+# there is nothing to render wrong and nothing to install a font for. The
+# status block is the loud one, and it is the last thing before the cursor.
+hx_theme slab blocks '' 'abutting blocks, no separators, status block last' \
+    '{b:236}{f:250} {time} {r}{b:24}{f:255}{bold} {cwd:2} {/bold}{r}{stb}{f:16}{bold} {stg} {/bold}{r} {f:150}{git}{r}{f:179}{took}{r} '
+
+# tape — violet segments that dissolve into a three-step gradient instead of
+# ending on a hard edge. The gradient is three shade glyphs, not a colour
+# ramp, so it costs nothing and survives on an 8-colour terminal.
+hx_theme tape blocks '' 'violet segments dissolving through a shaded tail' \
+    '{b:53}{f:225} {user} {r}{b:54}{f:225}{bold} {cwd:2} {/bold}{r}{f:54}{b1}{b2}{b3}{r} {f:141}{git}{r}{f:203}{fail}{r} {stf}{arr}{r} '
+
+# chevron — the colour gradient without the fill: three chevrons stepping from
+# teal to green, then a clean second row for the cursor.
+hx_theme chevron blocks '' 'a teal-to-green chevron ramp over two rows' \
+    '{f:31}{arr}{f:37}{arr}{f:43}{arr}{r} {f:252}{cwd:2}{r} {f:66}{git}{r}{f:203}{fail}{r}{f:179}{took}{r}{nl}{stf}{arr}{r} '
+
+# stack — the path gets a whole row of filled colour to itself, and the badges
+# get the row below. Wide paths never push the cursor around.
+hx_theme stack blocks 'path' 'a full block row for the path, badges beneath' \
+    '{b:237}{f:253}{bold} {path} {/bold}{r}{nl}{stb}{f:16}{bold} {stg} {/bold}{r} {f:150}{git}{r}{f:179}{took}{r}{f:110}{jobsb}{r} {stf}{arr}{r} '

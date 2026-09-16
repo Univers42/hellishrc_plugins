@@ -1,0 +1,35 @@
+# themes/10-minimal.hsh — spare prompts.
+#
+# The shared idea: the prompt is not where you look, it is what you look PAST.
+# Every theme here fits on one line, most of them in under fifteen columns, and
+# none of them costs a fork. What they differ in is what survives the cut.
+#
+# Token reference: `prompt tokens`.   Write your own: `prompt new <name>`.
+
+# blade — the whole prompt is one arrow, and its colour is the last exit code.
+# There is nothing else on the line, so the only thing it can tell you is the
+# one thing you would otherwise type `echo $?` to learn.
+hx_theme blade minimal '' 'one arrow; its colour is the last exit status' \
+    '{stf}{bold}{arr}{/bold}{r} '
+
+# whisper — the directory name in grey and a faint arrow. The clock lives in
+# the right prompt, where it is out of the way of what you are reading.
+hx_theme whisper minimal '' 'grey basename, faint arrow, clock on the right' \
+    '{f:245}{base}{r} {f:240}{arr}{r} ' \
+    '{f:237}{time}{r}'
+
+# pip — a status dot instead of a status colour, so the arrow stays neutral and
+# the eye has one fixed place to check.
+hx_theme pip minimal '' 'a status dot, two path components, the branch' \
+    '{stf}{circ}{r} {f:110}{cwd:2}{r} {f:242}{git}{r} {f:110}{arr}{r} '
+
+# caret — the path, truncated from the FRONT so the part that changes stays
+# put, and a double chevron. One hue throughout.
+hx_theme caret minimal '' 'front-elided path in a single hue, double chevron' \
+    '{f:109}{cwdt:40}{r} {f:65}{git}{r} {f:109}{arr2}{r} '
+
+# nil — the control theme. Exactly one coloured cell in the whole prompt: the
+# $ itself. Everything else is the terminal's own foreground, so this renders
+# identically on a serial console, inside `script`, and over a bad ssh link.
+hx_theme nil minimal '' 'no colour anywhere except the prompt character' \
+    '{base} {stf}{priv}{r} '

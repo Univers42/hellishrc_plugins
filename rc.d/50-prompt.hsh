@@ -1,74 +1,43 @@
-# 50-prompt.hsh — prompt themes.
+# 50-prompt.hsh — load the themes and put one on.
 #
-# hellish extends the bash escape set with SELF-SPACING escapes (they render
-# nothing when they have nothing to say), which is why these themes have no
-# conditional logic in them:
-#   \g  git branch of the cwd, + '*' when dirty      \S  " ✘N" after a failure
-#   \p  " took N.Ns" when a command ran >= 2s        \J  " ⚙N" while jobs exist
-#   \U  " ⬆X.Y.Z" while an update waits              \B  the built-in box theme
-#   \A  animated glyph (opt-in via HELLISH_ANIM; off by default, and the
-#       upstream docs warn it can corrupt some terminals -- left off here)
-# Standard escapes also work: \u \h \H \w \W \$ \n \t \d \j \s \v \[ \]
-hx_feature prompt on ui "prompt themes (box, pure, minimal, classic, plain)"
+# The engine is lib/prompt.hsh. This module is the part that belongs to a
+# configuration rather than to a framework: which directory themes come from,
+# which one is on, and the compatibility surface for anything that was written
+# against the older five-theme `theme` function.
+hx_feature prompt on ui "prompt: 30 themes, a token language, and the switcher"
 hx_guard prompt || return 0
 
-HELLISH_ANIM=off        # see the note above; \A renders nothing while off
+# The upstream \A animation escape repaints the prompt while the shell is
+# idle, and hellish's own documentation warns it can corrupt some terminals.
+# Nothing here uses \A; this makes the decision explicit rather than default.
+HELLISH_ANIM=off
+hx_var_doc HELLISH_ANIM "prompt animation: off, and deliberately so (upstream warns it can corrupt terminals)"
 
-# theme <name> — switch prompt live. Persist with: conf set HX_THEME <name>
-theme() {
-    case "${1:-}" in
-        box)
-            # hellish's own built-in framed prompt.
-            PS1='\B'
-            PS2='\[\033[38;5;242m\]  \[\033[0m\]'
-            ;;
-        pure)
-            # A blank line, one calm info row, then a lone arrow. Commands
-            # always start at the same column.
-            PS1='\n\[\033[1;38;5;111m\]\w\[\033[0m\] \[\033[38;5;245m\]\g\[\033[0m\]\[\033[1;38;5;203m\]\S\[\033[0m\]\[\033[38;5;179m\]\p\[\033[0m\]\[\033[1;38;5;117m\]\J\[\033[0m\]\[\033[38;5;108m\]\U\[\033[0m\]\n\[\033[1;38;5;176m\]❯\[\033[0m\] '
-            PS2='\[\033[38;5;245m\]❯\[\033[0m\] '
-            ;;
-        minimal)
-            PS1='\[\033[1;38;5;111m\]\W\[\033[0m\] \[\033[38;5;245m\]\g\[\033[0m\]\[\033[1;38;5;203m\]\S\[\033[0m\] \[\033[1;38;5;108m\]❯\[\033[0m\] '
-            PS2='\[\033[38;5;245m\]… \[\033[0m\]'
-            ;;
-        classic)
-            PS1='\u@\h:\w\$ '
-            PS2='> '
-            ;;
-        plain)
-            PS1='\w\$ '
-            PS2='> '
-            ;;
-        '')
-            printf '%s\n' "${HX_THEME:-box}"; return 0 ;;
-        *)
-            hx_err "unknown theme '$1' (box, pure, minimal, classic, plain)"
-            return 2 ;;
-    esac
-    HX_THEME="$1"
-    return 0
-}
-hx_func_doc theme "switch prompt theme live; no argument prints the current one" "theme box|pure|minimal|classic|plain"
+# ── themes ──────────────────────────────────────────────────────────────────
+# One file per family, lexical order, 90-local.hsh last so a theme of yours
+# with a shipped name wins.
+HX_THEME_DIR="${HX_THEME_DIR:-$HX_HOME/themes}"
+hx_var_doc HX_THEME_DIR "where prompt themes live (~/.hellish/themes)"
+hx_load_dir "$HX_THEME_DIR"
 
-theme "${HX_THEME:-box}"
-
-# ── PROMPT_COMMAND ──────────────────────────────────────────────────────────
-# Works in hellish (verified interactively). Kept as a dispatch list rather than
-# a single string so a plugin can add to it without clobbering another plugin.
-# NOTE: hellish has no precmd/preexec hook arrays of its own (requested upstream
-# in issue #71 §7.5), so this list is a config-level convention only.
-HX_PRECMD_FUNCS=""
-
-hx_precmd_add() {
-    case " $HX_PRECMD_FUNCS " in
-        *" $1 "*) return 0 ;;                 # already registered
-    esac
-    HX_PRECMD_FUNCS="$HX_PRECMD_FUNCS $1"
-}
+# ── compatibility: hx_precmd_add ────────────────────────────────────────────
+#
+# This configuration has always exposed hx_precmd_add, and plugins call it.
+# It is now a front-end to hx_hook_add, which uses hellish's own
+# HELLISH_PRECMD_FUNCS array when the binary has one (2.9+) and falls back to
+# the PROMPT_COMMAND dispatch list when it does not.
+#
+# Both paths stay wired at once, and _hx_precmd_run is what keeps that from
+# running every hook twice: when the native arrays exist, they are the only
+# thing that runs, and the dispatcher returns immediately.
+hx_precmd_add() { hx_hook_add precmd "$1"; }
 hx_func_doc hx_precmd_add "register a function to run before each prompt" "hx_precmd_add <function>"
 
+hx_preexec_add() { hx_hook_add preexec "$1"; }
+hx_func_doc hx_preexec_add "register a function to run before each typed command (gets the line as \$1)" "hx_preexec_add <function>"
+
 _hx_precmd_run() {
+    hx_cap hooks && return 0      # the native arrays already ran everything
     local f
     for f in $HX_PRECMD_FUNCS; do
         command -v "$f" >/dev/null 2>&1 && "$f"
@@ -76,4 +45,21 @@ _hx_precmd_run() {
     return 0
 }
 PROMPT_COMMAND='_hx_precmd_run'
-hx_var_doc PROMPT_COMMAND "runs _hx_precmd_run, which dispatches every hx_precmd_add function"
+hx_var_doc PROMPT_COMMAND "the fallback prompt hook; inert when hellish has native HELLISH_PRECMD_FUNCS"
+
+# ── apply ───────────────────────────────────────────────────────────────────
+# hellish.conf may name a theme that no longer exists -- an upgrade removed it,
+# or it lived in a themes file that got deleted. Falling back to a known-good
+# theme is better than a shell whose PS1 is empty.
+HX_THEME="${HX_THEME:-vault}"
+if ! hx_theme_known "$HX_THEME"; then
+    hx_error_record "unknown theme '$HX_THEME' in hellish.conf; using 'vault'"
+    HX_THEME=vault
+fi
+hx_prompt_apply "$HX_THEME" >/dev/null 2>&1
+
+hx_var_doc HX_THEME      "the prompt theme (prompt list to browse, prompt save to keep)"
+hx_var_doc HX_PATH_STYLE "how {path} is drawn: smart | short | fish | tail | full"
+hx_var_doc HX_PATH_MAX   "path components before {path} elides the middle"
+hx_var_doc HX_NERD       "1 to use powerline glyphs (needs a patched font)"
+hx_var_doc HX_PS_ACCENT  "the palette colour themes lean on (prompt palette)"

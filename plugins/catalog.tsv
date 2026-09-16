@@ -19,6 +19,7 @@ docker	builtin	-	on	container shortcuts and cleanup
 net	builtin	-	on	ip, ports, http serve, speed checks
 sentinel	builtin	-	on	greeting + system report
 forge	builtin	-	on	write and scaffold your own plugins (hxp new)
+clean	builtin	-	on	reclaim regenerable space in your home (dry run by default)
 omz-sudo	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/sudo/sudo.plugin.zsh	on	ESC-ESC prepends sudo to the line
 omz-extract	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/extract/extract.plugin.zsh	on	the extract command opens any archive
 omz-dirhistory	zsh	https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/dirhistory/dirhistory.plugin.zsh	on	Alt-Left/Alt-Right walk your cd history

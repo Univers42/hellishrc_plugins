@@ -2,7 +2,8 @@
 
 The configuration framework for [hellish](https://github.com/Univers42/hellish):
 a `~/.hellish/` tree with ordered config modules, a plugin system with a
-catalog, and a `conf` command that keeps everything toggleable and documented.
+catalog, a prompt theme engine with thirty themes, written guides, and a `conf`
+command that keeps everything toggleable and documented.
 
 ## Install
 
@@ -24,41 +25,62 @@ sh install.sh --plugins "git jump omz-sudo"
 
 An existing `~/.hellishrc` is never eaten: it is preserved as
 `~/.hellish/rc.d/95-previous-rc.hsh` (still loads, after the framework) plus
-a timestamped backup beside the original.
+a timestamped backup beside the original. Two files are yours and an upgrade
+never overwrites them: `rc.d/99-local.hsh` and `themes/90-local.hsh`.
 
 ## Layout
 
 ```
 ~/.hellishrc        the loader — deliberately tiny, everything real lives in:
 ~/.hellish/
-  lib/              ui.hsh core.hsh plugin.hsh conf.hsh   (the framework)
-  rc.d/             10-env … 99-local                     (config modules, in order;
-                                                           a .zsh module is read with zsh rules)
+  lib/              ui core plugin conf prompt                (the framework)
+  rc.d/             10-env … 90-help 99-local                 (config modules, in order;
+                                                               a .zsh module is read with zsh rules)
+  themes/           30 prompt themes in six families + 90-local.hsh (yours)
   plugins/          one directory per plugin + catalog.tsv
-  bin/              hx-fetch-plugin                       (the external-plugin fetcher)
-  hellish.conf      which features are on                 (managed by `conf`)
-  state/            runtime data (jump db, marks) — never committed
+  bin/              hx-fetch-plugin  hx-clean  hx-gendoc
+  docs/             the written guides + a generated reference (`guide`)
+  test/             run.hsh  prompt.hsh                       (hellish test/run.hsh)
+  hellish.conf      which features are on                     (managed by `conf`)
+  state/            runtime data (jump db, marks, capabilities) — never committed
 ```
 
 ## Daily driving
 
 ```
+cheat                one screen: the commands worth memorising
+guide                the written guides, in your pager     guide tour|prompt|plugins
+help_conf            every alias, function, variable and option, documented
+help_conf -s <term>  search names and descriptions — the fastest way in
 conf list            what is on and off        conf on|off <name>
 conf doctor          anything wrong with the load
-help_conf            every alias, function, variable and option, documented
+prompt list          the thirty themes         prompt <name>  ·  prompt save <name>
+prompt preview       render every theme with this directory's live data
+prompt new <name>    scaffold your own         prompt tokens  the token language
 hxp list             installed plugins         hxp info <name>
 hxp catalog          everything installable
 hxp install <name>   fetch an external plugin (oh-my-zsh, git's own, z, …)
 hxp new <name>       scaffold your own (the `forge` plugin)
+clean                reclaim regenerable space (dry run unless -y)
 ```
+
+## The prompt
+
+A theme is one string in a token language, not a function: hellish renders
+the prompt in C and understands both zsh's percent escapes and its own
+self-spacing badges, so most themes fork nothing and cannot be slow. Themes
+live in `themes/`, one file per family (`minimal`, `classic`, `frames`,
+`blocks`, `expressive`, `focus`), and `themes/90-local.hsh` is yours. See
+[themes/README.md](themes/README.md) and [docs/prompt.md](docs/prompt.md).
 
 ## The catalog
 
-`plugins/catalog.tsv` lists everything an installer can offer — the seven
+`plugins/catalog.tsv` lists everything an installer can offer — the eight
 builtin plugins (`git`, `jump`, `devkit`, `docker`, `net`, `sentinel`,
-`forge`) and the proven external ones: oh-my-zsh's `sudo`, `extract`,
-`dirhistory`, `colored-man-pages`, `copypath`, `jsontools`, `web-search`,
-git's own `git-completion` and `git-prompt`, `bash-preexec`, and `z`.
+`forge`, `clean`) and the proven external ones: oh-my-zsh's `sudo`,
+`extract`, `dirhistory`, `colored-man-pages`, `copypath`, `jsontools`,
+`web-search`, git's own `git-completion` and `git-prompt`, `bash-preexec`,
+and `z`.
 
 Adding a plugin to the ecosystem = **one line in the catalog**. External
 `.zsh` files are fetched keeping their extension, which is what arms
@@ -77,10 +99,28 @@ hx_plugin <name> <on|off> <group> "one-line description" || return 0
 After that line the plugin is enabled; declare dependencies with
 `hx_needs <cmd>…` and document what you define with `hx_alias_doc` /
 `hx_func_doc` so `hxp info` and `help_conf` can explain you. `hxp new <name>`
-scaffolds all of this.
+scaffolds all of this. The full contract is in [docs/plugins.md](docs/plugins.md).
+
+## Documentation
+
+`docs/` holds five hand-written guides (tour, prompt, plugins, architecture,
+troubleshooting) and `docs/reference.md`, which is **generated** from the live
+registry — never edit it by hand:
+
+```sh
+hellish ~/.hellish/bin/hx-gendoc > docs/reference.md
+```
 
 ## Test
 
 ```sh
 hellish test/run.hsh        # loads the real config, asserts the registry
+hellish test/prompt.hsh     # the theme engine, against the running binary
+```
+
+Both honour `HX_HOME`, so they can be pointed at a throwaway tree:
+
+```sh
+sh install.sh --home /tmp/hx --plugins none
+HX_HOME=/tmp/hx/.hellish HOME=/tmp/hx hellish test/run.hsh
 ```

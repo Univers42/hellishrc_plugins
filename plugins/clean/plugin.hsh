@@ -1,0 +1,74 @@
+# plugins/clean/plugin.hsh — reclaim regenerable space in $HOME.
+#
+# The work is done by bin/hx-clean, which is a bash script rather than a
+# hellish function, and that is deliberate: it needs arrays of paths,
+# `find -print0`, and an associative map keyed by filesystem device number.
+# Writing it as shell functions here would mean carrying those three through
+# every shim in rc.d/40-functions.hsh for no benefit, since nothing about it
+# needs to run inside YOUR shell -- it deletes files, it does not change your
+# environment.
+#
+# This plugin is the part that does belong in the shell: the entry point, the
+# documentation, and the guard rails.
+hx_plugin clean on sys "clean: report and reclaim regenerable space in \$HOME" || return 0
+hx_needs du df find
+
+HX_CLEAN_BIN="${HX_CLEAN_BIN:-$HX_HOME/bin/hx-clean}"
+
+# clean — dry run by default. There is no flag to make deletion the default,
+# and that is the whole safety model: every invocation that deletes anything
+# has -y typed on it by a human, at that moment.
+clean() {
+    [ -r "$HX_CLEAN_BIN" ] || { hx_err "missing $HX_CLEAN_BIN"; return 1; }
+    if command -v bash >/dev/null 2>&1; then
+        bash "$HX_CLEAN_BIN" "$@"
+    else
+        hx_err "hx-clean needs bash (it uses arrays and find -print0)"
+        return 1
+    fi
+}
+hx_func_doc clean "report and reclaim regenerable space in \$HOME (dry run unless -y)" \
+    "clean [-y] [-t] [--fonts|--docker|--heavy|-a] [group...]"
+
+# diskfree — the one-line answer to "am I about to run out?", with the same
+# bar sentinel draws so the two agree on what 90%% looks like.
+diskfree() {
+    local mount pct size avail
+    hx_head "disk"
+    df -h -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null \
+        | awk 'NR>1 && $2 != "0" { print $6, $5, $2, $4 }' \
+        | while read -r mount pct size avail; do
+            printf '  %-26s %s  %6s free of %s\n' "$mount" "$(hx_bar "$pct" 18)" "$avail" "$size"
+          done
+    printf '\n  %sclean       what could be reclaimed, without deleting it%s\n' "$HX_GRY" "$HX_R"
+    printf '  %sbigdirs     the largest directories under here%s\n\n' "$HX_GRY" "$HX_R"
+}
+hx_func_doc diskfree "disk usage per mount, with bars"
+
+# bigdirs [dir] [count] — where the space actually went. -x stays on the one
+# filesystem, because descending into /sgoinfre or an NFS mount to answer a
+# question about $HOME wastes minutes and reports space you cannot free.
+bigdirs() {
+    local base="${1:-$PWD}" n="${2:-20}"
+    hx_head "largest directories under ${base/#$HOME/\~}"
+    du -xh --max-depth=3 "$base" 2>/dev/null | sort -rh | head -"$n" | sed 's/^/  /'
+    printf '\n'
+}
+hx_func_doc bigdirs "largest directories below here, one filesystem only" "bigdirs [dir] [count]"
+
+# bigfiles [dir] [count] — the same question, one level down.
+bigfiles() {
+    local base="${1:-$PWD}" n="${2:-20}"
+    hx_head "largest files under ${base/#$HOME/\~}"
+    find "$base" -xdev -type f -not -path '*/.git/*' -printf '%s\t%p\n' 2>/dev/null \
+        | sort -rn | head -"$n" \
+        | while IFS=$(printf '\t') read -r sz path; do
+              printf '  %8s  %s\n' \
+                  "$(numfmt --to=iec "$sz" 2>/dev/null || echo "$sz")" "${path/#$HOME/\~}"
+          done
+    printf '\n'
+}
+hx_func_doc bigfiles "largest files below here" "bigfiles [dir] [count]"
+
+hx_complete clean -y --apply -t --top --docker --fonts --heavy -a --all \
+    trash cache thumbs pkg logs cores tmp dconf nvim rust node vscode browser apps

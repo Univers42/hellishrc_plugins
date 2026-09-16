@@ -1,11 +1,59 @@
-# ~/.hellish/lib/ui.hsh — colour + output primitives.
-# Loaded first; everything else may rely on hx_c_* and hx_say/hx_warn/hx_die.
+# ~/.hellish/lib/ui.hsh — colour, glyphs and output primitives.
 #
-# INTERPRETER NOTE (hellish 2.7.6):
-#   printf does NOT understand '\e'. Only '\033' works. Every escape below
-#   therefore uses \033. $'...' ANSI-C quoting IS supported and is used here.
+# Loaded first; everything else may rely on the HX_* colour variables, the
+# HX_G_* glyphs, and hx_say/hx_warn/hx_die.
+#
+# INTERPRETER NOTE:
+#   printf '\033' works on every hellish ever shipped. printf '\e' only works
+#   from 2.8 onwards. Everything here uses '\033' so this file behaves the
+#   same on an old binary as on a new one. $'...' ANSI-C quoting is supported
+#   and is used for the pre-computed escapes.
+#
+# THREE INDEPENDENT QUESTIONS, and conflating them is the usual bug:
+#   1. how many colours does the TERMINAL have      -> HX_COLOR_DEPTH
+#   2. should THIS stream get colour at all         -> hx_want_color
+#   3. can the terminal draw non-ASCII              -> HX_UNICODE / HX_NERD
+# A pipe kills (2) but not (1): the prompt still wants full colour while
+# `conf list | cat` must not emit any.
 
-# --- capability: does this stream deserve colour? ---------------------------
+# ── 1. capability detection ─────────────────────────────────────────────────
+
+# HX_COLOR_DEPTH — none | 8 | 256 | 24. What the terminal can render, which is
+# not the same question as whether a given command should use it.
+hx_color_depth() {
+    if [ -n "${HX_COLOR_DEPTH:-}" ]; then printf '%s' "$HX_COLOR_DEPTH"; return 0; fi
+    local d=8 n
+    if [ -n "${NO_COLOR+set}" ] || [ "${HX_COLOR:-auto}" = "never" ]; then
+        d=none
+    else
+        case "${TERM:-dumb}" in
+            dumb|'') d=none ;;
+            *)
+                case "${COLORTERM:-}" in
+                    truecolor|24bit) d=24 ;;
+                    *)
+                        n=$(tput colors 2>/dev/null || echo 8)
+                        case "$n" in ''|*[!0-9]*) n=8 ;; esac
+                        if [ "$n" -ge 256 ]; then d=256; else d=8; fi
+                        ;;
+                esac
+                ;;
+        esac
+    fi
+    HX_COLOR_DEPTH="$d"
+    printf '%s' "$d"
+}
+
+# HX_UNICODE — 1 when the locale says the terminal speaks UTF-8.
+hx_unicode_init() {
+    if [ -n "${HX_UNICODE:-}" ] && [ "$HX_UNICODE" != auto ]; then return 0; fi
+    case "${LC_ALL:-}${LC_CTYPE:-}${LANG:-}" in
+        *[Uu][Tt][Ff]*) HX_UNICODE=1 ;;
+        *)              HX_UNICODE=0 ;;
+    esac
+}
+
+# --- capability: does THIS stream deserve colour? ---------------------------
 hx_want_color() {
     [ -n "${NO_COLOR+set}" ] && return 1
     [ "${HX_COLOR:-auto}" = "never" ] && return 1
@@ -15,22 +63,140 @@ hx_want_color() {
     return 0
 }
 
+# ── 2. the message palette ──────────────────────────────────────────────────
+# Sixteen names, resolved once. The eight basic ones stay on the ANSI 30-37
+# codes rather than 256-colour indices so they follow the user's terminal
+# theme -- someone with a solarized palette gets solarized output.
 hx_color_init() {
     if hx_want_color; then
         HX_R=$'\033[0m';    HX_B=$'\033[1m';     HX_DIM=$'\033[2m'
-        HX_IT=$'\033[3m';   HX_UL=$'\033[4m'
+        HX_IT=$'\033[3m';   HX_UL=$'\033[4m';    HX_REV=$'\033[7m'
         HX_RED=$'\033[31m'; HX_GRN=$'\033[32m';  HX_YEL=$'\033[33m'
         HX_BLU=$'\033[34m'; HX_MAG=$'\033[35m';  HX_CYN=$'\033[36m'
         HX_GRY=$'\033[90m'
-        HX_ORA=$'\033[38;5;209m'  # hellish's own accent (matches `help`)
+        if [ "$(hx_color_depth)" = "8" ]; then
+            HX_ORA=$'\033[33m'; HX_VIO=$'\033[35m'; HX_TEAL=$'\033[36m'
+            HX_LIME=$'\033[32m'; HX_SKY=$'\033[36m'; HX_ROSE=$'\033[31m'
+        else
+            HX_ORA=$'\033[38;5;209m'   # hellish's own accent (matches `help`)
+            HX_VIO=$'\033[38;5;141m';  HX_TEAL=$'\033[38;5;44m'
+            HX_LIME=$'\033[38;5;149m'; HX_SKY=$'\033[38;5;117m'
+            HX_ROSE=$'\033[38;5;211m'
+        fi
     else
-        HX_R=; HX_B=; HX_DIM=; HX_IT=; HX_UL=
-        HX_RED=; HX_GRN=; HX_YEL=; HX_BLU=; HX_MAG=; HX_CYN=; HX_GRY=; HX_ORA=
+        HX_R=; HX_B=; HX_DIM=; HX_IT=; HX_UL=; HX_REV=
+        HX_RED=; HX_GRN=; HX_YEL=; HX_BLU=; HX_MAG=; HX_CYN=; HX_GRY=
+        HX_ORA=; HX_VIO=; HX_TEAL=; HX_LIME=; HX_SKY=; HX_ROSE=
     fi
 }
 hx_color_init
 
-# --- message helpers --------------------------------------------------------
+# hx_f <0-255> / hx_b <0-255> — an arbitrary palette colour, degraded to the
+# nearest ANSI basic colour on an 8-colour terminal and to nothing on none.
+# Used by the prompt engine; safe anywhere.
+hx_f() { hx_ansi 38 "$1"; }
+hx_b() { hx_ansi 48 "$1"; }
+
+hx_ansi() {
+    case "$(hx_color_depth)" in
+        none) return 0 ;;
+        8)
+            local c
+            c=$(hx_basic8 "$2")
+            [ "$1" = 48 ] && c=$((c + 10))
+            printf '\033[%sm' "$c"
+            ;;
+        *) printf '\033[%s;5;%sm' "$1" "$2" ;;
+    esac
+}
+
+# hx_basic8 <256-index> — the closest 30-37 code, so an 8-colour terminal
+# still gets recognisable hues instead of a monochrome smear.
+hx_basic8() {
+    case "$1" in
+        0|8|16|232|233|234|235|236|237|238|239|240|241|242|243) echo 30 ;;
+        1|9|52|88|124|160|196|197|198|203|204|209|210|211|217) echo 31 ;;
+        2|10|22|28|34|40|46|70|76|77|82|107|108|114|118|149|150|154) echo 32 ;;
+        3|11|58|94|130|136|172|178|179|180|184|214|215|220|221|222|223) echo 33 ;;
+        4|12|17|19|24|25|26|27|32|33|38|39|60|67|68|69|74|75|110|111|117) echo 34 ;;
+        5|13|53|54|55|90|93|97|98|99|127|129|134|135|140|141|147|176|177|183|212|213) echo 35 ;;
+        6|14|23|29|30|31|36|37|43|44|45|50|51|72|73|79|80|86|87|115|116|122|123) echo 36 ;;
+        *) echo 37 ;;
+    esac
+}
+
+# ── 3. glyphs ───────────────────────────────────────────────────────────────
+# Every glyph has an ASCII twin. A theme written with these renders on a
+# serial console, inside `script`, and over a connection that mangles UTF-8.
+#
+# HX_NERD covers the private-use codepoints (powerline separators, the branch
+# glyph). They are tofu without a patched font, so they are off by default and
+# written as octal escapes to keep this file 7-bit clean.
+hx_glyph_init() {
+    hx_unicode_init
+    if [ "${HX_UNICODE:-0}" = "1" ]; then
+        HX_G_TL='╭';  HX_G_TR='╮';  HX_G_BL='╰';  HX_G_BR='╯'
+        HX_G_TLS='┌'; HX_G_TRS='┐'; HX_G_BLS='└'; HX_G_BRS='┘'
+        HX_G_H='─';   HX_G_V='│';   HX_G_HH='━';  HX_G_VV='┃'
+        HX_G_ARR='❯'; HX_G_ARR2='»'; HX_G_TRI='▸'; HX_G_PLAY='▶'
+        HX_G_LAM='λ'; HX_G_OK='✔';  HX_G_BAD='✘'; HX_G_DOT='•'
+        HX_G_DIA='◆'; HX_G_SQ='▪';  HX_G_CIRC='●'; HX_G_RING='○'
+        HX_G_UP='↑';  HX_G_DN='↓';  HX_G_ELL='…';  HX_G_STASH='⚑'
+        HX_G_BOLT='⚡'; HX_G_CLK='⏱'; HX_G_STAR='★'; HX_G_LOCK='⚿'
+        HX_G_B1='░';  HX_G_B2='▒';  HX_G_B3='▓';  HX_G_FULL='█'
+        HX_G_LHALF='▌'; HX_G_RHALF='▐'; HX_G_BRANCH='⎇'; HX_G_GEAR='⚙'
+        HX_G_CTL='⌜'; HX_G_CBR='⌟'; HX_G_TOPL='▛'; HX_G_TOPR='▜'
+    else
+        HX_G_TL='.';  HX_G_TR='.';  HX_G_BL='`';  HX_G_BR="'"
+        HX_G_TLS='+'; HX_G_TRS='+'; HX_G_BLS='+'; HX_G_BRS='+'
+        HX_G_H='-';   HX_G_V='|';   HX_G_HH='=';  HX_G_VV='|'
+        HX_G_ARR='>'; HX_G_ARR2='>>'; HX_G_TRI='>'; HX_G_PLAY='>'
+        HX_G_LAM='\'; HX_G_OK='+';  HX_G_BAD='x'; HX_G_DOT='*'
+        HX_G_DIA='<>'; HX_G_SQ='#'; HX_G_CIRC='o'; HX_G_RING='o'
+        HX_G_UP='^';  HX_G_DN='v';  HX_G_ELL='..'; HX_G_STASH='$'
+        HX_G_BOLT='!'; HX_G_CLK='@'; HX_G_STAR='*'; HX_G_LOCK='#'
+        HX_G_B1='.';  HX_G_B2=':';  HX_G_B3='#';  HX_G_FULL='#'
+        HX_G_LHALF='|'; HX_G_RHALF='|'; HX_G_BRANCH='git'; HX_G_GEAR='&'
+        HX_G_CTL='['; HX_G_CBR=']'; HX_G_TOPL='+'; HX_G_TOPR='+'
+    fi
+
+    # Powerline separators: U+E0B0 U+E0B1 U+E0B2 U+E0B3, and U+E0A0 for the
+    # branch. Only with a patched font AND unicode, else a solid half-block
+    # stands in -- it is not the same look, but it is a look, not tofu.
+    if [ "${HX_NERD:-0}" = "1" ] && [ "${HX_UNICODE:-0}" = "1" ]; then
+        HX_G_SEP=$(printf '\356\202\260');  HX_G_SEPT=$(printf '\356\202\261')
+        HX_G_RSEP=$(printf '\356\202\262'); HX_G_RSEPT=$(printf '\356\202\263')
+        HX_G_BRANCH=$(printf '\356\202\240')
+    elif [ "${HX_UNICODE:-0}" = "1" ]; then
+        HX_G_SEP='▌'; HX_G_SEPT='│'; HX_G_RSEP='▐'; HX_G_RSEPT='│'
+    else
+        HX_G_SEP='|'; HX_G_SEPT='|'; HX_G_RSEP='|'; HX_G_RSEPT='|'
+    fi
+}
+hx_glyph_init
+
+# ── 4. terminal geometry ────────────────────────────────────────────────────
+# $COLUMNS is not maintained by hellish, so width costs a fork. hx_cols caches
+# it for the life of the shell unless asked to refresh: a prompt that shells
+# out to `tput` on every keystroke is the classic slow-prompt bug.
+hx_cols() {
+    if [ "${1:-}" = "-r" ] || [ -z "${HX_COLS:-}" ]; then
+        HX_COLS=$(tput cols 2>/dev/null || echo 80)
+        case "$HX_COLS" in ''|*[!0-9]*) HX_COLS=80 ;; esac
+        [ "$HX_COLS" -lt 20 ] && HX_COLS=80
+    fi
+    printf '%s' "$HX_COLS"
+}
+
+# hx_repeat <string> <count> — <count> copies, no subshell, no seq.
+hx_repeat() {
+    local s="$1" n="${2:-0}" out=
+    case "$n" in ''|*[!0-9]*) n=0 ;; esac
+    while [ "$n" -gt 0 ]; do out="$out$s"; n=$((n - 1)); done
+    printf '%s' "$out"
+}
+
+# ── 5. message helpers ──────────────────────────────────────────────────────
 hx_say()  { printf '%s\n' "$*"; }
 hx_info() { printf '%s%s%s %s\n' "$HX_BLU" "::" "$HX_R" "$*"; }
 hx_ok()   { printf '%s%s%s %s\n' "$HX_GRN" "ok" "$HX_R" "$*"; }
@@ -41,13 +207,24 @@ hx_die()  { hx_err "$*"; return 1; }
 # hx_head <text> — a section heading in hellish's own `help` style.
 hx_head() { printf '\n%s%s%s\n' "$HX_ORA$HX_B" "$*" "$HX_R"; }
 
+# hx_sub <text> — a quieter sub-heading inside a section.
+hx_sub() { printf '\n  %s%s%s\n' "$HX_CYN" "$*" "$HX_R"; }
+
 # hx_kv <name> <desc> — the aligned two-column row used by help_conf.
 hx_kv() { printf '  %s%-22s%s %s\n' "$HX_B" "$1" "$HX_R" "$2"; }
 
+# hx_kv3 <name> <mid> <desc> — three columns, for tables with a state flag.
+hx_kv3() { printf '  %s%-18s%s %s%-10s%s %s\n' "$HX_B" "$1" "$HX_R" "$HX_GRY" "$2" "$HX_R" "$3"; }
+
+# hx_note <text> — a dim aside, indented, for the "see also" line of a screen.
+hx_note() { printf '\n  %s%s%s\n\n' "$HX_GRY" "$*" "$HX_R"; }
+
 # hx_rule [width] — horizontal rule.
 hx_rule() {
-    local w="${1:-${COLUMNS:-72}}" i=0 line=
-    while [ "$i" -lt "$w" ]; do line="$line-"; i=$((i + 1)); done
+    local w="${1:-}" line
+    [ -n "$w" ] || w=$(hx_cols)
+    [ "$w" -gt 100 ] && w=100
+    line=$(hx_repeat "$HX_G_H" "$w")
     printf '%s%s%s\n' "$HX_GRY" "$line" "$HX_R"
 }
 
@@ -60,6 +237,62 @@ hx_badge() {
     esac
 }
 
+# hx_bar <percent> [width] — a usage bar that changes colour as it fills.
+# Shared by sentinel and the clean plugin so one meter looks the same twice.
+hx_bar() {
+    local pct="${1:-0}" w="${2:-20}" filled i=0 out= col
+    pct=${pct%\%}
+    case "$pct" in ''|*[!0-9]*) pct=0 ;; esac
+    [ "$pct" -gt 100 ] && pct=100
+    filled=$(( pct * w / 100 ))
+    if   [ "$pct" -ge 90 ]; then col="$HX_RED"
+    elif [ "$pct" -ge 70 ]; then col="$HX_YEL"
+    else                        col="$HX_GRN"
+    fi
+    while [ "$i" -lt "$w" ]; do
+        if [ "$i" -lt "$filled" ]; then out="$out$HX_G_B3"; else out="$out$HX_G_B1"; fi
+        i=$((i + 1))
+    done
+    printf '%s%s%s %3s%%' "$col" "$out" "$HX_R" "$pct"
+}
+
+# hx_box <title> — open a framed block; hx_boxend closes it. Both honour the
+# ASCII fallback, so a box is never a row of question marks.
+hx_box() {
+    local w t="$1"
+    w=$(hx_cols); [ "$w" -gt 76 ] && w=76
+    printf '%s%s%s %s%s%s %s%s%s\n' \
+        "$HX_GRY" "$HX_G_TL$HX_G_H" "$HX_R" \
+        "$HX_B$HX_ORA" "$t" "$HX_R" \
+        "$HX_GRY" "$(hx_repeat "$HX_G_H" $(( w - ${#t} - 5 )))" "$HX_R"
+}
+hx_boxend() {
+    local w
+    w=$(hx_cols); [ "$w" -gt 76 ] && w=76
+    printf '%s%s%s\n' "$HX_GRY" "$HX_G_BL$(hx_repeat "$HX_G_H" $(( w - 2 )))" "$HX_R"
+}
+
+# hx_link <url> [text] — an OSC 8 hyperlink where the terminal supports one,
+# and the plain URL where it does not. Falling back to the URL is the point:
+# an unclickable link you can still copy beats a clickable one that renders
+# as escape soup.
+hx_link() {
+    local url="$1" text="${2:-$1}"
+    if hx_want_color && [ -z "${HX_NO_OSC:-}" ]; then
+        printf '\033]8;;%s\033\\%s\033]8;;\033\\' "$url" "$text"
+    else
+        printf '%s' "$text"
+    fi
+}
+
+# hx_title <text> — set the terminal/tab title, on terminals that have one.
+hx_title() {
+    case "${TERM:-}" in
+        xterm*|rxvt*|screen*|tmux*|alacritty*|foot*|kitty*|wezterm*|vte*)
+            printf '\033]0;%s\007' "$*" ;;
+    esac
+}
+
 # hx_pager — page long output when interactive, else pass through.
 hx_pager() {
     if [ -t 1 ] && command -v less >/dev/null 2>&1; then
@@ -67,4 +300,20 @@ hx_pager() {
     else
         cat
     fi
+}
+
+# hx_confirm <question> — yes/no gate. Defined here rather than in the
+# functions module so that lib-level code (hxp remove, conf reset) can ask
+# before destroying something even when that module is switched off.
+# The default is NO, and every way of failing to say yes lands on it: an
+# empty line, anything that is not y/yes, and end-of-file. That last one is
+# what makes this safe in a script whose stdin is closed or /dev/null --
+# `read` fails, the answer is no, and nothing blocks waiting for a prompt
+# nobody can see. Testing `[ -t 0 ]` instead would ALSO refuse a legitimate
+# `printf 'y\n' | gnuke`, which is how the suite drives it.
+hx_confirm() {
+    local reply
+    printf '%s%s%s [y/N] ' "$HX_YEL" "${1:-are you sure?}" "$HX_R"
+    read -r reply || return 1
+    case "$reply" in [yY]|[yY][eE][sS]) return 0 ;; *) return 1 ;; esac
 }

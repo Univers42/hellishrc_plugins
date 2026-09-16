@@ -1,0 +1,994 @@
+# ~/.hellish/lib/prompt.hsh — the prompt theme engine.
+#
+# ── WHY THEMES ARE DATA, NOT CODE ───────────────────────────────────────────
+#
+# A theme here is ONE STRING. It is not a function that runs at every prompt,
+# because it does not have to be: hellish renders the prompt itself, in C, and
+# its renderer speaks two languages at once.
+#
+#   zsh's percent language   %F{117}  %K{24}  %B  %~  %3~  %40<…<%~%<<
+#                            %(?.ok.bad)  %(!.#.$)  %n  %m  %j  %D{%H:%M}
+#   hellish's own badges     \g git branch    \S " ✘N" after a failure
+#                            \p " took N.Ns"  \J " ⚙N" while jobs exist
+#                            \U " ⬆X.Y.Z"     \B the whole built-in theme
+#
+# The badges are SELF-SPACING: each renders nothing at all when it has nothing
+# to say. Between the two languages, almost every theme in this file needs no
+# shell code whatsoever, forks nothing, and cannot be slow. `%(?...)` alone
+# removes the usual "recolour the arrow by exit status" function that every
+# dotfile repo reimplements.
+#
+# ── THE THREE RULES THAT DECIDE EVERYTHING ──────────────────────────────────
+#
+# Verified against this binary in a real pty (test/prompt.hsh re-checks them):
+#
+#   1. $(command substitution) is NOT expanded in a prompt. ${VAR} and
+#      $((arith)) ARE, at every single render. So anything dynamic that the
+#      percent language cannot express is computed once per prompt by a hook
+#      into a variable, and the theme interpolates that variable.
+#
+#   2. Escape sequences coming OUT of a variable are not re-scanned, so a
+#      variable holding "\[\e[32m\]x\[\e[0m\]" renders those eight characters
+#      literally. Therefore: every dynamic variable in this file holds PLAIN
+#      TEXT ONLY, and the theme colours it from the static side with %F{...}.
+#      That is also what keeps the width arithmetic exact -- hellish knows the
+#      width of a %F it emitted, and cannot know the width of an escape that
+#      arrived inside a string.
+#
+#   3. A literal percent sign in a THEME must be written %%. A percent inside
+#      a computed VARIABLE must NOT be doubled: variable content is inert, so
+#      a directory called "50%off" renders as itself. Doubling it there would
+#      put a visible "50%%off" on your prompt.
+#
+#      `print -rP` disagrees with all of this -- it re-scans what a variable
+#      expanded to, so the same "50%off" previews as "50ff" and an escape
+#      sequence stored in a variable previews as real colour. That is an
+#      upstream inconsistency between the preview renderer and the prompt
+#      renderer, not a choice; hx_prompt_render works around it by doubling
+#      percents on the way INTO the preview only, so what you see previewed
+#      is what you get.
+#
+# ── THE TOKEN LANGUAGE ──────────────────────────────────────────────────────
+#
+# Themes are written in tokens rather than raw escapes, so that one palette
+# change restyles all thirty, an 8-colour terminal degrades instead of
+# smearing, and an ASCII terminal gets ASCII instead of tofu.
+#
+#   colour     {f:117} {b:24} {/f} {/b} {r} {bold}{/bold} {ul}{/ul} {rev}{/rev}
+#   status     {stf} foreground by exit status   {stg} ✔ or ✘
+#              {stb} background by exit status   {priv} $ or # by uid
+#   place      {cwd} ~/full   {cwd:2} last two   {base} basename
+#              {cwdt:40} truncated to 40 columns {path} smart, repo-aware
+#   badges     {git} {fail} {took} {jobsb} {upd}   (self-spacing, free)
+#   facts      {user} {host} {jobs} {time} {secs} {date} {day} {nl}
+#   segments   {vcs} {venv} {lang} {ctx} {rule} {load}    (declare in `needs`)
+#              vcs/venv/lang/ctx/load are SELF-SPACING like the badges: each
+#              carries its own leading space and renders nothing when empty,
+#              so a theme never has to guess whether to leave a gap.
+#   glyphs     {arr} {tl} {tr} {bl} {br} {h} {v} {dot} {dia} {lam} … (see below)
+#
+# `prompt tokens` prints the whole table at runtime, which is the copy that
+# cannot go stale.
+
+# ── 1. state ────────────────────────────────────────────────────────────────
+declare -A HX_THEME_PS1 HX_THEME_RPS1 HX_THEME_DESC HX_THEME_FAMILY HX_THEME_NEEDS
+HX_THEME_ORDER=()
+HX_THEME_FAMILIES="minimal classic frames blocks expressive focus local"
+
+# Dynamic segments. Plain text, never escapes (rule 2 above).
+HX_PS_PATH=''; HX_PS_VCS=''; HX_PS_VENV=''; HX_PS_LANG=''
+HX_PS_CTX='';  HX_PS_RULE=''; HX_PS_LOAD=''
+HX_PS_NEEDS=''
+
+# Palette. Every theme draws from these names, so `conf set HX_PS_ACCENT 208`
+# restyles the whole set without touching a theme file.
+HX_PS_OK="${HX_PS_OK:-114}"          # success green
+HX_PS_ERR="${HX_PS_ERR:-203}"        # failure red
+HX_PS_ACCENT="${HX_PS_ACCENT:-117}"  # the colour a theme leans on
+HX_PS_MUTED="${HX_PS_MUTED:-244}"    # secondary text
+HX_PS_FAINT="${HX_PS_FAINT:-238}"    # rules and frames
+
+HX_PATH_STYLE="${HX_PATH_STYLE:-smart}"
+HX_PATH_MAX="${HX_PATH_MAX:-4}"
+HX_GIT_DEEP="${HX_GIT_DEEP:-1}"
+
+# ── 2. registration ─────────────────────────────────────────────────────────
+#
+# hx_theme <name> <family> <needs> <description> <ps1> [rprompt]
+#
+# <needs> is a space-separated list of the dynamic segments the theme uses
+# (path vcs venv lang ctx rule load). The per-prompt hook computes EXACTLY
+# the set the active theme declared and nothing else, which is why a theme
+# built only out of percent escapes costs literally zero shell work.
+#
+# The template is stored raw. Token expansion happens when a theme is applied
+# or previewed, so starting a shell expands one theme, not thirty.
+hx_theme() {
+    local name="$1" family="$2" needs="$3" desc="$4" ps1="$5" rps1="${6:-}"
+    hx_key_ok "$name" || { hx_error_record "bad theme name: $name"; return 1; }
+    hx_aset HX_THEME_FAMILY "$name" "$family"
+    hx_aset HX_THEME_NEEDS  "$name" "$needs"
+    hx_aset HX_THEME_DESC   "$name" "$desc"
+    hx_aset HX_THEME_PS1    "$name" "$ps1"
+    hx_aset HX_THEME_RPS1   "$name" "$rps1"
+    HX_THEME_ORDER+=("$name")
+    return 0
+}
+
+hx_theme_names() {
+    [ "${#HX_THEME_ORDER[@]}" -eq 0 ] && return 0
+    printf '%s\n' "${HX_THEME_ORDER[@]}" | sort -u
+}
+hx_theme_known() { [ -n "${HX_THEME_PS1[$1]+set}" ]; }
+
+# ── 3. token expansion ──────────────────────────────────────────────────────
+
+# _hx_fg <index> / _hx_bg <index> — a palette colour in zsh prompt syntax,
+# degraded by terminal depth. Emitting %F{n} rather than a raw escape is what
+# lets hellish count the prompt's width correctly.
+_hx_fg() {
+    case "$(hx_color_depth)" in
+        none) HX_RET='' ;;
+        8)    HX_RET="%F{$(( $(hx_basic8 "$1") - 30 ))}" ;;
+        *)    HX_RET="%F{$1}" ;;
+    esac
+}
+_hx_bg() {
+    case "$(hx_color_depth)" in
+        none) HX_RET='' ;;
+        8)    HX_RET="%K{$(( $(hx_basic8 "$1") - 30 ))}" ;;
+        *)    HX_RET="%K{$1}" ;;
+    esac
+}
+
+# _hx_sub <string> <token> <replacement> — one global replacement, in HX_RET.
+# Written as a walk rather than ${s//a/b} because the replacement text is full
+# of percent signs and braces, and a pattern substitution would have to quote
+# every one of them correctly on three different hellish releases.
+_hx_sub() {
+    local s="$1" tok="$2" rep="$3" out=
+    while :; do
+        case "$s" in
+            *"$tok"*) out="$out${s%%"$tok"*}$rep"; s="${s#*"$tok"}" ;;
+            *) break ;;
+        esac
+    done
+    HX_RET="$out$s"
+}
+
+# _hx_sub_num <string> <prefix> <38|48> — expands the {f:N} / {b:N} family,
+# where N is arbitrary and so cannot live in a fixed table.
+_hx_sub_num() {
+    local s="$1" pre="$2" which="$3" out= n rest
+    while :; do
+        case "$s" in
+            *"$pre"*) ;;
+            *) break ;;
+        esac
+        out="$out${s%%"$pre"*}"
+        rest="${s#*"$pre"}"
+        n="${rest%%\}*}"
+        s="${rest#*\}}"
+        case "$n" in
+            ''|*[!0-9]*) out="$out" ;;
+            *) if [ "$which" = 38 ]; then _hx_fg "$n"; else _hx_bg "$n"; fi
+               out="$out$HX_RET" ;;
+        esac
+    done
+    HX_RET="$out$s"
+}
+
+# hx_prompt_expand <template> — the token language -> a prompt string, in
+# HX_RET. Pure string work: no forks, no subshells.
+hx_prompt_expand() {
+    local s="$1" ok err
+    _hx_fg "$HX_PS_OK";  ok="$HX_RET"
+    _hx_fg "$HX_PS_ERR"; err="$HX_RET"
+
+    # arbitrary colours first, so a literal {f: inside a glyph cannot confuse
+    # the fixed table below
+    _hx_sub_num "$s" '{f:' 38; s="$HX_RET"
+    _hx_sub_num "$s" '{b:' 48; s="$HX_RET"
+
+    # attributes and resets
+    _hx_sub "$s" '{/f}'     '%f';       s="$HX_RET"
+    _hx_sub "$s" '{/b}'     '%k';       s="$HX_RET"
+    _hx_sub "$s" '{bold}'   '%B';       s="$HX_RET"
+    _hx_sub "$s" '{/bold}'  '%b';       s="$HX_RET"
+    _hx_sub "$s" '{ul}'     '%U';       s="$HX_RET"
+    _hx_sub "$s" '{/ul}'    '%u';       s="$HX_RET"
+    _hx_sub "$s" '{rev}'    '%S';       s="$HX_RET"
+    _hx_sub "$s" '{/rev}'   '%s';       s="$HX_RET"
+    _hx_sub "$s" '{r}'      '%f%k%b';   s="$HX_RET"
+
+    # status- and privilege-driven, entirely inside the renderer
+    _hx_sub "$s" '{stf}'  "%(?.$ok.$err)";                       s="$HX_RET"
+    _hx_sub "$s" '{stg}'  "%(?.$HX_G_OK.$HX_G_BAD)";             s="$HX_RET"
+    _hx_sub "$s" '{stc}'  "%(?.$HX_G_CIRC.$HX_G_CIRC)";          s="$HX_RET"
+    _hx_sub "$s" '{priv}' '%(!.#.$)';                            s="$HX_RET"
+    _hx_sub "$s" '{rootf}' "%(!.$err.$ok)";                      s="$HX_RET"
+
+    # status background: pick from the same two hues
+    _hx_bg "$HX_PS_OK";  ok="$HX_RET"
+    _hx_bg "$HX_PS_ERR"; err="$HX_RET"
+    _hx_sub "$s" '{stb}' "%(?.$ok.$err)";                        s="$HX_RET"
+
+    # place
+    _hx_sub "$s" '{cwd}'   '%~';   s="$HX_RET"
+    _hx_sub "$s" '{base}'  '%1~';  s="$HX_RET"
+    _hx_sub "$s" '{cwd:1}' '%1~';  s="$HX_RET"
+    _hx_sub "$s" '{cwd:2}' '%2~';  s="$HX_RET"
+    _hx_sub "$s" '{cwd:3}' '%3~';  s="$HX_RET"
+    _hx_sub "$s" '{cwd:4}' '%4~';  s="$HX_RET"
+    _hx_sub "$s" '{cwdt:30}' '%30<…<%~%<<'; s="$HX_RET"
+    _hx_sub "$s" '{cwdt:40}' '%40<…<%~%<<'; s="$HX_RET"
+    _hx_sub "$s" '{cwdt:50}' '%50<…<%~%<<'; s="$HX_RET"
+
+    # hellish's self-spacing badges
+    _hx_sub "$s" '{git}'    '\g'; s="$HX_RET"
+    _hx_sub "$s" '{fail}'   '\S'; s="$HX_RET"
+    _hx_sub "$s" '{took}'   '\p'; s="$HX_RET"
+    _hx_sub "$s" '{jobsb}'  '\J'; s="$HX_RET"
+    _hx_sub "$s" '{upd}'    '\U'; s="$HX_RET"
+    _hx_sub "$s" '{builtin}' '\B'; s="$HX_RET"
+
+    # plain facts
+    _hx_sub "$s" '{user}' '%n';         s="$HX_RET"
+    _hx_sub "$s" '{host}' '%m';         s="$HX_RET"
+    _hx_sub "$s" '{jobs}' '%j';         s="$HX_RET"
+    _hx_sub "$s" '{time}' '%D{%H:%M}';  s="$HX_RET"
+    _hx_sub "$s" '{secs}' '%D{%H:%M:%S}'; s="$HX_RET"
+    _hx_sub "$s" '{date}' '%D{%d %b}';  s="$HX_RET"
+    _hx_sub "$s" '{day}'  '%D{%a}';     s="$HX_RET"
+    _hx_sub "$s" '{nl}'   '\n';         s="$HX_RET"
+    _hx_sub "$s" '{sp}'   ' ';          s="$HX_RET"
+
+    # computed segments (plain text; the theme supplies the colour)
+    _hx_sub "$s" '{path}' '${HX_PS_PATH}'; s="$HX_RET"
+    _hx_sub "$s" '{vcs}'  '${HX_PS_VCS}';  s="$HX_RET"
+    _hx_sub "$s" '{venv}' '${HX_PS_VENV}'; s="$HX_RET"
+    _hx_sub "$s" '{lang}' '${HX_PS_LANG}'; s="$HX_RET"
+    _hx_sub "$s" '{ctx}'  '${HX_PS_CTX}';  s="$HX_RET"
+    _hx_sub "$s" '{rule}' '${HX_PS_RULE}'; s="$HX_RET"
+    _hx_sub "$s" '{load}' '${HX_PS_LOAD}'; s="$HX_RET"
+
+    # glyphs, every one with an ASCII twin chosen in lib/ui.hsh
+    _hx_sub "$s" '{tl}'   "$HX_G_TL";   s="$HX_RET"
+    _hx_sub "$s" '{tr}'   "$HX_G_TR";   s="$HX_RET"
+    _hx_sub "$s" '{bl}'   "$HX_G_BL";   s="$HX_RET"
+    _hx_sub "$s" '{br}'   "$HX_G_BR";   s="$HX_RET"
+    _hx_sub "$s" '{tls}'  "$HX_G_TLS";  s="$HX_RET"
+    _hx_sub "$s" '{trs}'  "$HX_G_TRS";  s="$HX_RET"
+    _hx_sub "$s" '{bls}'  "$HX_G_BLS";  s="$HX_RET"
+    _hx_sub "$s" '{brs}'  "$HX_G_BRS";  s="$HX_RET"
+    _hx_sub "$s" '{h}'    "$HX_G_H";    s="$HX_RET"
+    _hx_sub "$s" '{v}'    "$HX_G_V";    s="$HX_RET"
+    _hx_sub "$s" '{hh}'   "$HX_G_HH";   s="$HX_RET"
+    _hx_sub "$s" '{vv}'   "$HX_G_VV";   s="$HX_RET"
+    _hx_sub "$s" '{arr}'  "$HX_G_ARR";  s="$HX_RET"
+    _hx_sub "$s" '{arr2}' "$HX_G_ARR2"; s="$HX_RET"
+    _hx_sub "$s" '{tri}'  "$HX_G_TRI";  s="$HX_RET"
+    _hx_sub "$s" '{play}' "$HX_G_PLAY"; s="$HX_RET"
+    _hx_sub "$s" '{lam}'  "$HX_G_LAM";  s="$HX_RET"
+    _hx_sub "$s" '{dot}'  "$HX_G_DOT";  s="$HX_RET"
+    _hx_sub "$s" '{dia}'  "$HX_G_DIA";  s="$HX_RET"
+    _hx_sub "$s" '{sq}'   "$HX_G_SQ";   s="$HX_RET"
+    _hx_sub "$s" '{circ}' "$HX_G_CIRC"; s="$HX_RET"
+    _hx_sub "$s" '{ring}' "$HX_G_RING"; s="$HX_RET"
+    _hx_sub "$s" '{up}'   "$HX_G_UP";   s="$HX_RET"
+    _hx_sub "$s" '{dn}'   "$HX_G_DN";   s="$HX_RET"
+    _hx_sub "$s" '{ell}'  "$HX_G_ELL";  s="$HX_RET"
+    _hx_sub "$s" '{star}' "$HX_G_STAR"; s="$HX_RET"
+    _hx_sub "$s" '{bolt}' "$HX_G_BOLT"; s="$HX_RET"
+    _hx_sub "$s" '{clk}'  "$HX_G_CLK";  s="$HX_RET"
+    _hx_sub "$s" '{lock}' "$HX_G_LOCK"; s="$HX_RET"
+    _hx_sub "$s" '{gear}' "$HX_G_GEAR"; s="$HX_RET"
+    _hx_sub "$s" '{b1}'   "$HX_G_B1";   s="$HX_RET"
+    _hx_sub "$s" '{b2}'   "$HX_G_B2";   s="$HX_RET"
+    _hx_sub "$s" '{b3}'   "$HX_G_B3";   s="$HX_RET"
+    _hx_sub "$s" '{full}' "$HX_G_FULL"; s="$HX_RET"
+    _hx_sub "$s" '{lhalf}' "$HX_G_LHALF"; s="$HX_RET"
+    _hx_sub "$s" '{rhalf}' "$HX_G_RHALF"; s="$HX_RET"
+    _hx_sub "$s" '{branch}' "$HX_G_BRANCH"; s="$HX_RET"
+    _hx_sub "$s" '{sep}'  "$HX_G_SEP";  s="$HX_RET"
+    _hx_sub "$s" '{sept}' "$HX_G_SEPT"; s="$HX_RET"
+    _hx_sub "$s" '{rsep}' "$HX_G_RSEP"; s="$HX_RET"
+    _hx_sub "$s" '{ctl}'  "$HX_G_CTL";  s="$HX_RET"
+    _hx_sub "$s" '{cbr}'  "$HX_G_CBR";  s="$HX_RET"
+    _hx_sub "$s" '{topl}' "$HX_G_TOPL"; s="$HX_RET"
+    _hx_sub "$s" '{topr}' "$HX_G_TOPR"; s="$HX_RET"
+
+    HX_RET="$s"
+}
+
+# ── 4. dynamic segments ─────────────────────────────────────────────────────
+#
+# Everything here runs at most once per prompt, and only when the ACTIVE theme
+# declared that it needs it. A theme with an empty `needs` list does not even
+# register the hook.
+
+# _hx_pct <string> — double every percent sign.
+#
+# NOT used on the way to the real prompt: variable content is inert there, so
+# doubling would render a literal "%%". It exists for the PREVIEW path, where
+# `print -rP` does re-scan and would otherwise eat "%o" out of "50%off".
+# Answers in HX_RET2, not HX_RET: the preview path calls this while HX_RET
+# still holds the expanded theme it is about to render.
+_hx_pct() {
+    local s="$1" out=
+    while :; do
+        case "$s" in
+            *%*) out="$out${s%%%*}%%"; s="${s#*%}" ;;
+            *) break ;;
+        esac
+    done
+    HX_RET2="$out$s"
+}
+
+# _hx_seg_path — the smart path.
+#
+#   smart   repo-aware: inside a git work tree, show the repository name and
+#           the path below it, because "which repo, which file" is the actual
+#           question, and ~/src/work/acme/backend/src/api answers it badly.
+#   fish    ~/d/p/project — one letter per parent
+#   short   …/last/four/components
+#   tail    basename only
+#   full    the whole thing
+#
+# No forks: the repository root is found by walking up with `[ -d ]`, which is
+# a builtin test, not `git rev-parse`.
+_hx_seg_path() {
+    local p="$PWD" d root= rel n=0 out= seg rest
+
+    case "$HX_PATH_STYLE" in
+        smart)
+            d="$PWD"
+            while [ -n "$d" ] && [ "$d" != "/" ]; do
+                if [ -e "$d/.git" ]; then root="$d"; break; fi
+                d="${d%/*}"
+            done
+            if [ -n "$root" ]; then
+                rel="${PWD#"$root"}"
+                p="${root##*/}${rel}"
+            else
+                case "$p" in
+                    "$HOME") p='~' ;;
+                    "$HOME"/*) p="~${p#"$HOME"}" ;;
+                esac
+            fi
+            ;;
+        *)
+            case "$p" in
+                "$HOME") p='~' ;;
+                "$HOME"/*) p="~${p#"$HOME"}" ;;
+            esac
+            ;;
+    esac
+
+    case "$HX_PATH_STYLE" in
+        tail) p="${p##*/}" ;;
+        fish)
+            rest="$p"; out=''
+            while :; do
+                seg="${rest%%/*}"
+                case "$rest" in */*) rest="${rest#*/}" ;; *) rest='' ;; esac
+                if [ -z "$rest" ]; then
+                    out="$out/$seg"; break
+                elif [ -z "$seg" ]; then
+                    :
+                else
+                    case "$seg" in
+                        .?*) out="$out/${seg%"${seg#??}"}" ;;
+                        *)   out="$out/${seg%"${seg#?}"}" ;;
+                    esac
+                fi
+            done
+            p="${out#/}"
+            case "$1" in /*) p="/$p" ;; esac
+            ;;
+        short|smart)
+            # elide the middle once there are more than HX_PATH_MAX components
+            rest="$p"; n=0
+            while [ -n "$rest" ]; do
+                case "$rest" in */*) rest="${rest#*/}" ;; *) rest='' ;; esac
+                n=$((n + 1))
+            done
+            if [ "$n" -gt "$HX_PATH_MAX" ]; then
+                rest="$p"; n=$((n - HX_PATH_MAX))
+                while [ "$n" -gt 0 ]; do rest="${rest#*/}"; n=$((n - 1)); done
+                p="$HX_G_ELL/$rest"
+            fi
+            ;;
+    esac
+
+    HX_PS_PATH="$p"
+}
+
+# _hx_seg_vcs — one `git status --porcelain=v2 --branch` and nothing else.
+#
+# The v2 porcelain carries the branch, the upstream, the ahead/behind counts
+# and every changed path in ONE invocation. The older way -- symbolic-ref,
+# then diff --quiet, then diff --cached --quiet, then rev-list, then ls-files
+# --others -- is five processes per prompt for the same answer, and it is
+# what makes shell prompts feel slow in a large repository.
+#
+# Themes that only want the branch name should use {git} instead: that is
+# hellish's own \g escape, rendered in C, and it costs nothing at all.
+_hx_seg_vcs() {
+    HX_PS_VCS=''
+    hx_have git || return 0
+    local line branch='' ab='' staged=0 dirty=0 untracked=0 conflict=0 out=''
+    while IFS= read -r line; do
+        case "$line" in
+            '# branch.head '*) branch="${line#\# branch.head }" ;;
+            '# branch.ab '*)   ab="${line#\# branch.ab }" ;;
+            '1 '*|'2 '*)
+                case "$line" in
+                    ?' '[!.]*) staged=$((staged + 1)) ;;
+                esac
+                case "$line" in
+                    ?' '?[!.]*) dirty=$((dirty + 1)) ;;
+                esac
+                ;;
+            'u '*) conflict=$((conflict + 1)) ;;
+            '? '*) untracked=$((untracked + 1)) ;;
+        esac
+    done <<EOF
+$(git status --porcelain=v2 --branch 2>/dev/null)
+EOF
+    [ -n "$branch" ] || return 0
+    [ "$branch" = "(detached)" ] && branch="$HX_G_DIA"
+    out="$branch"
+    [ "$staged"    -gt 0 ] && out="$out +$staged"
+    [ "$dirty"     -gt 0 ] && out="$out ~$dirty"
+    [ "$untracked" -gt 0 ] && out="$out ?$untracked"
+    [ "$conflict"  -gt 0 ] && out="$out !$conflict"
+    if [ -n "$ab" ]; then
+        local a b
+        a="${ab%% *}"; a="${a#+}"
+        b="${ab##* }"; b="${b#-}"
+        case "$a" in ''|0) ;; *) out="$out $HX_G_UP$a" ;; esac
+        case "$b" in ''|0) ;; *) out="$out $HX_G_DN$b" ;; esac
+    fi
+    HX_PS_VCS=" $out"
+}
+
+# _hx_seg_venv — python virtualenv or conda environment. Zero forks.
+_hx_seg_venv() {
+    HX_PS_VENV=''
+    if [ -n "${VIRTUAL_ENV:-}" ]; then HX_PS_VENV="${VIRTUAL_ENV##*/}"
+    elif [ -n "${CONDA_DEFAULT_ENV:-}" ]; then HX_PS_VENV="$CONDA_DEFAULT_ENV"
+    fi
+    [ -n "$HX_PS_VENV" ] && HX_PS_VENV=" $HX_PS_VENV"
+    return 0
+}
+
+# _hx_seg_lang — which toolchain this directory belongs to.
+#
+# The marker FILE is the whole answer. Actually running `node -v` to print the
+# version would be a fork per prompt per language, which is the single most
+# common reason a themed prompt takes 300ms.
+_hx_seg_lang() {
+    HX_PS_LANG=''
+    if   [ -f Cargo.toml ];        then HX_PS_LANG='rust'
+    elif [ -f go.mod ];            then HX_PS_LANG='go'
+    elif [ -f package.json ];      then HX_PS_LANG='node'
+    elif [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f setup.py ]; then HX_PS_LANG='py'
+    elif [ -f Gemfile ];           then HX_PS_LANG='ruby'
+    elif [ -f pom.xml ];           then HX_PS_LANG='java'
+    elif [ -f CMakeLists.txt ];    then HX_PS_LANG='cmake'
+    elif [ -f Makefile ] || [ -f makefile ]; then HX_PS_LANG='make'
+    elif [ -f Dockerfile ];        then HX_PS_LANG='docker'
+    fi
+    [ -n "$HX_PS_LANG" ] && HX_PS_LANG=" $HX_PS_LANG"
+    return 0
+}
+
+# _hx_seg_ctx — user@host, but only when it is worth screen space: over ssh,
+# as root, or inside a container. On your own laptop it says nothing, because
+# you know who and where you are.
+_hx_seg_ctx() {
+    HX_PS_CTX=''
+    local why=''
+    { [ -n "${SSH_CONNECTION:-}" ] || [ -n "${SSH_TTY:-}" ]; } && why=ssh
+    [ "$(id -u 2>/dev/null || echo 1000)" = "0" ] && why=root
+    [ -f /.dockerenv ] && why=container
+    [ -n "$why" ] || return 0
+    HX_PS_CTX=" ${USER:-?}@${HOSTNAME%%.*}"
+    return 0
+}
+
+# _hx_seg_rule — a rule that spans the terminal. Costs one `tput cols` per
+# prompt, which is why it is opt-in: only the framed themes ask for it.
+_hx_seg_rule() {
+    local w
+    w=$(hx_cols -r)
+    HX_PS_RULE=$(hx_repeat "$HX_G_H" $(( w - 4 )))   # {tl}{h} … {h}{tr} = w
+    return 0
+}
+
+_hx_seg_load() {
+    HX_PS_LOAD=''
+    [ -r /proc/loadavg ] || return 0
+    read -r HX_PS_LOAD _ < /proc/loadavg 2>/dev/null
+    [ -n "$HX_PS_LOAD" ] && HX_PS_LOAD=" $HX_PS_LOAD"
+    return 0
+}
+
+# hx_prompt_precmd — the one hook. Runs the declared segments and nothing more.
+hx_prompt_precmd() {
+    case " $HX_PS_NEEDS " in *' path '*)  _hx_seg_path ;; esac
+    case " $HX_PS_NEEDS " in *' vcs '*)   _hx_seg_vcs ;; esac
+    case " $HX_PS_NEEDS " in *' venv '*)  _hx_seg_venv ;; esac
+    case " $HX_PS_NEEDS " in *' lang '*)  _hx_seg_lang ;; esac
+    case " $HX_PS_NEEDS " in *' rule '*)  _hx_seg_rule ;; esac
+    case " $HX_PS_NEEDS " in *' load '*)  _hx_seg_load ;; esac
+    return 0
+}
+
+# ── 5. applying a theme ─────────────────────────────────────────────────────
+#
+# PROMPT is unset on every switch, and that is load-bearing. hellish prefers
+# PROMPT over PS1 when both are set, so leaving a previous theme's PROMPT in
+# place would make the next switch look like it silently did nothing.
+hx_prompt_apply() {
+    local name="$1" ps1 rps1
+    hx_theme_known "$name" || { hx_err "no such theme: $name  (prompt list)"; return 1; }
+
+    HX_PS_NEEDS="${HX_THEME_NEEDS[$name]}"
+    # ctx never changes within a shell, so it is collected once here rather
+    # than on every prompt.
+    case " $HX_PS_NEEDS " in *' ctx '*) _hx_seg_ctx ;; esac
+    hx_prompt_precmd
+
+    hx_prompt_expand "${HX_THEME_PS1[$name]}";  ps1="$HX_RET"
+    hx_prompt_expand "${HX_THEME_RPS1[$name]}"; rps1="$HX_RET"
+
+    unset PROMPT RPROMPT
+    PS1="$ps1"
+    PS2="$(_hx_ps2)"
+    if [ -n "$rps1" ] && hx_cap rprompt; then
+        RPROMPT="$rps1"
+        RPS1="$rps1"
+    fi
+    HX_THEME="$name"
+
+    # Register the hook only when there is something for it to do.
+    if [ -n "${HX_PS_NEEDS// /}" ]; then
+        hx_hook_add precmd hx_prompt_precmd
+    else
+        hx_hook_del precmd hx_prompt_precmd
+    fi
+    return 0
+}
+
+_hx_ps2() {
+    hx_prompt_expand '{f:'"$HX_PS_FAINT"'}{h}{h}{tri}{r} '
+    printf '%s' "$HX_RET"
+}
+
+# ── 6. preview ──────────────────────────────────────────────────────────────
+#
+# `print -rP` IS the renderer -- the same code the prompt itself runs -- so a
+# preview cannot disagree with what you get after switching. Two details:
+#
+#   * the \001/\002 pair is stripped. Those are what \[ and \] become: zero-
+#     width markers for the line editor, and line noise on a terminal.
+#   * the segments are collected for the theme being previewed, so a preview
+#     of a git theme shows YOUR branch rather than an empty gap.
+hx_prompt_render() {
+    local name="$1" save_needs="$HX_PS_NEEDS" out
+    HX_PS_NEEDS="${HX_THEME_NEEDS[$name]}"
+    case " $HX_PS_NEEDS " in *' ctx '*) _hx_seg_ctx ;; esac
+    hx_prompt_precmd
+    hx_prompt_expand "${HX_THEME_PS1[$name]}"
+    if hx_cap print_p; then
+        _hx_preview_escape
+        out=$(print -rP "$HX_RET" 2>/dev/null | tr -d '\001\002')
+        _hx_preview_restore
+    else
+        out="$HX_RET"
+    fi
+    HX_PS_NEEDS="$save_needs"
+    printf '%s' "$out"
+}
+
+# `print -rP` re-scans what a variable expanded to; the prompt renderer does
+# not. Without this, previewing inside a directory called "50%off" shows
+# "50ff", and any theme whose branch name contains a percent previews as
+# something you will never actually see. Double them for the length of the
+# call and put the originals back straight after.
+_hx_preview_escape() {
+    _HX_SV_PATH="$HX_PS_PATH"; _HX_SV_VCS="$HX_PS_VCS"
+    _HX_SV_VENV="$HX_PS_VENV"; _HX_SV_LANG="$HX_PS_LANG"
+    _HX_SV_CTX="$HX_PS_CTX"
+    _hx_pct "$HX_PS_PATH"; HX_PS_PATH="$HX_RET2"
+    _hx_pct "$HX_PS_VCS";  HX_PS_VCS="$HX_RET2"
+    _hx_pct "$HX_PS_VENV"; HX_PS_VENV="$HX_RET2"
+    _hx_pct "$HX_PS_LANG"; HX_PS_LANG="$HX_RET2"
+    _hx_pct "$HX_PS_CTX";  HX_PS_CTX="$HX_RET2"
+}
+_hx_preview_restore() {
+    HX_PS_PATH="$_HX_SV_PATH"; HX_PS_VCS="$_HX_SV_VCS"
+    HX_PS_VENV="$_HX_SV_VENV"; HX_PS_LANG="$_HX_SV_LANG"
+    HX_PS_CTX="$_HX_SV_CTX"
+}
+
+hx_prompt_render_r() {
+    local name="$1" t
+    t="${HX_THEME_RPS1[$name]}"
+    [ -n "$t" ] || return 0
+    hx_prompt_expand "$t"
+    if hx_cap print_p; then
+        _hx_preview_escape
+        print -rP "$HX_RET" 2>/dev/null | tr -d '\001\002'
+        _hx_preview_restore
+    else
+        printf '%s' "$HX_RET"
+    fi
+}
+
+# ── 7. the `prompt` command ─────────────────────────────────────────────────
+prompt() {
+    local cmd="${1:-status}"
+    [ $# -gt 0 ] && shift
+    case "$cmd" in
+        status|show|current) _prompt_status ;;
+        list|ls)        _prompt_list "$@" ;;
+        set|use)        _prompt_set "$1" ;;
+        next)           _prompt_cycle 1 ;;
+        prev|previous)  _prompt_cycle -1 ;;
+        random|rand)    _prompt_random ;;
+        preview|demo)   _prompt_preview "$@" ;;
+        gallery)        _prompt_gallery ;;
+        save)           _prompt_save "${1:-$HX_THEME}" ;;
+        edit)           _prompt_edit "${1:-$HX_THEME}" ;;
+        new)            _prompt_new "$@" ;;
+        export|dump)    _prompt_export "${1:-$HX_THEME}" ;;
+        tokens)         _prompt_tokens ;;
+        colors|colours) _prompt_colors ;;
+        palette)        _prompt_palette "$@" ;;
+        width)          hx_cols -r >/dev/null; printf '%s columns\n' "$(hx_cols)" ;;
+        nerd)           _prompt_nerd "$1" ;;
+        doctor)         _prompt_doctor ;;
+        reload)         _prompt_reload ;;
+        help|-h|--help) _prompt_help ;;
+        *)              _prompt_set "$cmd" ;;   # `prompt neon` == `prompt set neon`
+    esac
+}
+hx_cmd_doc prompt "switch, preview and design prompt themes" \
+    "prompt [name|list|preview|next|random|save|new|tokens|doctor]"
+
+# `theme` is the same command. It used to be a five-name function of its own;
+# every one of those names is still a theme, so anything that called it keeps
+# working.
+theme() { prompt "$@"; }
+hx_func_doc theme "alias for the prompt command" "theme <name>"
+
+_prompt_help() {
+    hx_head "prompt — thirty themes, and the language to write the thirty-first"
+    hx_kv "prompt"              "which theme is on, and what it shows"
+    hx_kv "prompt list [family]" "every theme, grouped; the active one marked"
+    hx_kv "prompt <name>"       "switch now (this session only)"
+    hx_kv "prompt save [name]"  "switch and make it the default for new shells"
+    hx_kv "prompt next | prev"  "walk the list"
+    hx_kv "prompt random"       "one you have not thought of"
+    hx_kv "prompt preview [n]"  "render one theme, or all of them, with live data"
+    hx_kv "prompt gallery"      "the full catalogue, grouped, with descriptions"
+    hx_kv "prompt new <name>"   "scaffold your own into themes/90-local.hsh"
+    hx_kv "prompt edit [name]"  "open the file a theme lives in"
+    hx_kv "prompt export [name]" "print a theme's PS1, ready to paste anywhere"
+    hx_kv "prompt tokens"       "the token language, in full"
+    hx_kv "prompt palette [k v]" "read or restyle the five palette colours"
+    hx_kv "prompt colors"       "the 256-colour ramp, for picking numbers"
+    hx_kv "prompt nerd on|off"  "powerline glyphs (needs a patched font)"
+    hx_kv "prompt doctor"       "what this terminal and this hellish support"
+    hx_note "themes live in $(printf '%s' "${HX_HOME/#$HOME/\~}/themes")  —  'theme' is the same command"
+}
+
+_prompt_status() {
+    local n="${HX_THEME:-}" needs
+    hx_theme_known "$n" || { printf '%s\n' "${n:-<none>}"; return 0; }
+    needs="${HX_THEME_NEEDS[$n]}"
+    hx_head "$n"
+    hx_kv "family"      "${HX_THEME_FAMILY[$n]}"
+    hx_kv "description" "${HX_THEME_DESC[$n]}"
+    hx_kv "per-prompt work" "${needs:-none — pure renderer, zero forks}"
+    hx_kv "right prompt" "$([ -n "${HX_THEME_RPS1[$n]}" ] && echo yes || echo no)"
+    printf '\n  %slooks like%s\n  ' "$HX_ORA" "$HX_R"
+    hx_prompt_render "$n"
+    printf '\n'
+    hx_note "prompt list to browse  ·  prompt save to keep it"
+}
+
+_prompt_list() {
+    local want="${1:-}" fam n shown=0
+    hx_head "themes"
+    for fam in $HX_THEME_FAMILIES; do
+        [ -n "$want" ] && [ "$want" != "$fam" ] && continue
+        shown=0
+        for n in $(hx_theme_names); do
+            [ "${HX_THEME_FAMILY[$n]}" = "$fam" ] || continue
+            if [ "$shown" = 0 ]; then
+                printf '\n  %s%s%s\n' "$HX_ORA" "$fam" "$HX_R"; shown=1
+            fi
+            if [ "$n" = "${HX_THEME:-}" ]; then
+                printf '    %s%s %-13s%s %s\n' "$HX_GRN" "$HX_G_TRI" "$n" "$HX_R" "${HX_THEME_DESC[$n]}"
+            else
+                printf '      %s%-13s%s %s%s%s\n' "$HX_B" "$n" "$HX_R" "$HX_GRY" "${HX_THEME_DESC[$n]}" "$HX_R"
+            fi
+        done
+    done
+    hx_note "prompt <name> to switch  ·  prompt preview to see them all"
+}
+
+_prompt_set() {
+    local n="$1"
+    [ -n "$n" ] || { _prompt_status; return 0; }
+    hx_prompt_apply "$n" || return 1
+    printf '%s%s%s  ' "$HX_GRN" "$n" "$HX_R"
+    hx_prompt_render "$n"
+    printf '\n'
+    return 0
+}
+
+_prompt_cycle() {
+    local dir="$1" names i=0 idx=-1 count n
+    names=$(hx_theme_names)
+    for n in $names; do
+        [ "$n" = "${HX_THEME:-}" ] && idx=$i
+        i=$((i + 1))
+    done
+    count=$i
+    [ "$count" -eq 0 ] && return 1
+    [ "$idx" -lt 0 ] && idx=0
+    idx=$(( (idx + dir + count) % count ))
+    i=0
+    for n in $names; do
+        if [ "$i" = "$idx" ]; then _prompt_set "$n"; return $?; fi
+        i=$((i + 1))
+    done
+}
+
+_prompt_random() {
+    local names n i=0 count pick
+    names=$(hx_theme_names)
+    count=$(printf '%s\n' $names | grep -c .)
+    pick=$(( ${RANDOM:-$$} % count ))
+    for n in $names; do
+        if [ "$i" = "$pick" ]; then _prompt_set "$n"; return $?; fi
+        i=$((i + 1))
+    done
+}
+
+# Render every theme, then put back the one that was active. A preview that
+# leaves you in the last theme it drew is a switch, not a preview.
+_prompt_preview() {
+    local one="${1:-}" n was="${HX_THEME:-}" r
+    if [ -n "$one" ]; then
+        hx_theme_known "$one" || { hx_err "no such theme: $one"; return 1; }
+        printf '\n  %s%s%s  %s%s%s\n  ' "$HX_B" "$one" "$HX_R" "$HX_GRY" "${HX_THEME_DESC[$one]}" "$HX_R"
+        hx_prompt_render "$one"; printf '\n'
+        r=$(hx_prompt_render_r "$one")
+        [ -n "$r" ] && printf '  %sright:%s %s\n' "$HX_GRY" "$HX_R" "$r"
+        printf '\n'
+        return 0
+    fi
+    hx_head "every theme, with this directory's live data"
+    for n in $(hx_theme_names); do
+        printf '\n  %s%-13s%s ' "$HX_B" "$n" "$HX_R"
+        hx_prompt_render "$n"
+        printf '\n'
+    done
+    printf '\n'
+    [ -n "$was" ] && hx_prompt_apply "$was" >/dev/null 2>&1
+    return 0
+}
+
+_prompt_gallery() {
+    local fam n r
+    for fam in $HX_THEME_FAMILIES; do
+        local first=1
+        for n in $(hx_theme_names); do
+            [ "${HX_THEME_FAMILY[$n]}" = "$fam" ] || continue
+            if [ "$first" = 1 ]; then hx_head "$fam"; first=0; fi
+            printf '\n  %s%s%s  %s%s%s\n  ' \
+                "$HX_B" "$n" "$HX_R" "$HX_GRY" "${HX_THEME_DESC[$n]}" "$HX_R"
+            hx_prompt_render "$n"
+            printf '\n'
+            r=$(hx_prompt_render_r "$n")
+            [ -n "$r" ] && printf '  %sright prompt:%s %s\n' "$HX_GRY" "$HX_R" "$r"
+        done
+    done
+    printf '\n'
+    [ -n "${HX_THEME:-}" ] && hx_prompt_apply "$HX_THEME" >/dev/null 2>&1
+    return 0
+}
+
+_prompt_save() {
+    local n="$1"
+    hx_theme_known "$n" || { hx_err "no such theme: $n"; return 1; }
+    hx_prompt_apply "$n" || return 1
+    HX_THEME="$n"
+    hx_conf_save
+    hx_ok "$n — saved; every new shell starts with it"
+}
+
+_prompt_edit() {
+    local n="$1" f
+    f=$(_prompt_file "$n") || { hx_err "no such theme: $n"; return 1; }
+    "${EDITOR:-vi}" "$f"
+    hx_info "reload with: prompt reload"
+}
+
+# _prompt_file <name> — which themes/*.hsh defines this theme.
+_prompt_file() {
+    local n="$1" f
+    for f in "$HX_HOME/themes"/*.hsh; do
+        [ -r "$f" ] || continue
+        if grep -q "^hx_theme $n " "$f" 2>/dev/null; then printf '%s' "$f"; return 0; fi
+    done
+    return 1
+}
+
+_prompt_reload() {
+    HX_THEME_ORDER=()
+    hx_load_dir "$HX_HOME/themes" >/dev/null 2>&1
+    hx_prompt_apply "${HX_THEME:-vault}" >/dev/null 2>&1
+    hx_ok "$(hx_theme_names | grep -c .) themes reloaded"
+}
+
+_prompt_export() {
+    local n="$1"
+    hx_theme_known "$n" || { hx_err "no such theme: $n"; return 1; }
+    hx_prompt_expand "${HX_THEME_PS1[$n]}"
+    printf '# %s — %s\n' "$n" "${HX_THEME_DESC[$n]}"
+    printf "PS1='%s'\n" "$HX_RET"
+    if [ -n "${HX_THEME_RPS1[$n]}" ]; then
+        hx_prompt_expand "${HX_THEME_RPS1[$n]}"
+        printf "RPROMPT='%s'\n" "$HX_RET"
+    fi
+    [ -n "${HX_THEME_NEEDS[$n]}" ] && \
+        printf '# needs the hx_prompt_precmd hook for: %s\n' "${HX_THEME_NEEDS[$n]}"
+    return 0
+}
+
+# _prompt_new <name> [description] — scaffold into themes/90-local.hsh, which
+# is the one theme file this configuration never overwrites on upgrade.
+_prompt_new() {
+    local n="$1" desc="${2:-my own}" f="$HX_HOME/themes/90-local.hsh"
+    [ -n "$n" ] || { hx_err "usage: prompt new <name> [description]"; return 2; }
+    case "$n" in *[!a-z0-9_-]*) hx_err "theme names: lowercase, digits, _ and -"; return 2 ;; esac
+    hx_theme_known "$n" && { hx_err "a theme called '$n' already exists"; return 1; }
+    [ -f "$f" ] || printf '# themes/90-local.hsh — yours. Never overwritten by an upgrade.\n' > "$f"
+    {
+        printf '\n# %s\n' "$desc"
+        printf "hx_theme %s local '' '%s' \\\\\n" "$n" "$desc"
+        printf "    '{f:%s}{cwd}{r} {git}{fail} {stf}{arr}{r} '\n" "$HX_PS_ACCENT"
+    } >> "$f"
+    hx_ok "wrote $n into ${f/#$HOME/\~}"
+    _prompt_reload
+    _prompt_set "$n"
+    hx_note "edit it with: prompt edit $n   ·   token reference: prompt tokens"
+}
+
+_prompt_tokens() {
+    hx_head "the token language"
+    hx_sub "colour"
+    hx_kv "{f:117} {b:24}"   "foreground / background, any 256-colour index"
+    hx_kv "{/f} {/b} {r}"    "end foreground / background / everything"
+    hx_kv "{bold}{/bold}"    "also {ul}{/ul} and {rev}{/rev}"
+    hx_sub "reacts to the last command"
+    hx_kv "{stf}"            "green when it succeeded, red when it did not"
+    hx_kv "{stb} {stg}"      "the same as a background, and as a $HX_G_OK/$HX_G_BAD glyph"
+    hx_kv "{priv}"           "\$ normally, # as root"
+    hx_sub "where you are"
+    hx_kv "{cwd} {cwd:2}"    "~/full/path, or the last two components"
+    hx_kv "{base}"           "just the directory name"
+    hx_kv "{cwdt:40}"        "truncated to 40 columns, elided at the front"
+    hx_kv "{path}"           "smart: repository-relative inside a repo  (needs: path)"
+    hx_sub "badges — each renders nothing when it has nothing to say"
+    hx_kv "{git}"            "branch, + '*' when dirty. Free: hellish renders it"
+    hx_kv "{fail}"           "$HX_G_BAD and the exit code, after a failure"
+    hx_kv "{took}"           "how long the last command ran, once it passes 2s"
+    hx_kv "{jobsb}"          "background job count, while there are any"
+    hx_kv "{upd}"            "a pending hellish release"
+    hx_sub "facts"
+    hx_kv "{user} {host}"    "and {jobs} {time} {secs} {date} {day} {nl} {sp}"
+    hx_sub "computed segments — list them in the theme's 'needs' field"
+    hx_kv "{vcs}"            "branch +staged ~dirty ?untracked ↑ahead ↓behind"
+    hx_kv "{venv} {lang}"    "virtualenv name; the toolchain of this directory"
+    hx_kv "{ctx}"            "user@host, but only over ssh, as root, or in a container"
+    hx_kv "{rule} {load}"    "a rule spanning the terminal; the 1-minute load"
+    hx_sub "glyphs — every one has an ASCII twin for a terminal without UTF-8"
+    printf '    %s{tl}{tr}{bl}{br} {tls}{trs}{bls}{brs} {h}{v}{hh}{vv}%s\n' "$HX_GRY" "$HX_R"
+    printf '    %s{arr}{arr2}{tri}{play}{lam}{dot}{dia}{sq}{circ}{ring}%s\n' "$HX_GRY" "$HX_R"
+    printf '    %s{up}{dn}{ell}{star}{bolt}{clk}{lock}{gear}{branch}%s\n' "$HX_GRY" "$HX_R"
+    printf '    %s{b1}{b2}{b3}{full}{lhalf}{rhalf}{sep}{sept}{rsep}%s\n' "$HX_GRY" "$HX_R"
+    printf '    %s{ctl}{cbr}{topl}{topr}%s\n' "$HX_GRY" "$HX_R"
+    hx_note "a literal percent sign is written %%  ·  prompt new <name> to start one"
+}
+
+_prompt_palette() {
+    local k="$1" v="$2"
+    if [ -z "$k" ]; then
+        hx_head "palette"
+        hx_kv "HX_PS_OK     $HX_PS_OK"     "$(hx_f "$HX_PS_OK")the colour of success$HX_R"
+        hx_kv "HX_PS_ERR    $HX_PS_ERR"    "$(hx_f "$HX_PS_ERR")the colour of failure$HX_R"
+        hx_kv "HX_PS_ACCENT $HX_PS_ACCENT" "$(hx_f "$HX_PS_ACCENT")what a theme leans on$HX_R"
+        hx_kv "HX_PS_MUTED  $HX_PS_MUTED"  "$(hx_f "$HX_PS_MUTED")secondary text$HX_R"
+        hx_kv "HX_PS_FAINT  $HX_PS_FAINT"  "$(hx_f "$HX_PS_FAINT")rules and frames$HX_R"
+        hx_note "prompt palette HX_PS_ACCENT 208   ·   prompt colors for the ramp"
+        return 0
+    fi
+    case "$k" in
+        HX_PS_OK|HX_PS_ERR|HX_PS_ACCENT|HX_PS_MUTED|HX_PS_FAINT) ;;
+        *) hx_err "palette keys: HX_PS_OK HX_PS_ERR HX_PS_ACCENT HX_PS_MUTED HX_PS_FAINT"; return 2 ;;
+    esac
+    case "$v" in ''|*[!0-9]*) hx_err "a colour is a number from 0 to 255"; return 2 ;; esac
+    eval "$k=\"\$v\""
+    hx_prompt_apply "${HX_THEME:-vault}"
+    hx_conf_save
+    hx_ok "$k = $v"
+}
+
+_prompt_colors() {
+    local i=0
+    printf '\n  %sdepth%s %s   %sunicode%s %s   %snerd%s %s   %swidth%s %s\n\n' \
+        "$HX_GRY" "$HX_R" "$(hx_color_depth)" \
+        "$HX_GRY" "$HX_R" "${HX_UNICODE:-0}" \
+        "$HX_GRY" "$HX_R" "${HX_NERD:-0}" \
+        "$HX_GRY" "$HX_R" "$(hx_cols)"
+    while [ "$i" -lt 256 ]; do
+        printf '%s %3d %s' "$(hx_b "$i")" "$i" "$HX_R"
+        i=$((i + 1))
+        [ $(( i % 8 )) -eq 0 ] && printf '\n'
+    done
+    printf '\n'
+}
+
+_prompt_nerd() {
+    case "${1:-}" in
+        on|1)  HX_NERD=1 ;;
+        off|0) HX_NERD=0 ;;
+        *) printf '%s\n' "${HX_NERD:-0}"; return 0 ;;
+    esac
+    hx_glyph_init
+    hx_prompt_apply "${HX_THEME:-vault}"
+    hx_conf_save
+    hx_ok "nerd glyphs ${HX_NERD}  (a patched font is required; prompt preview powerline to check)"
+}
+
+_prompt_doctor() {
+    hx_head "prompt doctor"
+    hx_kv "hellish"        "$(hx_cap_get version)  at $(hx_shell_bin)"
+    hx_kv "themes"         "$(hx_theme_names | grep -c .) registered, active: ${HX_THEME:-<none>}"
+    hx_kv "colour depth"   "$(hx_color_depth)   (TERM=$TERM COLORTERM=${COLORTERM:-unset})"
+    hx_kv "unicode"        "${HX_UNICODE:-0}   (LANG=${LANG:-unset})"
+    hx_kv "nerd glyphs"    "${HX_NERD:-0}"
+    hx_kv "terminal width" "$(hx_cols)"
+    printf '\n%s  renderer%s\n' "$HX_ORA" "$HX_R"
+    _pd() { printf '    %s %s%-26s%s %s\n' \
+        "$( [ "$2" = 1 ] && printf '%s%s%s' "$HX_GRN" "$HX_G_OK" "$HX_R" || printf '%s%s%s' "$HX_YEL" "$HX_G_BAD" "$HX_R")" \
+        "$HX_B" "$1" "$HX_R" "$3"; }
+    _pd "percent language"  1 "%F{n} %K{n} %B %~ %(?..) — verified"
+    _pd "hellish badges"    1 "\\g \\S \\p \\J \\U \\B — self-spacing"
+    _pd "right prompt"      "$(hx_cap rprompt && echo 1 || echo 0)" "RPROMPT, right-aligned by the shell"
+    _pd "print -rP preview" "$(hx_cap print_p && echo 1 || echo 0)" "renders previews — but re-scans variables, so segments are escaped first"
+    _pd "precmd hooks"      "$(hx_cap hooks && echo 1 || echo 0)" "HELLISH_PRECMD_FUNCS drives the segments"
+    _pd "\$( ) in a prompt"  0 "not expanded — segments use \${VAR} instead"
+    _pd "PS2 continuation"  0 "hellish always shows '> ' — themes do not set it"
+    printf '\n%s  per-prompt cost of the active theme%s\n' "$HX_ORA" "$HX_R"
+    if [ -z "${HX_PS_NEEDS// /}" ]; then
+        printf '    %snothing: the renderer does all of it%s\n' "$HX_GRN" "$HX_R"
+    else
+        printf '    %s%s%s\n' "$HX_B" "$HX_PS_NEEDS" "$HX_R"
+        case " $HX_PS_NEEDS " in
+            *' vcs '*)  printf '    %svcs  one `git status --porcelain=v2` per prompt%s\n' "$HX_GRY" "$HX_R" ;;
+        esac
+        case " $HX_PS_NEEDS " in
+            *' rule '*) printf '    %srule one `tput cols` per prompt%s\n' "$HX_GRY" "$HX_R" ;;
+        esac
+    fi
+    printf '\n'
+}

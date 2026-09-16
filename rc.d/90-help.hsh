@@ -1,0 +1,203 @@
+# 90-help.hsh — the way in.
+#
+# `help_conf` is exhaustive, which makes it the wrong thing to meet first: 199
+# entries do not tell a newcomer which twenty matter. This module is the
+# other end of that — one screen you can read in thirty seconds, and a pointer
+# into the written guides for everything else.
+hx_feature help on core "cheat sheet and guides: the way into everything else"
+hx_guard help || return 0
+
+HX_DOCS="${HX_DOCS:-$HX_HOME/docs}"
+hx_var_doc HX_DOCS "where the written guides live (~/.hellish/docs)"
+
+# cheat [section] — one screen. Deliberately NOT generated from the registry:
+# the registry knows every name, and the whole value of this is that it knows
+# only the useful ones, in the order you need them.
+cheat() {
+    case "${1:-}" in
+        git)     _cheat_git ;;
+        nav|go)  _cheat_nav ;;
+        find)    _cheat_find ;;
+        dev)     _cheat_dev ;;
+        disk)    _cheat_disk ;;
+        prompt)  _cheat_prompt ;;
+        conf)    _cheat_conf ;;
+        all)     _cheat_nav; _cheat_find; _cheat_git; _cheat_dev; _cheat_disk
+                 _cheat_prompt; _cheat_conf ;;
+        ''|-h|--help) _cheat_main ;;
+        *)       hx_err "no such section: $1"
+                 printf '  %ssections: nav find git dev disk prompt conf all%s\n' \
+                     "$HX_GRY" "$HX_R"; return 2 ;;
+    esac
+}
+hx_func_doc cheat "one-screen cheat sheet; a section name for more depth" \
+    "cheat [nav|find|git|dev|disk|prompt|conf|all]"
+
+_c() { printf '  %s%-22s%s %s\n' "$HX_B" "$1" "$HX_R" "$2"; }
+
+_cheat_main() {
+    hx_head "the twenty commands worth knowing"
+    hx_sub "find out what you have"
+    _c "help_conf -s <term>"  "search every name and description — start here"
+    _c "cheat <section>"      "nav find git dev disk prompt conf"
+    _c "guide"               "the written guides: tour, prompt, plugins, architecture"
+    hx_sub "move"
+    _c "j <fragment>"        "jump to a directory you have used before"
+    _c "root"                "top of this repo or project"
+    _c "mkcd <dir>"          "make it and enter it"
+    _c "up [n]"              "climb n levels"
+    hx_sub "find"
+    _c "ff <name>"           "files by name        fd_ <name> for directories"
+    _c "grepf <pattern>"     "file contents (ripgrep when you have it)"
+    hx_sub "git"
+    _c "ginfo"               "one screen: branch, drift, counts, recent log"
+    _c "gundo"               "undo the last commit, keep the changes staged"
+    _c "gwip / gunwip"       "park work in progress, and take it back"
+    hx_sub "build"
+    _c "proj"                "what am I standing in?"
+    _c "build / test_ / lint"  "the same verbs for every project type"
+    hx_sub "disk"
+    _c "diskfree"            "usage per mount        clean   what could be freed"
+    hx_sub "the shell itself"
+    _c "prompt list"         "30 themes             prompt preview   see them all"
+    _c "conf list"           "every feature on/off  conf doctor      health check"
+    hx_note "cheat all for every section at once  ·  guide for the written documentation"
+}
+
+_cheat_nav() {
+    hx_head "moving around"
+    _c "j <fragment>"    "jump to the best-scoring directory you have visited"
+    _c "jl [fragment]"   "show the candidates and their scores"
+    _c "mark [name]"     "bookmark here      to <name>   go there"
+    _c "marks"           "list bookmarks     unmark <name>"
+    _c "root"            "top of this repo or project"
+    _c "mkcd <dir>"      "create (with parents) and enter"
+    _c "up [n]"          "climb n directories"
+    _c "cdf <pattern>"   "first matching directory below here"
+    _c "tmpd"            "a temp directory, and cd into it"
+    _c ".. ... ...."     "one, two, three levels up      -   previous directory"
+    printf '\n'
+}
+
+_cheat_find() {
+    hx_head "finding things"
+    _c "ff <name>"       "files by name below here"
+    _c "fd_ <name>"      "directories by name"
+    _c "grepf <pat>"     "file contents (uses ripgrep when installed)"
+    _c "biggest [n]"     "the largest files below here"
+    _c "rglob <dir> <p>" "recursive file search that streams"
+    _c "h [pattern]"     "search your history     histtop   most-used commands"
+    printf '\n  %sall of these skip .git, node_modules, target, build and .venv%s\n\n' \
+        "$HX_GRY" "$HX_R"
+}
+
+_cheat_git() {
+    hx_head "git"
+    _c "ginfo"           "branch, upstream drift, staged/unstaged/untracked, log"
+    _c "groot"           "cd to the repository root"
+    _c "gsw <branch>"    "switch, creating the branch if it does not exist"
+    _c "gundo"           "undo the last commit, keeping its changes staged"
+    _c "gunstage [path]" "the opposite of git add"
+    _c "gwip / gunwip"   "timestamped work-in-progress commit, and its undo"
+    _c "gsweep"          "delete local branches already merged into main"
+    _c "gnuke"           "discard every local change (shows them, then asks)"
+    _c "gfind <string>"  "commits that added or removed a string"
+    _c "gwhen <file>"    "one file's history, following renames"
+    _c "gwho"            "commit counts per author"
+    printf '\n  %sshort forms: g gs ga gc gca gd gds gl gp gpl gco gb%s\n\n' "$HX_GRY" "$HX_R"
+}
+
+_cheat_dev() {
+    hx_head "building and running"
+    _c "proj"            "type, root, runner, branch, whether there is a .env"
+    _c "build / run"     "whatever this project type means by that"
+    _c "test_ / fmt / lint" "test_ has the underscore so it never shadows \`test\`"
+    _c "serve [port]"    "static HTTP server, localhost only"
+    _c "envload [file]"  "export every KEY=VALUE from a .env"
+    _c "envdiff [file]"  "what envload WOULD change, without changing it"
+    _c "killport <port>" "kill whatever is listening there"
+    _c "timer <cmd>"     "how long did that take?"
+    _c "retry <n> <cmd>" "re-run until it succeeds, backing off"
+    _c "extract / pack"  "any archive, in either direction"
+    _c "calc / genpass"  "floating-point maths; a random password"
+    _c "note [text]"     "a timestamped scratch log that outlives the terminal"
+    printf '\n'
+}
+
+_cheat_disk() {
+    hx_head "disk"
+    _c "diskfree"        "usage per mount, with bars"
+    _c "clean"           "what could be reclaimed — REPORTS, deletes nothing"
+    _c "clean -y"        "actually free it"
+    _c "clean -a -y"     "everything: docker images, unused font weights, heavy caches"
+    _c "bigdirs [dir]"   "largest directories       bigfiles   largest files"
+    _c "sentinel"        "the whole machine: load, memory, disk, hungry processes"
+    _c "repos [dir]"     "git repositories below here with uncommitted work"
+    printf '\n  %sclean is a dry run unless you type -y. There is no setting to change that.%s\n\n' \
+        "$HX_GRY" "$HX_R"
+}
+
+_cheat_prompt() {
+    hx_head "the prompt"
+    _c "prompt list"     "30 themes, grouped by family"
+    _c "prompt preview"  "render every one with your real directory and branch"
+    _c "prompt <name>"   "switch now        prompt save <name>   keep it"
+    _c "prompt next / prev"  "walk the list       prompt random   surprise"
+    _c "prompt new <name>" "scaffold your own into themes/90-local.hsh"
+    _c "prompt tokens"   "the token language, in full"
+    _c "prompt palette"  "the five colours every theme draws from"
+    _c "prompt nerd on"  "powerline glyphs (needs a patched font)"
+    _c "prompt doctor"   "what your terminal supports, and what this theme costs"
+    printf '\n  %sguide prompt for the written guide%s\n\n' "$HX_GRY" "$HX_R"
+}
+
+_cheat_conf() {
+    hx_head "the configuration itself"
+    _c "conf list"       "every feature and whether it is on"
+    _c "conf on|off <n>" "toggle, persisted        conf reload   apply now"
+    _c "conf doctor"     "load errors, missing dependencies, known gaps"
+    _c "conf caps"       "what this hellish can actually do"
+    _c "conf modules"    "what loaded, in order    conf profile   with timings"
+    _c "hxp list"        "plugins                  hxp info <name>"
+    _c "hxp catalog"     "everything installable   hxp install <name>"
+    _c "forge api"       "how to write a plugin    hxp new <name>   scaffold one"
+    _c "help_conf"       "the full reference, paged"
+    printf '\n  %syour own overrides: ~/.hellish/rc.d/99-local.hsh (loads last, never overwritten)%s\n\n' \
+        "$HX_GRY" "$HX_R"
+}
+
+# guide [topic] — the written documentation. Opens in $PAGER, because these
+# are long enough to need scrolling and short enough not to need a browser.
+guide() {
+    local t="${1:-}" f
+    case "$t" in
+        ''|index|help)
+            hx_head "the written guides"
+            hx_kv "guide tour"      "the first ten minutes — the twenty commands that matter"
+            hx_kv "guide prompt"    "themes, the token language, writing your own"
+            hx_kv "guide plugins"   "using plugins, and writing one"
+            hx_kv "guide arch"      "how the framework works: load order, registry, hooks"
+            hx_kv "guide trouble"   "when something is wrong"
+            # Counted, not written down: the number changes whenever a plugin
+            # is enabled, and a hard-coded one is wrong by the next commit.
+            hx_kv "guide reference" "all $(hx_item_keys_sorted | grep -c .) items (generated from the live registry)"
+            hx_note "files live in ${HX_DOCS/#$HOME/\~}  ·  cheat for the one-screen version"
+            return 0 ;;
+        tour)      f="tour.md" ;;
+        prompt)    f="prompt.md" ;;
+        plugins)   f="plugins.md" ;;
+        arch|architecture) f="architecture.md" ;;
+        trouble|troubleshooting) f="troubleshooting.md" ;;
+        reference|ref) f="reference.md" ;;
+        *) hx_err "no such guide: $t"; guide index; return 2 ;;
+    esac
+    if [ -r "$HX_DOCS/$f" ]; then
+        "${PAGER:-less}" "$HX_DOCS/$f"
+    else
+        hx_err "missing: $HX_DOCS/$f"
+        hx_info "re-run the installer to get the guides, or read them in the repository"
+        return 1
+    fi
+}
+hx_func_doc guide "open a written guide in \$PAGER" \
+    "guide [tour|prompt|plugins|arch|trouble|reference]"

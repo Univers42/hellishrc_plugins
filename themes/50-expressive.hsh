@@ -1,0 +1,37 @@
+# themes/50-expressive.hsh — prompts with a mood.
+#
+# These pick a palette first and fit the information into it second. That is
+# the opposite of how the focus family is built, and it is a legitimate way to
+# choose a prompt: you will look at this several thousand times a day, and
+# liking it is a real requirement.
+#
+# All five stay legible at 8 colours, because the hue is carried by SHAPE as
+# well as by colour -- a gradient of shade glyphs, a triangle, a bracket -- and
+# shape survives a terminal that only has eight.
+
+# ember — banked fire. A dark red frame, the path in orange, and the arrow
+# taking the status colour so the one thing that must stand out still does.
+hx_theme ember expressive 'path' 'banked fire: dark frame, orange path, two rows' \
+    '{f:52}{tl}{h}{r} {f:208}{bold}{path}{/bold}{r} {f:130}{git}{r}{f:196}{fail}{r}{f:214}{took}{r}{nl}{f:52}{bl}{h}{r} {stf}{arr}{r} '
+
+# neon — a three-step tick from magenta through pink to cyan, then the path in
+# plain white so the colour never fights the text.
+hx_theme neon expressive '' 'a magenta-to-cyan tick, white path, two rows' \
+    '{f:198}{b3}{f:207}{b3}{f:51}{b3}{r} {f:255}{bold}{cwd:2}{/bold}{r} {f:207}{star} {f:51}{git}{r}{f:203}{fail}{r}{nl}{stf}{bold}{arr}{/bold}{r} '
+
+# aurora — three dots climbing teal to green, and the one-minute load average
+# on the right. The load is there because this palette suits a machine you are
+# watching rather than one you are typing on.
+hx_theme aurora expressive 'load' 'a teal-to-green dot ramp; load average on the right' \
+    '{f:43}{dot}{f:79}{dot}{f:114}{dot}{r} {f:252}{cwdt:40}{r} {f:108}{git}{r}{f:203}{fail}{r} {stf}{tri}{r} ' \
+    '{f:60}{load}{r}'
+
+# synth — 1984. A scanline of shade glyphs down the left margin, magenta on
+# violet, cyan for the branch, and a play triangle for a cursor.
+hx_theme synth expressive '' 'scanline margin, magenta on violet, a play triangle' \
+    '{f:129}{b2}{b2}{r}{f:213} {cwd:2} {r} {f:87}{git}{r}{f:203}{fail}{r}{nl}{f:129}{b2}{b2}{r}{stf}{play}{r} '
+
+# matrix — one hue, five values of it. Everything is green; what varies is how
+# bright, which is exactly how a monochrome phosphor terminal worked.
+hx_theme matrix expressive '' 'five values of one green, bracketed host, two rows' \
+    '{f:22}[{f:40}{user}{f:22}@{f:40}{host}{f:22}]{r}{f:28}{cwd:2}{r} {f:46}{git}{r}{f:118}{fail}{r}{nl}{f:46}{arr}{arr}{r} '

@@ -45,7 +45,7 @@ forge_list() {
         size=$(wc -l < "$d/plugin.hsh" | tr -d ' ')
         printf '  '
         hx_badge "${HX_FEAT_STATE[$name]:-off}"
-        printf ' %s%-12s%s %4s lines  %s\n' "$HX_B" "$name" "$HX_R" "$size" "${HX_PLUG_DESC[$name]:-}"
+        printf ' %s%-22s%s %4s lines  %s\n' "$HX_B" "$name" "$HX_R" "$size" "${HX_PLUG_DESC[$name]:-}"
     done
     printf '\n'
 }
@@ -84,16 +84,18 @@ _${name}_greet() {
     printf 'hello from the %s plugin\n' "$name"
 }
 
-# Every public function gets documented, because hellish 2.7.6 cannot
-# introspect functions (declare -F returns nothing) -- if you do not register
-# it here, help_conf can never show it.
+# Document every public function. \`declare -F\` can list functions on a recent
+# hellish, but it cannot tell anyone what yours is FOR -- the description, the
+# usage line and the owning module exist only because you registered them, and
+# that is what help_conf and \`hxp info\` print.
 ${name}_hello() {
     _${name}_greet
 }
 hx_func_doc ${name}_hello "say hello (replace me with something useful)"
 
-# Completion is declared, not installed: hellish has no \`complete\` builtin yet,
-# so this is stored and installed automatically once it does.
+# Completion. On a hellish with \`complete\` this installs immediately and
+# reaches TAB; on an older one it is recorded and installed the day you
+# upgrade. Either way you write the same line.
 hx_complete ${name}_hello
 
 # Run something before each prompt:
@@ -129,8 +131,10 @@ FORGE_README
 }
 
 # ── forge lint ──────────────────────────────────────────────────────────────
-# Checks the contract AND the hellish-2.7.6 landmines that silently break a
-# plugin. Every rule here exists because it actually bit during development.
+# Checks the contract, plus the interpreter landmines that silently break a
+# plugin ON THE HELLISH YOU ARE RUNNING. Every rule earned its place by
+# actually biting, and every one is now gated on hx_cap, so a rule that fires
+# is a gap you really do have to code around rather than folklore.
 forge_lint() {
     local target="${1:-}" d name rc=0
     if [ -n "$target" ]; then
@@ -153,8 +157,15 @@ _forge_lint_one() {
     # Lint the CODE only. Two things are stripped first:
     #   * comment lines — a landmine quoted in a comment is documentation
     #   * this linter's own rule lines — otherwise forge fails itself, because
-    #     every pattern it searches for appears literally in its own source
-    src=$(grep -v '^[[:space:]]*#' "$f" | grep -v '_forge_fail\|_forge_warn\|_forge_has')
+    #     every pattern it searches for appears literally in its own source,
+    #     as does every example in the message that explains it
+    #
+    # _forge_gap has to be in this list for the same reason as the other
+    # three, and leaving it out is exactly the bug it was added to catch:
+    # `_forge_gapw procsub '<\('` contains a process substitution, and
+    # `_forge_gap nameref 'local -n'` contains a nameref.
+    src=$(grep -v '^[[:space:]]*#' "$f" \
+        | grep -v '_forge_fail\|_forge_warn\|_forge_has\|_forge_gap')
 
     _forge_fail() { printf '  %s%-8s%s %s\n' "$HX_RED" "fail" "$HX_R" "$1"; issues=$((issues + 1)); }
     _forge_warn() { printf '  %s%-8s%s %s\n' "$HX_YEL" "warn" "$HX_R" "$1"; }
@@ -167,23 +178,58 @@ _forge_lint_one() {
     grep -q '^hx_plugin .*|| return 0' "$f" || _forge_fail "the hx_plugin line must end with '|| return 0'"
     grep -q "^hx_plugin $name " "$f"      || _forge_fail "hx_plugin name does not match the directory name '$name'"
 
-    # 2. hellish 2.7.6 landmines — each of these silently breaks a plugin
-    _forge_has '^[[:space:]]*function[[:space:]]+[A-Za-z_]' && \
-        _forge_fail "'function name {' is a syntax error in hellish; use 'name() {'"
-    _forge_has '[^&>]&>[^&]' && \
-        _forge_fail "'&>' backgrounds the command instead of redirecting; use '>f 2>&1'"
-    _forge_has 'local -n' && \
-        _forge_fail "'local -n' namerefs silently yield the NAME, not the value"
-    _forge_has 'printf.*\\e\[' && \
-        _forge_fail "printf does not understand backslash-e; use backslash-033"
-    _forge_has '\$\{[A-Za-z_][A-Za-z0-9_]*\[@\]:-' && \
-        _forge_fail "\${arr[@]:-default} is a bad substitution in hellish"
-    _forge_has '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\[\$' && \
-        _forge_warn "subscripted write with a variable index breaks when sourced; use hx_aset"
-    _forge_has '%q' && \
-        _forge_warn "printf '%q' is unsupported; use the quote() shim"
-    _forge_has '\[[[:space:]]+-v[[:space:]]' && \
-        _forge_warn "'[ -v VAR ]' always returns false in hellish; use is_set"
+    # 2. interpreter landmines — CHECKED AGAINST THE RUNNING BINARY
+    #
+    # These rules used to be unconditional, and by hellish 2.10 every one of
+    # them was wrong: `function name {`, `&>`, `local -n`, `printf '\e'`,
+    # `${arr[@]:-x}`, `printf %q`, `[ -v x ]` and subscripted writes from a
+    # sourced function ALL work now. A linter that keeps failing plugins for
+    # using them is not protecting anyone; it is training people to ignore it.
+    #
+    # So each rule now asks hx_cap first and fires only where the gap is real
+    # on the hellish you are running. `conf caps` prints the verdicts. A rule
+    # that fires here is a rule you genuinely have to code around.
+    _forge_gap() {                      # _forge_gap <cap> <pattern> <message>
+        hx_cap "$1" && return 0         # capability present: rule retired
+        _forge_has "$2" && _forge_fail "$3"
+        return 0
+    }
+    _forge_gapw() {
+        hx_cap "$1" && return 0
+        _forge_has "$2" && _forge_warn "$3"
+        return 0
+    }
+
+    _forge_gap  nameref       'local -n' \
+        "'local -n' namerefs yield the NAME, not the value, on this hellish"
+    _forge_gap  printf_e      'printf.*\\e\[' \
+        "printf does not understand backslash-e on this hellish; use backslash-033"
+    _forge_gapw assoc_sourced '^[[:space:]]*[A-Za-z_][A-Za-z0-9_]*\[\$' \
+        "subscripted write with a variable index breaks when sourced; use hx_aset"
+    _forge_gapw printf_q      '%q' \
+        "printf '%q' is unsupported on this hellish; use the quote() shim"
+    _forge_gapw test_v        '\[[[:space:]]+-v[[:space:]]' \
+        "'[ -v VAR ]' always returns false on this hellish; use is_set"
+    _forge_gapw nullglob_array '=\([^)]*\*' \
+        "a=(glob*) yields the pattern on no match on this hellish; use glob_into"
+    _forge_gapw procsub       '<\(' \
+        "process substitution needs /dev/fd, which this hellish lacks"
+
+    # extglob is the one gap that is still real AND still lies: `shopt -s
+    # extglob` is accepted and `shopt extglob` reports "on", but the operators
+    # are a lexer error, so the file does not parse at all.
+    _forge_gap  extglob       '[?*+@!]\([^)]*\|' \
+        "@() +() ?() pattern operators are a lexer error on this hellish"
+
+    # 2b. prompt rules — a plugin that sets PS1 has two ways to fail silently
+    if _forge_has '^[[:space:]]*(PS1|PROMPT|RPROMPT)='; then
+        _forge_has '(PS1|PROMPT|RPROMPT)=.*\$\(' && \
+            _forge_fail "command substitution is never expanded in a prompt; compute into a variable from a precmd hook"
+        _forge_has '(PS1|PROMPT|RPROMPT)="' && \
+            _forge_warn "a double-quoted prompt freezes \$? and \$VAR at assignment; single-quote it"
+    fi
+    _forge_has '^[[:space:]]*PS2=' && \
+        _forge_warn "setting PS2 does nothing: hellish's continuation prompt is fixed at '> '"
 
     # 3. the safety-alias hazard: rc.d/30-aliases.hsh defines rm/mv/cp with -i,
     #    and those aliases are live when this file is PARSED, so an unguarded
@@ -264,14 +310,16 @@ forge_api() {
       hx_have curl              guard a single optional command
 
   %sHooks%s
-      hx_precmd_add <function>  run before every prompt (composable)
+      hx_hook_add precmd <fn>   run before every prompt (composable)
+      hx_hook_add preexec <fn>  run before each typed line; \$1 is the line
+      hx_precmd_add <fn>        the older spelling of the first one
 
   %sCompletion%s
       hx_complete <cmd> <word>...   declared now, installed when hellish
                                     grows a `complete` builtin
 
-  %sSafe array writes%s  (a subscripted write from a sourced function is
-  parsed as a command in hellish 2.7.6)
+  %sSafe array writes%s  (a subscripted write from a sourced function was
+  parsed as a command before hellish 2.8; hx_aset is the portable spelling)
       hx_aset <arrayname> <key> <value>
 
   %sUI helpers%s
@@ -281,11 +329,17 @@ forge_api() {
   %sConventions%s
       * private helpers are named _<plugin>_<thing>
       * never call an alias from a function -- call the real command
-      * use POSIX  name() { ... }  ; "function name {" is a syntax error
+      * use POSIX  name() { ... }  -- it parses everywhere
+      * a prompt cannot expand \$( ); compute into a variable from a hook
       * check your work with:  forge lint <name>
 
+  %sAsking what this hellish can do%s  (never assume a version)
+      hx_cap builtin_complete|hooks|rprompt|extglob|...
+      conf caps                 the whole probe, cached until the binary changes
+
 ' "$HX_B" "$HX_R" "$HX_B" "$HX_R" "$HX_B" "$HX_R" "$HX_B" "$HX_R" \
-  "$HX_B" "$HX_R" "$HX_B" "$HX_R" "$HX_B" "$HX_R" "$HX_B" "$HX_R" "$HX_B" "$HX_R"
+  "$HX_B" "$HX_R" "$HX_B" "$HX_R" "$HX_B" "$HX_R" "$HX_B" "$HX_R" \
+  "$HX_B" "$HX_R" "$HX_B" "$HX_R"
 }
 
 hx_complete forge new lint doc list api help

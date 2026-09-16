@@ -1,8 +1,12 @@
 # 20-options.hsh — shell options (set -o) and behaviour knobs (shopt / pretty).
-hx_feature options on core "shell options: set -o flags, pretty presets, glob knobs"
+#
+# Every line below was checked against the running binary, not against the
+# manual. `conf caps` prints what the probe found on YOUR hellish; where this
+# file and that disagree, the probe is right and this comment is stale.
+hx_feature options on core "shell options: line editing, glob knobs, pretty presets"
 hx_guard options || return 0
 
-# ── set -o : these all WORK (verified on 2.7.6) ─────────────────────────────
+# ── set -o ──────────────────────────────────────────────────────────────────
 set -o emacs                 # line editing; use `set -o vi` if you prefer modal
 hx_opt_doc "emacs" "emacs line editing (swap for: set -o vi)"
 
@@ -15,7 +19,6 @@ hx_opt_doc "emacs" "emacs line editing (swap for: set -o vi)"
 # `| head`, `| grep -q` and `| less` are constant at a prompt, so every one of
 # them would start reporting failure. Turn it on per-script, not per-shell:
 #     (set -o pipefail; cmd | grep -q x)
-#   set -o pipefail
 hx_opt_doc "pipefail" "NOT enabled: it makes '| head' and '| grep -q' report 141 (SIGPIPE)"
 
 # Deliberately NOT enabled in an interactive shell:
@@ -24,10 +27,58 @@ hx_opt_doc "pipefail" "NOT enabled: it makes '| head' and '| grep -q' report 141
 #   set -o noclobber — surprising; use >| when you want it per-command
 # All three DO work in hellish; they belong in scripts, not in an rc.
 
-# ── shopt / pretty ──────────────────────────────────────────────────────────
-# `pretty` is hellish's curated front-end over shopt; per the docs the two share
-# one state, so either spelling works. Only the knobs verified to change real
-# behaviour are enabled here.
+# ── glob knobs ──────────────────────────────────────────────────────────────
+#
+# These were all no-ops on 2.7.6 -- `shopt -s` accepted them, `shopt <name>`
+# reported "on", and the glob behaviour did not change. That is no longer
+# true: dotglob, nocaseglob, globstar and nullglob (arrays included) all work.
+# The comments that used to say otherwise were removed rather than corrected,
+# because a stale warning is worse than no warning.
+#
+# What follows is therefore a set of DECISIONS, not workarounds.
+
+# globstar: ON. Purely additive -- `**` was a literal before, and for a single
+# level `**` and `*` already agree, so nothing that used to work changes
+# meaning. What you gain is `ls **/*.c` without reaching for find.
+shopt -s globstar 2>/dev/null
+hx_opt_doc "globstar" "ON: ** matches across directory levels (verified working)"
+
+# nullglob: OFF, and it is not broken any more -- arrays are correct now too.
+# It stays off because it changes what a FAILED glob means everywhere at once:
+# `echo *.nope` would print nothing instead of the pattern, and `for f in *.c`
+# would silently skip a directory with no C in it rather than looping once on
+# a non-existent name. Both behaviours are defensible; changing the one your
+# muscle memory expects, globally, is not. glob_into() gives you the nullglob
+# answer where you actually want it.
+hx_opt_doc "nullglob" "OFF by choice (it works now): it changes what every failed glob means -- see glob_into"
+
+# dotglob: OFF. `*` matching dot-files makes `rm *` and `cp * dest` reach
+# things you did not look at. This is the one knob where the surprise is
+# destructive.
+hx_opt_doc "dotglob" "OFF by choice (it works now): '*' matching dot-files makes 'rm *' dangerous"
+
+# nocaseglob: OFF. Case-insensitive globs are pleasant until a script written
+# at this prompt is run on a case-sensitive deployment and matches nothing.
+hx_opt_doc "nocaseglob" "OFF by choice (it works now): case-blind globs do not survive being pasted into a script"
+
+# extglob: NOT AVAILABLE, and it is the one knob that still lies. `shopt -s
+# extglob` is accepted and `shopt extglob` then reports "on", but the pattern
+# operators are a LEXER error, so you do not get a failed match -- you get
+# your whole script rejected at parse time:
+#     $ hellish -c 'shopt -s extglob; case ab in @(ab|cd)) echo y;; esac'
+#     hellish: line 1: syntax error near unexpected token `('
+# Never arm it conditionally on `shopt -q extglob` for that reason: the probe
+# succeeds and the code that follows still cannot be parsed. hx_cap extglob
+# probes it out of process, which is the only way to ask safely.
+hx_opt_doc "extglob" "NOT available: shopt accepts it and reports 'on', but @() +() are a lexer error"
+
+# histappend is accepted; whether it appends rather than truncates is not
+# observable from inside the shell that set it.
+shopt -s histappend 2>/dev/null
+
+# ── pretty ──────────────────────────────────────────────────────────────────
+# `pretty` is hellish's curated front-end over shopt; the two share one state,
+# so either spelling works.
 pretty on resize-aware      2>/dev/null   # track terminal size after each command
 pretty on multiline-history 2>/dev/null   # recall keeps newlines + indentation
 pretty on cd-spell          2>/dev/null   # cd fixes a small typo
@@ -35,34 +86,13 @@ hx_opt_doc "resize-aware"      "re-read terminal size after every command"
 hx_opt_doc "multiline-history" "history recall keeps newlines and indentation"
 hx_opt_doc "cd-spell"          "cd tolerates a one-character typo"
 
-# auto-cd: a bare directory name changes to it. Off by default because it turns
-# any typo that happens to be a directory name into a silent cd.
+# auto-cd: a bare directory name changes to it. Off because it turns any typo
+# that happens to be a directory name into a silent cd.
 # pretty on auto-cd
 
-# ── DEAD KNOBS — kept, commented, with the reason (hellish 2.7.6) ───────────
-# These are ACCEPTED by both `shopt -s` and `pretty on`, and `shopt <name>`
-# afterwards reports "on" — but the glob behaviour does not change. Verified
-# non-interactively AND in a real pty. Reported upstream as issue #71 §4.
-# Uncomment once a release fixes them; nothing else here depends on them.
-#
-#   shopt -s dotglob        # `*` would also match dot-files      -- NO-OP
-#   shopt -s nocaseglob     # globs would ignore case             -- NO-OP
-#   shopt -s globstar       # `**` across directory levels        -- NO-OP
-#   shopt -s extglob        # ?() *() +() @() !()  -- SYNTAX ERROR, not just a no-op:
-#                           #   $ echo @(a)  =>  syntax error near unexpected token `('
-#   pretty on hidden-glob   # the `pretty` spelling of dotglob    -- NO-OP
-#   pretty on case-blind-glob                                     -- NO-OP
-#   pretty on deep-glob                                           -- NO-OP
-#   pretty on extended-glob                                       -- NO-OP
-#
-# nullglob is the interesting one: it PARTLY works.
-#     shopt -s nullglob; echo x /nope* y   -> "x y"        (correct)
-#     shopt -s nullglob; set -- /nope*; echo $#  -> 0      (correct)
-#     shopt -s nullglob; a=(/nope*); echo ${#a[@]} -> 1    (WRONG, want 0)
-# So it is safe for command words but NOT for array literals. Enabling it would
-# make the working half silently disagree with the broken half, which is worse
-# than not having it — 40-functions.hsh provides glob_into() as the shim.
-#   shopt -s nullglob
-hx_opt_doc "nullglob"  "NOT enabled: correct for command words, wrong in a=(glob*) - see glob_into"
-hx_opt_doc "extglob"   "NOT available: @() +() etc are a lexer syntax error in 2.7.6"
-hx_opt_doc "globstar"  "NOT available: ** is literal - see rglob() for the shim"
+# NOTE: resize-aware tracks the size internally but does NOT export $COLUMNS
+# or $LINES -- both are unset in every hellish so far, where bash maintains
+# them in interactive shells. Anything here that needs the width forks `tput
+# cols` instead, which is why hx_cols caches the answer and why a prompt theme
+# has to ask for the `rule` segment rather than getting one for free.
+hx_var_doc COLUMNS "NOT maintained by hellish (bash sets it); hx_cols forks tput and caches"

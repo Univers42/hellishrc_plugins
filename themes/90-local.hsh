@@ -1,0 +1,16 @@
+# themes/90-local.hsh — yours.
+#
+# This is the one theme file an upgrade never overwrites, and `prompt new
+# <name>` appends here. Anything you define wins: it loads last, so a theme
+# with the same name as a shipped one replaces it.
+#
+#   prompt tokens        the token language, in full
+#   prompt new mine      scaffold one and switch to it
+#   prompt export vault  print a shipped theme's raw PS1 to start from
+#
+# A theme is:  hx_theme <name> local '<needs>' '<description>' '<ps1>' ['<rprompt>']
+#
+# Example — uncomment to try it:
+#
+#   hx_theme mine local '' 'my own' \
+#       '{f:213}{cwd:2}{r} {f:108}{git}{r} {stf}{arr}{r} '

@@ -50,10 +50,25 @@ if ( exec </dev/tty ) 2>/dev/null; then TTY=1; fi
 [ "$PLUGINS" = "choose" ] && [ "$TTY" = "0" ] && PLUGINS="all"
 
 # ── 1. the framework itself ─────────────────────────────────────────────────
+# themes/ and docs/ are part of the framework, not optional extras: the prompt
+# module loads $HX_HOME/themes and `guide` reads $HX_HOME/docs, so an install
+# without them boots with no prompt theme and a help command that points at
+# nothing.
+#
+# Two files are the user's and are never overwritten once they exist:
+# rc.d/99-local.hsh (machine overrides) and themes/90-local.hsh (own themes).
+# Both say so in their first lines; this is what makes that true on upgrade.
 mkdir -p "$HX"
-for d in lib rc.d bin test; do
+for d in lib rc.d bin test themes docs; do
 	mkdir -p "$HX/$d"
-	cp "$HERE/$d/"* "$HX/$d/" 2>/dev/null || true
+	for f in "$HERE/$d/"*; do
+		[ -e "$f" ] || continue
+		case "$d/${f##*/}" in
+		rc.d/99-local.hsh|themes/90-local.hsh)
+			[ -e "$HX/$d/${f##*/}" ] && continue ;;
+		esac
+		cp "$f" "$HX/$d/"
+	done
 done
 chmod +x "$HX/bin/"* 2>/dev/null || true
 mkdir -p "$HX/plugins" "$HX/state"

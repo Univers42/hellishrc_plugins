@@ -1,31 +1,36 @@
-# ~/.hellish/lib/core.hsh — registry, toggle engine, module loader.
+# ~/.hellish/lib/core.hsh — registry, capabilities, toggle engine, module loader.
 #
 # ── WHY A REGISTRY EXISTS ───────────────────────────────────────────────────
-# In bash you would build `help_conf` by introspection: `declare -F` lists every
-# function, `alias -p` every alias. In hellish 2.7.6 BOTH return empty (verified,
-# see ~/.context_conf.md). Nothing can discover what this config defined. So every
-# module *declares* what it provides via hx_feature/hx_item, and that declaration
-# is the single source of truth for help_conf, `conf`, and the test suite.
+# Every module *declares* what it provides via hx_feature/hx_item, and that
+# declaration is the single source of truth for help_conf, `conf`, `hxp` and
+# the test suite. This began as a workaround -- hellish 2.7.6 returned nothing
+# from `declare -F` and `alias -p`, so nothing could discover what the config
+# had defined. Introspection works from 2.8 on (hx_cap introspect), but the
+# registry stayed, because it carries what introspection never could: a
+# description, a usage line, and which module owns the name.
 #
-# ── WHY hx_aset EXISTS (interpreter bug shim) ───────────────────────────────
-# Assigning an array element from inside a function that was DEFINED IN A SOURCED
-# FILE is parsed as a command, not an assignment:
-#     $ cat lib.hsh          -->  declare -A M; f() { M[$1]=v; }
-#     $ hellish -c '. lib.hsh; f k'
-#     hellish: line 1: M[k]=v: command not found
-# The same code works inline under -c. Reads (${M[k]}) and appends (A+=(x)) are
-# fine; only subscripted WRITES break. Since every module here is a sourced file,
-# that would kill the whole registry -- hence hx_aset, which defers the value
-# through a positional parameter so it is expanded but never re-parsed.
+# ── WHY hx_aset EXISTS ──────────────────────────────────────────────────────
+# On hellish 2.7.6, assigning an array element from inside a function that was
+# DEFINED IN A SOURCED FILE was parsed as a command, not an assignment:
+#     hellish -c '. lib.hsh; f k'   ->  hellish: M[k]=v: command not found
+# Fixed in later releases (hx_cap assoc_sourced reports which you have), but
+# hx_aset is still how every write goes through: it costs nothing, it keeps
+# this configuration working on an old binary, and having one choke point for
+# subscripted writes is why hx_key_ok can guarantee no key is ever re-parsed.
 
-HX_VERSION="1.0.0"
+HX_VERSION="2.0.0"
+# Derived, not defaulted: see the note in ~/.hellishrc. These three are
+# exported, so an inherited HX_CONF would otherwise outrank a fresh HX_HOME
+# and point a sandboxed load back at the real configuration.
 HX_HOME="${HX_HOME:-$HOME/.hellish}"
-HX_CONF="${HX_CONF:-$HX_HOME/hellish.conf}"
-HX_STATE="${HX_STATE:-$HX_HOME/state}"
+HX_CONF="$HX_HOME/hellish.conf"
+HX_STATE="$HX_HOME/state"
+[ -d "$HX_STATE" ] || mkdir -p "$HX_STATE" 2>/dev/null
 
 # --- registries -------------------------------------------------------------
 declare -A HX_FEAT_DESC HX_FEAT_STATE HX_FEAT_DEFAULT HX_FEAT_GROUP
 declare -A HX_ITEM_KIND HX_ITEM_DESC HX_ITEM_OWNER HX_ITEM_USAGE
+declare -A HX_CAP
 HX_FEAT_ORDER=()
 HX_ITEM_ORDER=()
 HX_LOADED=()
@@ -50,6 +55,246 @@ hx_now_ms() {
     local n
     n=$(date +%s%N 2>/dev/null) || { echo 0; return; }
     case "$n" in *N*|'') echo 0 ;; *) echo $(( n / 1000000 )) ;; esac
+}
+
+# ── CAPABILITIES ────────────────────────────────────────────────────────────
+#
+# This configuration used to hard-code what hellish 2.7.6 could not do. That
+# aged badly: by 2.10 most of those gaps were closed, and the config was still
+# routing around them -- refusing to install completions that now work, and
+# linting plugins against rules that no longer applied.
+#
+# So capability is now DETECTED, once, and cached. The probe costs a few
+# hundred milliseconds and runs again only when the hellish binary changes,
+# which is what `update --now` does. Everything downstream -- forge lint,
+# conf doctor, the completion module, the prompt engine -- asks hx_cap instead
+# of assuming a version.
+#
+#   hx_cap <name>          true when the running hellish has the capability
+#   hx_cap_all             print every probed capability and its verdict
+#   hx_caps_refresh        force a re-probe (after `update --now`)
+
+# hx_shell_bin — the hellish this configuration runs in. Never assumed to be
+# /usr/bin/hellish: a user-mode install (every 42 machine) lives in
+# ~/.local/bin, and code that hard-coded /usr/bin reported the version as
+# blank and failed every `forge lint` there.
+hx_shell_bin() {
+    if [ -n "${HELLISH_BIN:-}" ] && [ -x "$HELLISH_BIN" ]; then
+        printf '%s' "$HELLISH_BIN"
+    elif command -v hellish >/dev/null 2>&1; then
+        command -v hellish
+    elif [ -n "${SHELL:-}" ] && [ -x "$SHELL" ]; then
+        printf '%s' "$SHELL"
+    else
+        printf '%s' /usr/bin/hellish
+    fi
+}
+
+# hx_ver_ge <have> <want> — dotted-version comparison, no sort -V dependency.
+hx_ver_ge() {
+    local h="$1" w="$2" hp wp
+    while [ -n "$h$w" ]; do
+        hp="${h%%.*}"; wp="${w%%.*}"
+        case "$hp" in ''|*[!0-9]*) hp=0 ;; esac
+        case "$wp" in ''|*[!0-9]*) wp=0 ;; esac
+        [ "$hp" -gt "$wp" ] && return 0
+        [ "$hp" -lt "$wp" ] && return 1
+        case "$h" in *.*) h="${h#*.}" ;; *) h= ;; esac
+        case "$w" in *.*) w="${w#*.}" ;; *) w= ;; esac
+    done
+    return 0
+}
+
+# _hx_caps_probe — the expensive part. Prints `name=1|0` lines on stdout.
+#
+# Probes that would be a SYNTAX error rather than a runtime failure (extglob's
+# @(...)) have to run in a child, because a parse error takes the whole file
+# with it -- there is no trapping it from inside. The rest run in the current
+# shell where they are free.
+_hx_caps_probe() {
+    local hsh bin tmp
+    hsh="$(hx_shell_bin)"
+    bin="$hsh"
+
+    printf 'version=%s\n' \
+        "$("$hsh" --version 2>/dev/null | head -1 | sed -n 's/.*version \([0-9][0-9.]*\).*/\1/p')"
+
+    # Builtins: `command -v` on a builtin costs no fork.
+    for b in complete compgen bind print mapfile readarray pretty update; do
+        if command -v "$b" >/dev/null 2>&1; then printf '%s=1\n' "builtin_$b"
+        else printf '%s=0\n' "builtin_$b"; fi
+    done
+
+    # printf %q — an invalid format in 2.7.6, real in 2.8+.
+    if printf '%q' x >/dev/null 2>&1; then printf 'printf_q=1\n'; else printf 'printf_q=0\n'; fi
+    # printf understanding \e as well as \033.
+    if [ "$(printf '\e' | od -An -c 2>/dev/null | tr -d ' ')" = '033' ]; then
+        printf 'printf_e=1\n'; else printf 'printf_e=0\n'; fi
+
+    # Introspection: declare -F / alias -p returned empty on 2.7.6.
+    if [ -n "$(declare -F 2>/dev/null)" ]; then printf 'introspect=1\n'
+    else printf 'introspect=0\n'; fi
+
+    # `[ -v VAR ]` was always false on 2.7.6.
+    local _probe=1
+    if [ -v _probe ] 2>/dev/null; then printf 'test_v=1\n'; else printf 'test_v=0\n'; fi
+
+    # nullglob applied to a command word but not to an array literal.
+    tmp=$("$bin" -c 'shopt -s nullglob 2>/dev/null; a=(/nonexistent-xyz*); echo ${#a[@]}' 2>/dev/null)
+    if [ "$tmp" = "0" ]; then printf 'nullglob_array=1\n'; else printf 'nullglob_array=0\n'; fi
+
+    # ** across directories.
+    tmp=$("$bin" -c 'shopt -s globstar 2>/dev/null; cd /etc 2>/dev/null; set -- ./**/*; [ $# -gt 2 ] && echo y' 2>/dev/null)
+    if [ "$tmp" = "y" ]; then printf 'globstar=1\n'; else printf 'globstar=0\n'; fi
+
+    # extglob: a LEXER error on 2.7.6, so it must be probed out of process.
+    if "$bin" -c 'shopt -s extglob 2>/dev/null; case ab in @(ab|cd)) exit 0 ;; esac; exit 1' >/dev/null 2>&1; then
+        printf 'extglob=1\n'; else printf 'extglob=0\n'; fi
+
+    # A subscripted write from a function defined in a SOURCED file.
+    tmp="$HX_STATE/.capprobe.$$.hsh"
+    printf 'declare -A _CP\n_cpf() { _CP[$1]=ok; }\n' > "$tmp" 2>/dev/null
+    if [ "$("$bin" -c ". '$tmp'; _cpf k; printf %s \"\${_CP[k]}\"" 2>/dev/null)" = "ok" ]; then
+        printf 'assoc_sourced=1\n'; else printf 'assoc_sourced=0\n'; fi
+    command rm -f "$tmp" 2>/dev/null
+
+    # local -n namerefs yielded the NAME instead of the value on 2.7.6.
+    if [ "$("$bin" -c '_g() { local -n r=$1; r=set; }; _g out; printf %s "$out"' 2>/dev/null)" = "set" ]; then
+        printf 'nameref=1\n'; else printf 'nameref=0\n'; fi
+
+    # Process substitution needs /dev/fd, which hellish does not provide.
+    if "$bin" -c 'cat <(echo x)' >/dev/null 2>&1; then printf 'procsub=1\n'
+    else printf 'procsub=0\n'; fi
+
+    # read -n 1 returned empty on 2.7.6.
+    if [ "$(printf 'yz' | "$bin" -c 'read -n 1 r; printf %s "$r"' 2>/dev/null)" = "y" ]; then
+        printf 'read_n=1\n'; else printf 'read_n=0\n'; fi
+
+    # Prompt engine features. These cannot be exercised without a terminal,
+    # so they are read off the binary itself: the symbol is present exactly
+    # when the feature is compiled in.
+    if strings "$bin" 2>/dev/null | grep -qx 'HELLISH_PRECMD_FUNCS'; then
+        printf 'hooks=1\n'; else printf 'hooks=0\n'; fi
+    if strings "$bin" 2>/dev/null | grep -qx 'RPROMPT'; then
+        printf 'rprompt=1\n'; else printf 'rprompt=0\n'; fi
+
+    # The self-spacing prompt escapes (\g \S \p \J \U) and `print -rP`, which
+    # is the renderer `prompt preview` uses.
+    if command -v print >/dev/null 2>&1 && \
+       [ "$(print -rP 'a\$b' 2>/dev/null)" != 'a\$b' ]; then
+        printf 'print_p=1\n'; else printf 'print_p=0\n'; fi
+
+    # Command substitution inside PS1 is NOT expanded by the prompt renderer
+    # (parameter and arithmetic expansion are). Recorded so themes and the
+    # linter can both refuse to rely on it.
+    printf 'ps1_cmdsub=0\n'
+    printf 'ps2=0\n'
+}
+
+# hx_caps_load — read the cache, or probe and write it.
+#
+# The cache is keyed on the binary's identity, not on a version string: a
+# locally built hellish reports the same version as the release it came from
+# and would otherwise serve a stale verdict.
+hx_caps_load() {
+    local cache="$HX_STATE/capabilities" bin key have line k v
+    bin="$(hx_shell_bin)"
+    key="$(stat -c '%Y:%s' "$bin" 2>/dev/null || echo unknown)"
+    if [ "${1:-}" != "-f" ] && [ -r "$cache" ]; then
+        read -r have < "$cache" 2>/dev/null
+        if [ "$have" = "#key $key" ]; then
+            while IFS='=' read -r k v; do
+                case "$k" in ''|'#'*) continue ;; esac
+                hx_key_ok "$k" && hx_aset HX_CAP "$k" "$v"
+            done < "$cache"
+            return 0
+        fi
+    fi
+    {
+        printf '#key %s\n' "$key"
+        _hx_caps_probe
+    } > "$cache.tmp.$$" 2>/dev/null && command mv "$cache.tmp.$$" "$cache" 2>/dev/null
+    while IFS='=' read -r k v; do
+        case "$k" in ''|'#'*) continue ;; esac
+        hx_key_ok "$k" && hx_aset HX_CAP "$k" "$v"
+    done < "$cache" 2>/dev/null
+    return 0
+}
+
+hx_caps_refresh() { hx_caps_load -f; hx_ok "capabilities re-probed for $(hx_shell_bin)"; }
+
+# hx_cap <name> — the question every other module should be asking.
+hx_cap() { [ "${HX_CAP[$1]:-0}" = "1" ]; }
+
+# hx_cap_get <name> — the raw value (used for `version`, which is not boolean).
+hx_cap_get() { printf '%s' "${HX_CAP[$1]:-}"; }
+
+hx_cap_all() {
+    local k
+    for k in $(printf '%s\n' "${!HX_CAP[@]}" | sort); do
+        printf '%s=%s\n' "$k" "${HX_CAP[$k]}"
+    done
+}
+
+# ── HOOKS ───────────────────────────────────────────────────────────────────
+#
+# hellish 2.9 grew two hook arrays of its own -- HELLISH_PRECMD_FUNCS before
+# each prompt, HELLISH_PREEXEC_FUNCS before each typed line, with the line as
+# $1 -- and they are the right mechanism: arrays of function names compose,
+# where PROMPT_COMMAND (one string) and `trap ... DEBUG` (one handler) do not.
+#
+# hx_hook_add is the portable front-end. On a binary that has the arrays it
+# appends to them; on an older one it falls back to the PROMPT_COMMAND
+# dispatch list this configuration has always carried. A plugin calls
+# hx_hook_add and never has to know which.
+HX_PRECMD_FUNCS=""
+HX_PREEXEC_FUNCS=""
+
+# hx_hook_add [precmd|preexec] <function>
+hx_hook_add() {
+    local when="precmd" fn
+    case "$1" in precmd|preexec) when="$1"; shift ;; esac
+    fn="$1"
+    [ -n "$fn" ] || return 1
+    case "$when" in
+        precmd)
+            case " $HX_PRECMD_FUNCS " in *" $fn "*) return 0 ;; esac
+            HX_PRECMD_FUNCS="$HX_PRECMD_FUNCS $fn"
+            hx_cap hooks && HELLISH_PRECMD_FUNCS="${HELLISH_PRECMD_FUNCS:-} $fn"
+            ;;
+        preexec)
+            case " $HX_PREEXEC_FUNCS " in *" $fn "*) return 0 ;; esac
+            HX_PREEXEC_FUNCS="$HX_PREEXEC_FUNCS $fn"
+            hx_cap hooks && HELLISH_PREEXEC_FUNCS="${HELLISH_PREEXEC_FUNCS:-} $fn"
+            ;;
+    esac
+    return 0
+}
+
+# hx_hook_del [precmd|preexec] <function> — unregister, so a plugin can turn
+# itself off without a reload.
+hx_hook_del() {
+    local when="precmd" fn out= f
+    case "$1" in precmd|preexec) when="$1"; shift ;; esac
+    fn="$1"
+    if [ "$when" = precmd ]; then
+        for f in $HX_PRECMD_FUNCS; do [ "$f" = "$fn" ] || out="$out $f"; done
+        HX_PRECMD_FUNCS="$out"
+        hx_cap hooks && HELLISH_PRECMD_FUNCS="$out"
+    else
+        for f in $HX_PREEXEC_FUNCS; do [ "$f" = "$fn" ] || out="$out $f"; done
+        HX_PREEXEC_FUNCS="$out"
+        hx_cap hooks && HELLISH_PREEXEC_FUNCS="$out"
+    fi
+    return 0
+}
+
+hx_hooks_list() {
+    hx_head "hooks"
+    hx_kv "before each prompt"  "${HX_PRECMD_FUNCS:-(none)}"
+    hx_kv "before each command" "${HX_PREEXEC_FUNCS:-(none)}"
+    hx_kv "mechanism" "$(hx_cap hooks && echo 'native HELLISH_*_FUNCS arrays' || echo 'PROMPT_COMMAND dispatch (no native hooks)')"
+    printf '\n'
 }
 
 # --- feature registration ---------------------------------------------------
@@ -77,7 +322,7 @@ hx_set_state() { hx_aset HX_FEAT_STATE "$1" "$2"; }
 
 # --- item registration ------------------------------------------------------
 # hx_item <kind> <name> <owner> <description> [usage]
-#   kind: alias | func | var | opt | cmd | plugin
+#   kind: alias | func | var | opt | cmd | plugin | theme
 hx_item() {
     local kind="$1" name="$2" owner="$3" desc="$4" usage="${5:-}"
     local key="$kind:$name"
@@ -124,8 +369,11 @@ hx_conf_save() {
             printf 'feature %-16s %s\n' "$name" "${HX_FEAT_STATE[$name]}"
         done
         printf '\n'
-        printf 'set %-16s %s\n' HX_THEME     "${HX_THEME:-box}"
+        printf 'set %-16s %s\n' HX_THEME     "${HX_THEME:-vault}"
         printf 'set %-16s %s\n' HX_COLOR     "${HX_COLOR:-auto}"
+        printf 'set %-16s %s\n' HX_NERD      "${HX_NERD:-0}"
+        printf 'set %-16s %s\n' HX_PATH_STYLE "${HX_PATH_STYLE:-smart}"
+        printf 'set %-16s %s\n' HX_PATH_MAX  "${HX_PATH_MAX:-4}"
         printf 'set %-16s %s\n' HX_HIST_SIZE "${HX_HIST_SIZE:-20000}"
     } > "$tmp" && command mv "$tmp" "$HX_CONF"
 }
@@ -164,7 +412,7 @@ hx_load_dir() {
     [ -d "$d" ] || return 0
     for f in "$d"/*; do
         case "$f" in *.hsh|*.zsh) ;; *) continue ;; esac
-        [ -r "$f" ] || continue      # hellish has no working nullglob: guard by hand
+        [ -r "$f" ] || continue      # no nullglob on old binaries: guard by hand
         HX_CURRENT_MODULE="$(hx_module_name "$f")"
         hx_source "$f"
     done
@@ -178,22 +426,6 @@ hx_module_name() {
     b="${b%.hsh}"
     b="${b%.zsh}"
     printf '%s' "${b#*-}"
-}
-
-# hx_shell_bin — the hellish this configuration runs in. Never assumed to be
-# /usr/bin/hellish: a user-mode install (every 42 machine) lives in
-# ~/.local/bin, and `forge lint` hardcoding /usr/bin failed every plugin there
-# with "does not parse: /usr/bin/hellish: No such file or directory".
-hx_shell_bin() {
-    if [ -n "${HELLISH_BIN:-}" ] && [ -x "$HELLISH_BIN" ]; then
-        printf '%s' "$HELLISH_BIN"
-    elif command -v hellish >/dev/null 2>&1; then
-        command -v hellish
-    elif [ -n "${SHELL:-}" ] && [ -x "$SHELL" ]; then
-        printf '%s' "$SHELL"
-    else
-        printf '%s' /usr/bin/hellish
-    fi
 }
 
 HX_CURRENT_MODULE=core

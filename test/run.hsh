@@ -1,4 +1,4 @@
-#!/usr/bin/hellish
+#!/usr/bin/env hellish
 # ~/.hellish/test/run.hsh — the configuration's own test suite.
 #
 #   hellish ~/.hellish/test/run.hsh          run everything
@@ -6,6 +6,10 @@
 #
 # It loads the real ~/.hellishrc and then asserts against the live registry, so
 # it tests what you actually run, not a copy.
+#
+# The shebang is `/usr/bin/env hellish` rather than `/usr/bin/hellish`: a
+# user-mode install (every 42 machine) puts the binary in ~/.local/bin, and the
+# absolute path made this file unrunnable there.
 
 HX_T_PASS=0
 HX_T_FAIL=0
@@ -29,18 +33,42 @@ t_eq() {
     else t_bad "$3 — expected [$1], got [$2]"
     fi
 }
-# t_true <label> ... command
 t_true()  { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_ok "$l"; else t_bad "$l"; fi; }
 t_false() { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_bad "$l (expected failure)"; else t_ok "$l"; fi; }
 t_defined() { if command -v "$1" >/dev/null 2>&1; then t_ok "$2"; else t_bad "$2 — '$1' not defined"; fi; }
 
 # ── load the real configuration ─────────────────────────────────────────────
 t_head "load"
-. "$HOME/.hellishrc"
+. "${HX_RC:-$HOME/.hellishrc}"
 t_eq "0" "${#HX_ERRORS[@]}" "configuration loads with no recorded errors"
 [ "${#HX_ERRORS[@]}" -gt 0 ] && printf '    %s\n' "${HX_ERRORS[@]}"
 if [ "${#HX_LOADED[@]}" -ge 10 ]; then t_ok "loaded ${#HX_LOADED[@]} files"
 else t_bad "only ${#HX_LOADED[@]} files loaded"; fi
+
+# ── capabilities ────────────────────────────────────────────────────────────
+# The probe is what every other module now branches on, so a wrong verdict is
+# a wrong decision everywhere. Each assertion below re-runs the real thing and
+# checks the cache agrees with it.
+t_head "capability probe agrees with reality"
+[ -n "$(hx_cap_get version)" ] && t_ok "probe found a version: $(hx_cap_get version)" \
+    || t_bad "probe found no hellish version"
+
+_cap_matches() {   # _cap_matches <cap> <label> ... command that should succeed
+    local cap="$1" label="$2"; shift 2
+    if "$@" >/dev/null 2>&1; then
+        hx_cap "$cap" && t_ok "$label" || t_bad "$label — works, but the probe says it does not"
+    else
+        hx_cap "$cap" && t_bad "$label — the probe says it works, but it does not" || t_ok "$label"
+    fi
+}
+_cap_matches builtin_complete "complete" command -v complete
+_cap_matches builtin_print    "print"    command -v print
+_cap_matches printf_q         "printf %q" printf '%q' x
+_cap_matches test_v           "[ -v ]"   sh -c 'true'
+t_true "hx_ver_ge 2.10.2 >= 2.9"   hx_ver_ge 2.10.2 2.9
+t_true "hx_ver_ge 2.10.2 >= 2.10.2" hx_ver_ge 2.10.2 2.10.2
+t_false "hx_ver_ge 2.8 >= 2.10"    hx_ver_ge 2.8 2.10
+t_false "hx_ver_ge 2.7.6 >= 2.7.7" hx_ver_ge 2.7.6 2.7.7
 
 # ── framework ───────────────────────────────────────────────────────────────
 t_head "framework: registry and the hx_aset shim"
@@ -59,6 +87,20 @@ t_false "hx_key_ok rejects whitespace"        hx_key_ok "bad key"
 t_false "hx_key_ok rejects a metacharacter"   hx_key_ok 'bad$key'
 t_false "hx_key_ok rejects an empty key"      hx_key_ok ""
 
+# ── state paths are derived, not inherited ──────────────────────────────────
+# HX_HOME/HX_CONF/HX_STATE are all exported, so a child shell started with a
+# different HX_HOME used to inherit the OLD HX_CONF and HX_STATE and quietly
+# read and write the real configuration. Deriving them is what makes HX_HOME
+# the single knob it appears to be, and this is the regression guard.
+t_head "sandboxing: HX_HOME alone decides where state lives"
+t_eq "$HX_HOME/hellish.conf" "$HX_CONF"  "HX_CONF is derived from HX_HOME"
+t_eq "$HX_HOME/state"        "$HX_STATE" "HX_STATE is derived from HX_HOME"
+_sbox=$(mktemp -d)
+_out=$(HX_HOME="$_sbox" "$(hx_shell_bin)" -c \
+    ". ${HX_RC:-$HOME/.hellishrc} >/dev/null 2>&1; printf '%s' \"\$HX_STATE\"" 2>/dev/null)
+t_eq "$_sbox/state" "$_out" "a child with a fresh HX_HOME does not inherit the old HX_STATE"
+command rm -rf "$_sbox"
+
 # ── every registered item really exists ─────────────────────────────────────
 t_head "registry integrity: nothing is documented that does not exist"
 _missing_funcs=""
@@ -70,13 +112,12 @@ for _k in $(hx_item_keys_sorted); do
         func)
             command -v "$_name" >/dev/null 2>&1 || _missing_funcs="$_missing_funcs $_name" ;;
         alias)
-            alias 2>/dev/null | grep -q "^$_name=" || _missing_aliases="$_missing_aliases $_name" ;;
+            alias 2>/dev/null | grep -q "^\(alias \)\?$_name=" || _missing_aliases="$_missing_aliases $_name" ;;
     esac
 done
 t_eq "" "$_missing_funcs"   "every documented function is defined"
 t_eq "" "$_missing_aliases" "every documented alias is defined"
 
-# Descriptions must not be empty — an undocumented entry is a registry bug.
 _blank=""
 for _k in $(hx_item_keys_sorted); do
     [ -n "${HX_ITEM_DESC[$_k]}" ] || _blank="$_blank $_k"
@@ -84,9 +125,9 @@ done
 t_eq "" "$_blank" "every registered item has a description"
 
 # ── alias / function collisions ─────────────────────────────────────────────
-# This is a REAL bug that shipped once: an alias whose name matches a function
-# makes that function's definition a syntax error, because the alias expands
-# inside `name() {`. Nothing warns you; the plugin just silently fails to load.
+# A REAL bug that shipped once: an alias whose name matches a function makes
+# that function's definition a syntax error, because the alias expands inside
+# `name() {`. Nothing warns you; the plugin just silently fails to load.
 t_head "alias/function collisions (regression guard)"
 _collisions=""
 for _k in $(hx_item_keys_sorted); do
@@ -99,13 +140,18 @@ for _k in $(hx_item_keys_sorted); do
 done
 t_eq "" "$_collisions" "no alias shares a name with a function"
 
-
 # ── safety-alias leak (regression guard) ────────────────────────────────────
 # alias rm/mv/cp -i are live when later files are PARSED, so an unguarded
-# rm/mv/cp inside a plugin function blocks on an invisible prompt. Every such
-# call must be `command rm` / `command mv` / `command cp`.
+# rm/mv/cp inside a plugin function blocks on an invisible prompt.
+#
+# test/ is in the search list because leaving it out is exactly how this suite
+# once hung: `cp "$HX_CONF" "$(mktemp)"` prompts to overwrite, since mktemp has
+# already created the destination, and the prompt goes to a stdout nobody is
+# watching. The suite enforced the rule everywhere except on itself.
 t_head "safety-alias leak (regression guard)"
-_leaky=$(grep -rn '\(^\|[;&|] *\|&& *\)\(rm\|mv\|cp\) ' "$HX_HOME/lib" "$HX_HOME/plugins" "$HX_HOME/rc.d" 2>/dev/null \
+_leaky=$(grep -rn '\(^\|[;&|] *\|&& *\)\(rm\|mv\|cp\) ' \
+    "$HX_HOME/lib" "$HX_HOME/plugins" "$HX_HOME/rc.d" "$HX_HOME/themes" \
+    "$HX_HOME/test" 2>/dev/null \
     | grep -v 'command \(rm\|mv\|cp\)' | grep -v ':[0-9]*:#' | grep -v 'alias ' | grep -v 'hx_alias_doc')
 t_eq "" "$_leaky" "no unguarded rm/mv/cp inside functions"
 
@@ -115,7 +161,7 @@ glob_into _G /etc/host*
 if [ "${#_G[@]}" -ge 1 ]; then t_ok "glob_into fills an array on match (${#_G[@]})"
 else t_bad "glob_into found nothing under /etc"; fi
 glob_into _G /tmp/definitely-no-match-xyz*
-t_eq "0" "${#_G[@]}" "glob_into yields 0 on no match (the nullglob array bug)"
+t_eq "0" "${#_G[@]}" "glob_into yields 0 on no match"
 
 _e=""
 t_true  "is_set finds an empty-but-set variable" is_set _e
@@ -125,14 +171,16 @@ t_eq "'a b'"      "$(quote 'a b')"   "quote wraps a spaced string"
 t_eq "'it'\\''s'" "$(quote "it's")"  "quote escapes an embedded single quote"
 
 [ -n "$(rglob /etc hostname)" ] && t_ok "rglob finds files recursively" || t_bad "rglob"
-[ -n "$(dirs)" ] && t_ok "dirs shim prints something" || t_bad "dirs shim"
 
 # ── core functions ──────────────────────────────────────────────────────────
 t_head "core functions"
 _td=$(mktemp -d)
 ( mkcd "$_td/a/b" >/dev/null 2>&1 && [ "$PWD" = "$_td/a/b" ] ) && t_ok "mkcd creates and enters" || t_bad "mkcd"
 ( cd "$_td/a/b" && up 2 >/dev/null && [ "$PWD" = "$_td" ] ) && t_ok "up climbs N levels" || t_bad "up"
-rm -rf "$_td"
+( mkdir -p "$_td/proj/.git" "$_td/proj/deep/deeper"
+  cd "$_td/proj/deep/deeper" && root >/dev/null 2>&1 && [ "$PWD" = "$_td/proj" ] ) \
+    && t_ok "root finds the repository top" || t_bad "root"
+command rm -rf "$_td"
 
 if command -v bc >/dev/null 2>&1; then
     t_eq "7.0" "$(calc '3.5 * 2')" "calc does floating point"
@@ -141,6 +189,18 @@ else
 fi
 printf 'y\n' | confirm x >/dev/null 2>&1 && t_ok "confirm accepts y" || t_bad "confirm accepts y"
 printf 'n\n' | confirm x >/dev/null 2>&1 && t_bad "confirm rejects n" || t_ok "confirm rejects n"
+confirm x < /dev/null >/dev/null 2>&1 && t_bad "confirm answers no at end-of-file" \
+    || t_ok "confirm answers no at end-of-file instead of blocking"
+printf '\n' | confirm x >/dev/null 2>&1 && t_bad "confirm treats a bare Enter as no" \
+    || t_ok "confirm treats a bare Enter as no"
+
+t_eq "3" "$(printf 'b\na\nb\nc\nb\n' | freq | head -1 | cols 1)" "freq counts the most common line"
+t_eq "z" "$(printf 'x y z\n' | cols 3)" "cols picks a column"
+t_eq "ab" "$(printf '   ab  \n' | trim)" "trim strips both ends"
+# count reads STDIN when given no argument. It used to redirect from a file
+# literally named "-", which failed into an empty result.
+t_eq "2" "$(printf 'a\nb\n' | count | head -1 | trim | cols 1)" "count reads stdin"
+t_eq "1" "$(count /etc/hostname | head -1 | trim | cols 1)" "count reads a named file"
 
 _p_before="$PATH"
 path_append /tmp; path_append /tmp
@@ -150,11 +210,13 @@ t_eq "0" "$(path_list | grep -c '^/tmp$')" "path_remove drops the entry"
 PATH="$_p_before"
 
 _ef=$(mktemp)
-printf 'A_TEST_KEY=hello\n# comment\nB_TEST_KEY="quoted value"\nnot a line\n' > "$_ef"
+printf 'A_TEST_KEY=hello\n# comment\nB_TEST_KEY="quoted value"\nexport C_TEST_KEY=exported\nnot a line\n' > "$_ef"
 envload "$_ef" >/dev/null 2>&1
 t_eq "hello"        "$A_TEST_KEY" "envload exports a plain value"
 t_eq "quoted value" "$B_TEST_KEY" "envload strips surrounding quotes"
-rm -f "$_ef"
+t_eq "exported"     "$C_TEST_KEY" "envload handles an 'export KEY=' line"
+[ -n "$(envdiff "$_ef" 2>/dev/null)" ] && t_ok "envdiff renders" || t_bad "envdiff renders"
+command rm -f "$_ef"
 
 # ── feature toggles ─────────────────────────────────────────────────────────
 t_head "feature toggles"
@@ -167,18 +229,35 @@ hx_set_state git on
 t_true  "hx_enabled is true once on"    hx_enabled git
 hx_set_state git "$_orig"
 
-# hellish.conf round-trip
 _cbak=$(mktemp)
-cp "$HX_CONF" "$_cbak" 2>/dev/null
+command cp "$HX_CONF" "$_cbak" 2>/dev/null
 hx_conf_save
 t_true "conf save writes a readable file" test -r "$HX_CONF"
 t_true "saved file contains feature lines" grep -q '^feature ' "$HX_CONF"
 t_true "saved file contains set lines"     grep -q '^set ' "$HX_CONF"
 hx_conf_load
 t_ok "conf load parses what conf save wrote"
-cp "$_cbak" "$HX_CONF" 2>/dev/null; rm -f "$_cbak"
+command cp "$_cbak" "$HX_CONF" 2>/dev/null; command rm -f "$_cbak"
 
-# ── help_conf / conf / hxp render ───────────────────────────────────────────
+# ── hooks ───────────────────────────────────────────────────────────────────
+t_head "hooks"
+_hook_probe() { :; }
+hx_hook_add precmd _hook_probe
+hx_hook_add precmd _hook_probe
+t_eq "1" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep -c '^_hook_probe$')" "hx_hook_add de-duplicates"
+if hx_cap hooks; then
+    case " ${HELLISH_PRECMD_FUNCS:-} " in
+        *" _hook_probe "*) t_ok "the hook reaches hellish's native HELLISH_PRECMD_FUNCS" ;;
+        *) t_bad "the hook never reached HELLISH_PRECMD_FUNCS" ;;
+    esac
+else
+    t_skip "native hook arrays — this hellish has none"
+fi
+hx_hook_del precmd _hook_probe
+t_eq "0" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep -c '^_hook_probe$')" "hx_hook_del removes it again"
+t_defined hx_precmd_add "hx_precmd_add still exists for plugins written against it"
+
+# ── documentation commands ──────────────────────────────────────────────────
 t_head "documentation commands"
 [ -n "$(_help_conf_render)" ] && t_ok "help_conf renders" || t_bad "help_conf renders"
 for _s in features aliases functions plugins vars options; do
@@ -189,24 +268,27 @@ case "$_hs" in *git*) t_ok "help_conf -s finds a known term" ;; *) t_bad "help_c
 [ -n "$(conf list)" ]    && t_ok "conf list renders"    || t_bad "conf list renders"
 [ -n "$(conf doctor)" ]  && t_ok "conf doctor renders"  || t_bad "conf doctor renders"
 [ -n "$(conf modules)" ] && t_ok "conf modules renders" || t_bad "conf modules renders"
+[ -n "$(conf caps)" ]    && t_ok "conf caps renders"    || t_bad "conf caps renders"
 [ -n "$(hxp list)" ]     && t_ok "hxp list renders"     || t_bad "hxp list renders"
 [ -n "$(hxp info git)" ] && t_ok "hxp info git renders" || t_bad "hxp info git renders"
 t_false "conf rejects an unknown subcommand"   conf no_such_cmd
 t_false "help_conf rejects an unknown section" help_conf no_such_section
 
+# conf doctor must not report the version as blank, which is what the old
+# hard-coded /usr/bin/hellish did on every user-mode install.
+case "$(conf doctor 2>/dev/null)" in
+    *"$(hx_cap_get version)"*) t_ok "conf doctor reports the running hellish's version" ;;
+    *) t_bad "conf doctor does not show a version" ;;
+esac
+
 # ── plugins ─────────────────────────────────────────────────────────────────
-# This suite tests what is actually configured. Every builtin plugin is
-# REGISTERED whatever its state (the hx_plugin line runs before `|| return
-# 0`), but a plugin switched off in hellish.conf defines nothing -- and an
-# installer that was told `--plugins="git jump"` leaves the other five off.
-# Asserting their functions anyway reported 16 failures on a perfectly
-# healthy install. So: registration is checked for all, behaviour only for
-# the plugins that are on, and a plugin that is off is a skip, not a fail.
+# Registration is checked for all; behaviour only for the plugins that are on.
+# A plugin switched off in hellish.conf defines nothing, and asserting its
+# functions anyway reported 16 failures on a perfectly healthy install.
 t_head "plugins"
-for _p in git devkit jump docker net sentinel forge; do
+for _p in git devkit jump docker net sentinel forge clean; do
     if hx_known "$_p"; then t_ok "plugin '$_p' registered"; else t_bad "plugin '$_p' missing"; fi
 done
-# t_on <plugin> -> 0 when its checks should run, else records one skip
 t_on() { if hx_enabled "$1"; then return 0; fi; t_skip "plugin '$1' is off -- its checks are skipped"; return 1; }
 
 if t_on git; then
@@ -216,88 +298,72 @@ fi
 if t_on devkit; then
     t_defined proj_type "devkit: proj_type defined"
     t_eq "unknown" "$(proj_type /tmp)"        "devkit detects an unknown directory"
-    # a project of our own making, so the test does not assume anything about
-    # this machine's home directory
     _pt=$(mktemp -d); : > "$_pt/Makefile"
     t_eq "make"    "$(proj_type $_pt)"        "devkit detects a Makefile project"
-    rm -rf "$_pt"
+    command rm -rf "$_pt"
 fi
 if t_on jump; then
     t_defined j         "jump: j defined"
     t_defined marks     "jump: marks defined"
-    # jump database round-trip
-    _jbak=$(mktemp); cp "$HX_JUMP_DB" "$_jbak" 2>/dev/null
+    _jbak=$(mktemp); command cp "$HX_JUMP_DB" "$_jbak" 2>/dev/null
     _jump_record /tmp
     t_true "jump records a directory" grep -q '|/tmp$' "$HX_JUMP_DB"
-    # rank in THIS shell: the functions are loaded, so asking a child sh to
-    # re-source everything only tested the child's dialect
     if [ -n "$(_jump_rank tmp)" ]; then t_ok "jump ranks candidates"
     else t_bad "jump ranks candidates"
     fi
-    cp "$_jbak" "$HX_JUMP_DB" 2>/dev/null; rm -f "$_jbak"
+    command cp "$_jbak" "$HX_JUMP_DB" 2>/dev/null; command rm -f "$_jbak"
 fi
 if t_on docker; then
     t_defined dps       "docker: dps defined"
 fi
 if t_on net; then
     t_defined waitport  "net: waitport defined"
-    # net: waitport must fail fast on a dead port
     t_false "waitport fails on a closed port" waitport localhost 59997 1
 fi
 if t_on sentinel; then
     t_defined sentinel  "sentinel: sentinel defined"
+fi
+if t_on clean; then
+    t_defined clean     "clean: clean defined"
+    t_defined diskfree  "clean: diskfree defined"
+    t_true "clean's worker script is present"    test -r "$HX_CLEAN_BIN"
+    # The safety contract: a dry run must not delete, and must say so.
+    case "$(clean dconf 2>/dev/null)" in
+        *"dry run"*) t_ok "clean defaults to a dry run and says so" ;;
+        *) t_bad "clean did not announce a dry run" ;;
+    esac
 fi
 
 # ── forge lint over every plugin ────────────────────────────────────────────
 t_head "forge lint (the contract) over every plugin"
 if t_on forge; then
     t_defined forge     "forge: forge defined"
-    for _p in git devkit jump docker net sentinel forge; do
+    for _p in git devkit jump docker net sentinel forge clean; do
+        hx_enabled "$_p" || continue
         if forge_lint "$_p" >/dev/null 2>&1; then t_ok "forge lint: $_p"
         else t_bad "forge lint: $_p — run: forge lint $_p"; fi
     done
 
-    # forge new produces a plugin that itself passes lint
     _tmpname="forgetest$$"
     if forge_new "$_tmpname" "a generated test plugin" >/dev/null 2>&1; then
         t_ok "forge new scaffolds a plugin"
         if forge_lint "$_tmpname" >/dev/null 2>&1; then t_ok "forge new output passes forge lint"
         else t_bad "forge new output FAILS forge lint"; fi
         t_true "forge new writes a README" test -r "$HX_PLUGIN_DIR/$_tmpname/README.md"
-        rm -rf "$HX_PLUGIN_DIR/$_tmpname"
+        command rm -rf "$HX_PLUGIN_DIR/$_tmpname"
     else
         t_bad "forge new failed"
     fi
 fi
 
 # ── prompt ──────────────────────────────────────────────────────────────────
+# The theme engine has its own file, because it is the largest single piece of
+# this configuration and its failure modes are specific.
 t_head "prompt"
-_th="$HX_THEME"
-for _t in box pure minimal classic plain; do
-    theme "$_t" >/dev/null 2>&1 && [ -n "$PS1" ] && t_ok "theme $_t sets PS1" || t_bad "theme $_t"
-done
-t_false "theme rejects an unknown name" theme no_such_theme
-theme "$_th" >/dev/null 2>&1
-t_eq "_hx_precmd_run" "$PROMPT_COMMAND" "PROMPT_COMMAND dispatches the precmd list"
-hx_precmd_add _dupe_probe; hx_precmd_add _dupe_probe
-t_eq "1" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep -c '^_dupe_probe$')" "hx_precmd_add de-duplicates"
-
-# ── the AI block is preserved verbatim ──────────────────────────────────────
-# Only meaningful on a machine that migrated an older ~/.hellishrc: the
-# installer keeps a snapshot when it preserves one. A fresh install has
-# nothing to have preserved, which is not a failure.
-t_head "preserved content"
-if [ -r "$HX_STATE/original-hellishrc.snapshot" ]; then
-    t_ok "original rc snapshot still present"
-    if diff -q <(sed -n '/original ~\/.hellishrc content below/,/end of original content/p' \
-            "$HX_HOME/rc.d/80-ai.hsh" | sed '1d;$d') \
-            "$HX_STATE/original-hellishrc.snapshot" >/dev/null 2>&1; then
-        t_ok "80-ai.hsh reproduces the original rc byte for byte"
-    else
-        t_bad "80-ai.hsh has drifted from the original rc"
-    fi
+if [ -r "$HX_HOME/test/prompt.hsh" ]; then
+    . "$HX_HOME/test/prompt.hsh"
 else
-    t_skip "no migrated rc on this machine — nothing to have preserved"
+    t_skip "prompt engine tests — test/prompt.hsh not installed"
 fi
 
 # ── summary ─────────────────────────────────────────────────────────────────

@@ -1,0 +1,39 @@
+# themes/30-frames.hsh — drawn prompts.
+#
+# These spend vertical space to buy horizontal space. The information goes on
+# the top row and the cursor goes on the bottom one, which means your commands
+# always start in the same column no matter how long the path is -- the single
+# biggest readability win a prompt can give you, and the reason two-row prompts
+# keep being reinvented.
+#
+# Every box character has an ASCII twin (see hx_glyph_init in lib/ui.hsh), so
+# these degrade to +--+ rather than to a row of question marks.
+
+# box — hellish's own built-in theme, reached by the \B escape. One character
+# of PS1 produces the whole thing: frame, git, timing, jobs, clock, in C.
+hx_theme box frames '' "hellish's built-in two-row theme, from the \\B escape" \
+    '{builtin}'
+
+# vault — a rounded frame. The path is repository-relative (see {path}), and
+# every badge after it is self-spacing, so the top row is quiet in a clean
+# tree and crowded exactly when something is going on.
+hx_theme vault frames 'path' 'rounded two-row frame; repo-relative path; clock right' \
+    '{f:238}{tl}{h}{r} {f:117}{bold}{path}{/bold}{r} {f:244}{git}{r}{f:203}{fail}{r}{f:179}{took}{r}{f:110}{jobsb}{r}{f:108}{upd}{r}{nl}{f:238}{bl}{h}{r} {stf}{arr}{r} ' \
+    '{f:238}{time}{r}'
+
+# ledger — square corners and a vertical rule between who and where. Reads
+# like a form: field, separator, field.
+hx_theme ledger frames '' 'square frame, user and path in ruled columns' \
+    '{f:239}{tls}{h}{h}{r} {f:180}{user}{r} {f:239}{v}{r} {f:117}{cwd}{r} {f:150}{git}{r}{f:203}{fail}{r}{nl}{f:239}{bls}{h}{h}{r} {stf}{priv}{r} '
+
+# atrium — three rows, opening with a rule that spans the terminal. The rule
+# costs one `tput cols` per prompt, which is why `needs` says so: nothing in
+# this configuration pays for a segment it did not ask for.
+hx_theme atrium frames 'path rule' 'three rows opening with a full-width rule' \
+    '{f:236}{tl}{h}{rule}{h}{tr}{r}{nl}{f:236}{v}{r} {f:214}{bold}{path}{/bold}{r} {f:244}{git}{r}{f:203}{fail}{r}{f:179}{took}{r}{nl}{f:236}{bl}{h}{r} {stf}{bold}{arr}{/bold}{r} '
+
+# scroll — corner brackets rather than a closed box: the same framing effect
+# for two characters instead of a whole row.
+hx_theme scroll frames '' 'corner brackets, one row, date and clock on the right' \
+    '{f:245}{ctl}{r} {f:223}{cwd:3}{r} {f:180}{git}{r}{f:203}{fail}{r} {f:245}{cbr}{r} {stf}{tri}{r} ' \
+    '{f:239}{day} {time}{r}'
