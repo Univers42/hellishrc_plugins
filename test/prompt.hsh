@@ -106,11 +106,29 @@ done
 t_eq "" "$_nodesc" "every theme has a description"
 
 # ── token expansion ─────────────────────────────────────────────────────────
-hx_prompt_expand '{f:117}x{r}'
+# {f:N} degrades with the terminal: %F{N} at 256 colours and above, the
+# nearest of the basic eight below that, nothing at all without colour.
+# The depth is pinned for each assertion, because the machine's terminal
+# is not what is under test: asserting the 256-colour answer alone was
+# green on every developer's terminal and red on every CI runner, where
+# TERM is xterm (8 colours) or unset (none).
+_depth="${HX_COLOR_DEPTH-}"
+HX_COLOR_DEPTH=256; hx_prompt_expand '{f:117}x{r}'
 case "$HX_RET" in
-    '%F{117}x%f%k%b') t_ok "hx_prompt_expand turns {f:N} into %F{N}" ;;
-    *) t_bad "hx_prompt_expand produced [$HX_RET]" ;;
+    '%F{117}x%f%k%b') t_ok "hx_prompt_expand turns {f:N} into %F{N} at 256 colours" ;;
+    *) t_bad "hx_prompt_expand at 256 colours produced [$HX_RET]" ;;
 esac
+HX_COLOR_DEPTH=8; hx_prompt_expand '{f:117}x{r}'
+case "$HX_RET" in
+    '%F{4}x%f%k%b') t_ok "{f:117} degrades to the basic eight (%F{4}) at 8 colours" ;;
+    *) t_bad "hx_prompt_expand at 8 colours produced [$HX_RET]" ;;
+esac
+HX_COLOR_DEPTH=none; hx_prompt_expand '{f:117}x{r}'
+case "$HX_RET" in
+    'x%f%k%b') t_ok "{f:N} is dropped without colour; the width-free resets stay" ;;
+    *) t_bad "hx_prompt_expand without colour produced [$HX_RET]" ;;
+esac
+if [ -n "$_depth" ]; then HX_COLOR_DEPTH="$_depth"; else unset HX_COLOR_DEPTH; fi
 
 hx_prompt_expand '{stf}'
 case "$HX_RET" in
