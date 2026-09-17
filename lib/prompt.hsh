@@ -642,6 +642,8 @@ prompt() {
         preview|demo)   _prompt_preview "$@" ;;
         gallery)        _prompt_gallery ;;
         save)           _prompt_save "${1:-$HX_THEME}" ;;
+        ps1)            _prompt_raw PS1 "$@" ;;
+        prompt)         _prompt_raw PROMPT "$@" ;;
         edit)           _prompt_edit "${1:-$HX_THEME}" ;;
         new)            _prompt_new "$@" ;;
         export|dump)    _prompt_export "${1:-$HX_THEME}" ;;
@@ -671,6 +673,8 @@ _prompt_help() {
     hx_kv "prompt list [family]" "every theme, grouped; the active one marked"
     hx_kv "prompt <name>"       "switch now (this session only)"
     hx_kv "prompt save [name]"  "switch and make it the default for new shells"
+    hx_kv "prompt ps1 'STR'"    "use a PS1 you wrote, and keep it (--clear to undo)"
+    hx_kv "prompt prompt 'STR'" "the same for PROMPT, in zsh's % syntax"
     hx_kv "prompt next | prev"  "walk the list"
     hx_kv "prompt random"       "one you have not thought of"
     hx_kv "prompt preview [n]"  "render one theme, or all of them, with live data"
@@ -722,10 +726,17 @@ _prompt_list() {
     hx_note "prompt <name> to switch  ·  prompt preview to see them all"
 }
 
+# Picking a theme retires a hand-written prompt, and says so. Leaving the
+# override in place would make every `prompt <theme>` look broken: the
+# theme is applied, the file is sourced after it, and nothing changes.
 _prompt_set() {
     local n="$1"
     [ -n "$n" ] || { _prompt_status; return 0; }
     hx_prompt_apply "$n" || return 1
+    if [ -f "$HX_PROMPT_LOCAL" ]; then
+        command rm -f "$HX_PROMPT_LOCAL"
+        hx_info "your saved PS1 was dropped; the theme draws the prompt now"
+    fi
     printf '%s%s%s  ' "$HX_GRN" "$n" "$HX_R"
     hx_prompt_render "$n"
     printf '\n'
@@ -812,6 +823,56 @@ _prompt_save() {
     HX_THEME="$n"
     hx_conf_save
     hx_ok "$n — saved; every new shell starts with it"
+}
+
+# ── a prompt of your own, kept ──────────────────────────────────────────────
+# `prompt <theme>` picks from the registry; this is for the string you wrote
+# yourself. It lives in its own sourced file rather than in hellish.conf,
+# and that is not a style choice: conf is read with `read -r kind a b`,
+# which drops the trailing space, and virtually every PS1 ends with one
+# ('\u \w ❯ '). A file that IS shell round-trips the bytes exactly, stays
+# hand-editable, and carries PS1 and PROMPT with the same mechanism.
+HX_PROMPT_LOCAL="${HX_PROMPT_LOCAL:-$HX_HOME/prompt.local.hsh}"
+
+# Single-quote a value for the file, the only escape shell single quotes
+# need: end the quote, add an escaped quote, start again.
+_prompt_q() {
+    printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+# Write the override and load it now, so the next prompt shows it.
+_prompt_local_write() {
+    local var="$1" val="$2" tmp="$HX_PROMPT_LOCAL.tmp.$$"
+    {
+        printf '# %s — written by `prompt %s`. Hand-editing is fine.\n' \
+            "${HX_PROMPT_LOCAL##*/}" "$(printf '%s' "$var" | tr 'A-Z' 'a-z')"
+        printf '# Sourced after the theme, so it wins. Remove it, or run\n'
+        printf '# `prompt %s --clear`, to go back to the theme.\n\n' \
+            "$(printf '%s' "$var" | tr 'A-Z' 'a-z')"
+        printf 'unset PS1 PROMPT\n'
+        printf '%s=%s\n' "$var" "$(_prompt_q "$val")"
+    } > "$tmp" && command mv "$tmp" "$HX_PROMPT_LOCAL" || {
+        hx_err "cannot write $HX_PROMPT_LOCAL"; return 1; }
+    . "$HX_PROMPT_LOCAL"
+    hx_ok "$var kept — every new shell starts with it"
+}
+
+# prompt ps1 [STRING|--clear] / prompt prompt [STRING|--clear]
+_prompt_raw() {
+    local var="$1" val="$2"
+    if [ $# -lt 2 ]; then
+        if [ -n "${!var:-}" ]; then printf '%s\n' "${!var}"
+        else hx_info "$var is unset; the theme '$HX_THEME' is drawing the prompt"; fi
+        return 0
+    fi
+    if [ "$val" = "--clear" ] || [ "$val" = "-c" ]; then
+        command rm -f "$HX_PROMPT_LOCAL"
+        unset PS1 PROMPT
+        hx_prompt_apply "$HX_THEME" >/dev/null 2>&1
+        hx_ok "cleared — back to the theme '$HX_THEME'"
+        return 0
+    fi
+    _prompt_local_write "$var" "$val"
 }
 
 _prompt_edit() {

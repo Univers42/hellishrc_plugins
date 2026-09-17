@@ -325,3 +325,45 @@ if [ "${_hx_prompt_standalone:-0}" = "1" ]; then
     printf '\n\n'
     [ "$HX_T_FAIL" -eq 0 ]
 fi
+
+# ── a prompt of your own (prompt ps1 / prompt prompt) ───────────────────────
+# The trailing space is the whole reason this lives in its own file rather
+# than in hellish.conf: conf is read with `read -r kind a b`, which drops
+# it, and nearly every PS1 ends with one. The `$?` case matters for the
+# same class of reason -- it must survive to render time as four literal
+# characters, not be expanded when the file is sourced.
+t_head "a prompt of your own"
+_pl_save="$HX_PROMPT_LOCAL"
+HX_PROMPT_LOCAL="${TMPDIR:-/tmp}/hx_ps1_$$.hsh"
+_was_theme="$HX_THEME"
+
+prompt ps1 'own \w $ ' >/dev/null 2>&1
+t_eq 'own \w $ ' "$PS1" "prompt ps1 sets PS1, trailing space and all"
+[ -f "$HX_PROMPT_LOCAL" ] && t_ok "prompt ps1 writes the override file" \
+    || t_bad "prompt ps1 writes the override file"
+
+unset PS1
+. "$HX_PROMPT_LOCAL"
+t_eq 'own \w $ ' "$PS1" "the file round-trips the prompt byte for byte"
+
+prompt ps1 "it's [\$?] \$ " >/dev/null 2>&1
+unset PS1
+. "$HX_PROMPT_LOCAL"
+t_eq "it's [\$?] \$ " "$PS1" "a quote survives, and \$? stays literal"
+
+prompt ps1 --clear >/dev/null 2>&1
+[ -f "$HX_PROMPT_LOCAL" ] && t_bad "prompt ps1 --clear removes the override" \
+    || t_ok "prompt ps1 --clear removes the override"
+
+prompt ps1 'doomed $ ' >/dev/null 2>&1
+prompt "$_was_theme" >/dev/null 2>&1
+[ -f "$HX_PROMPT_LOCAL" ] && t_bad "picking a theme drops a saved PS1" \
+    || t_ok "picking a theme drops a saved PS1"
+
+prompt prompt '%n %~ %# ' >/dev/null 2>&1
+t_eq '%n %~ %# ' "$PROMPT" "prompt prompt sets PROMPT in zsh syntax"
+
+command rm -f "$HX_PROMPT_LOCAL"
+HX_PROMPT_LOCAL="$_pl_save"
+unset _pl_save _was_theme
+hx_prompt_apply "$HX_THEME" >/dev/null 2>&1

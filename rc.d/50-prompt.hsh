@@ -64,6 +64,14 @@ if ! hx_theme_known "$HX_THEME"; then
 fi
 hx_prompt_apply "$HX_THEME" >/dev/null 2>&1
 
+# A prompt the user wrote themselves wins over the theme, and is loaded
+# after it for exactly that reason (`prompt ps1 '<string>'` writes it).
+# Its own file rather than hellish.conf: conf is read with `read -r`,
+# which eats the trailing space nearly every PS1 ends with.
+HX_PROMPT_LOCAL="${HX_PROMPT_LOCAL:-$HX_HOME/prompt.local.hsh}"
+[ -r "$HX_PROMPT_LOCAL" ] && . "$HX_PROMPT_LOCAL"
+hx_var_doc HX_PROMPT_LOCAL "a PS1/PROMPT you saved with \`prompt ps1\`; overrides the theme"
+
 hx_var_doc HX_THEME      "the prompt theme (prompt list to browse, prompt save to keep)"
 hx_var_doc HX_PATH_STYLE "how {path} is drawn: smart | short | fish | tail | full"
 hx_var_doc HX_PATH_MAX   "path components before {path} elides the middle"
