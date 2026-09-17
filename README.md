@@ -111,11 +111,27 @@ registry — never edit it by hand:
 hellish ~/.hellish/bin/hx-gendoc > docs/reference.md
 ```
 
+## Examples
+
+`examples/hellishrc` is a standalone, single-file `~/.hellishrc` — 30 prompt
+themes, a context collector layer and an `hx` command suite, with no dependency
+on `~/.hellish/lib` or anything else here. It is the "one file, drop it in"
+counterpart to the framework above.
+
+```sh
+cp examples/hellishrc ~/.hellishrc && exec hellish
+hx help
+```
+
+See `examples/README.md` for what it collects, how it is configured, and the
+four hellish-vs-bash differences it works around.
+
 ## Test
 
 ```sh
 hellish test/run.hsh        # loads the real config, asserts the registry
 hellish test/prompt.hsh     # the theme engine, against the running binary
+hellish test/examples_prompt.hsh   # examples/hellishrc; also runs under bash
 ```
 
 Both honour `HX_HOME`, so they can be pointed at a throwaway tree:

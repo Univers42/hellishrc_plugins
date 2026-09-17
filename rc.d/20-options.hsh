@@ -90,9 +90,10 @@ hx_opt_doc "cd-spell"          "cd tolerates a one-character typo"
 # that happens to be a directory name into a silent cd.
 # pretty on auto-cd
 
-# NOTE: resize-aware tracks the size internally but does NOT export $COLUMNS
-# or $LINES -- both are unset in every hellish so far, where bash maintains
-# them in interactive shells. Anything here that needs the width forks `tput
-# cols` instead, which is why hx_cols caches the answer and why a prompt theme
-# has to ask for the `rule` segment rather than getting one for free.
-hx_var_doc COLUMNS "NOT maintained by hellish (bash sets it); hx_cols forks tput and caches"
+# NOTE: hellish maintains $COLUMNS and $LINES in interactive shells, and
+# resize-aware (checkwinsize) is what keeps them current -- refreshed before
+# each top-level command, so a resize is visible to the very next one. They
+# are shell variables, not exported ones, exactly as in bash: a child measures
+# its own terminal. So anything here that needs the width reads $COLUMNS and
+# only falls back to forking `tput cols` when it is unset (see hx_cols).
+hx_var_doc COLUMNS "maintained by hellish in interactive shells; hx_cols reads it, tput only as fallback"

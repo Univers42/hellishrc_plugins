@@ -44,8 +44,14 @@ _hx_precmd_run() {
     done
     return 0
 }
-PROMPT_COMMAND='_hx_precmd_run'
-hx_var_doc PROMPT_COMMAND "the fallback prompt hook; inert when hellish has native HELLISH_PRECMD_FUNCS"
+# Only when the native hook arrays are missing. _hx_precmd_run returns on its
+# first line when `hx_cap hooks` is true, but "returns immediately" is not
+# free: the shell still dispatches PROMPT_COMMAND once per prompt, and on
+# hellish that is a full lex+parse+execute of the string. Setting it alongside
+# HELLISH_PRECMD_FUNCS bought a wasted pipeline round-trip on every prompt to
+# call a function whose first line is `return 0`.
+hx_cap hooks || PROMPT_COMMAND='_hx_precmd_run'
+hx_var_doc PROMPT_COMMAND "the fallback prompt hook; unset when hellish has native HELLISH_PRECMD_FUNCS"
 
 # ── apply ───────────────────────────────────────────────────────────────────
 # hellish.conf may name a theme that no longer exists -- an upgrade removed it,

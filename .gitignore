@@ -1,2 +1,5 @@
 state/
 *.swp
+
+# Never commit the GitHub token used by the maintenance scripts.
+.env

@@ -176,10 +176,24 @@ hx_glyph_init() {
 hx_glyph_init
 
 # ── 4. terminal geometry ────────────────────────────────────────────────────
-# $COLUMNS is not maintained by hellish, so width costs a fork. hx_cols caches
-# it for the life of the shell unless asked to refresh: a prompt that shells
-# out to `tput` on every keystroke is the classic slow-prompt bug.
+# Terminal width, without a fork when one can be avoided.
+#
+# hellish DOES maintain $COLUMNS and $LINES (src/environment/winsize.c): both
+# are refreshed at startup and again before each top-level command, which is
+# bash's checkwinsize behaviour. They are shell variables rather than exported
+# ones -- also as in bash, since a child measures its own terminal -- so
+# $COLUMNS is readable here even though `env` does not list it. The note this
+# replaces said the opposite, and every width query paid `tput` for a number
+# the shell already had.
+#
+# The cache below stays for the case where $COLUMNS is genuinely absent (an
+# older hellish, or another shell): a prompt that shells out on every
+# keystroke is the classic slow-prompt bug.
 hx_cols() {
+    case "${COLUMNS:-}" in
+        ''|*[!0-9]*) ;;
+        *) if [ "$COLUMNS" -ge 20 ]; then printf '%s' "$COLUMNS"; return 0; fi ;;
+    esac
     if [ "${1:-}" = "-r" ] || [ -z "${HX_COLS:-}" ]; then
         HX_COLS=$(tput cols 2>/dev/null || echo 80)
         case "$HX_COLS" in ''|*[!0-9]*) HX_COLS=80 ;; esac

@@ -1,0 +1,262 @@
+#!/usr/bin/env hellish
+# test/examples_prompt.hsh — assertions for examples/hellishrc.
+#
+# Named apart from test/prompt.hsh, which is a different suite: that one
+# guards the theme engine in lib/prompt.hsh and is sourced by run.hsh.
+# This one stands alone and loads examples/hellishrc instead.
+#
+#   hellish test/examples_prompt.hsh
+#
+# Loads the rc with HX_FORCE=1 (which bypasses the interactivity guard) into
+# the current shell, then checks the collectors, the theme registry and the
+# helpers that the prompt depends on. Everything here runs without a tty.
+
+HX_RC_UNDER_TEST="${HX_RC_UNDER_TEST:-$(dirname "$0")/../examples/hellishrc}"
+HX_FORCE=1
+HX_PROMPT_CONF=/dev/null
+. "$HX_RC_UNDER_TEST"
+
+hx_fail=0
+hx_run=0
+
+ck() {
+    hx_run=$((hx_run + 1))
+    if [ "$2" = "$3" ]; then
+        printf '  %sok%s   %s\n' "$HX_fgreen" "$HX_r" "$1"
+    else
+        printf '  %sFAIL%s %s\n        got  [%s]\n        want [%s]\n' \
+            "$HX_fred" "$HX_r" "$1" "$2" "$3"
+        hx_fail=$((hx_fail + 1))
+    fi
+}
+
+ckn() {   # non-empty
+    hx_run=$((hx_run + 1))
+    if [ -n "$2" ]; then
+        printf '  %sok%s   %s = %s\n' "$HX_fgreen" "$HX_r" "$1" "$2"
+    else
+        printf '  %sFAIL%s %s is empty\n' "$HX_fred" "$HX_r" "$1"
+        hx_fail=$((hx_fail + 1))
+    fi
+}
+
+printf '\n%sregistry%s\n' "$HX_bd$HX_forange" "$HX_r"
+ck 'HX_THEMES has 30 entries' "$(printf '%s\n' $HX_THEMES | grep -c .)" 30
+hx_missing=''
+for hx_t in $HX_THEMES; do
+    command -v "hx_theme_$hx_t" >/dev/null 2>&1 || hx_missing="$hx_missing $hx_t"
+done
+ck 'every listed theme is defined' "$hx_missing" ''
+
+printf '\n%severy theme renders%s\n' "$HX_bd$HX_forange" "$HX_r"
+hx_collect 0
+hx_bad=''
+for hx_t in $HX_THEMES; do
+    HX_THEME="$hx_t"; hx_build
+    [ -n "$HX_PS1" ] || hx_bad="$hx_bad $hx_t"
+done
+ck 'with colour, live data' "$hx_bad" ''
+
+HX_COLOR=none; hx_palette; hx_collect 0
+hx_bad=''
+for hx_t in $HX_THEMES; do
+    HX_THEME="$hx_t"; hx_build
+    [ -n "$HX_PS1" ] || hx_bad="$hx_bad $hx_t"
+    # With colour off nothing may emit an escape.
+    case "$HX_PS1" in *"$HX_ESC"*) hx_bad="$hx_bad esc:$hx_t" ;; esac
+done
+ck 'with HX_COLOR=none, no escapes' "$hx_bad" ''
+HX_COLOR=24; hx_palette
+HX_THEME=hellish
+
+# A colour variable written without braces runs on into whatever follows it:
+# the shell then looks up one long undefined name, expands it to nothing, and
+# the text disappears with no error. That is what ate the hex theme's marker.
+# Every HX_ name the file mentions must therefore resolve to a real variable.
+printf '\n%sno undefined HX_ references%s\n' "$HX_bd$HX_forange" "$HX_r"
+hx_vwidth x                     # defines HX_W, which is set on first use
+HX_KNS="${HX_KNS-}"             # optional kube namespace override
+HX_RC="${HX_RC-}"               # optional path override for `hx reload`
+hx_undef=''
+for hx_n in $(grep -o '\$HX_[A-Za-z_][A-Za-z0-9_]*\|\${HX_[A-Za-z_][A-Za-z0-9_]*' \
+                  "$HX_RC_UNDER_TEST" | sed 's/^\${*//' | sort -u); do
+    eval "hx_v=\${$hx_n+set}"
+    [ -n "$hx_v" ] || hx_undef="$hx_undef $hx_n"
+done
+ck 'every $HX_ name resolves' "$hx_undef" ''
+
+printf '\n%sutilities%s\n' "$HX_bd$HX_forange" "$HX_r"
+hx_dur 500;    ck 'hx_dur 500'    "$HX_RET" '500ms'
+hx_dur 1500;   ck 'hx_dur 1500'   "$HX_RET" '1.5s'
+hx_dur 90000;  ck 'hx_dur 90000'  "$HX_RET" '1m30s'
+hx_dur 7200000;ck 'hx_dur 7200000' "$HX_RET" '2h0m'
+hx_repeat '-' 4; ck 'hx_repeat'   "$HX_RET" '----'
+hx_ms10 1650 40; ck 'hx_ms10'     "$HX_RET" '41.2 ms'
+
+hx_strip "$(printf '\033[38;5;80mHI\033[0m!')"
+ck 'hx_strip removes SGR' "$HX_RET" 'HI!'
+hx_vwidth "$(printf '\033[1m12:34:56\033[0m')"
+ck 'hx_vwidth ignores escapes' "$HX_W" 8
+
+hx_signame 139; ck 'hx_signame 139' "$HX_RET" 'SIGSEGV'
+hx_signame 130; ck 'hx_signame 130' "$HX_RET" 'SIGINT'
+hx_signame 1;   ck 'hx_signame 1'   "$HX_RET" ''
+
+HX_PATH_STYLE=full; HX_PATH_MAX=2
+hx_shorten "$HOME/a/b/c"; ck 'hx_shorten elides' "$HX_RET" "$HX_G_ELL/b/c"
+HX_PATH_STYLE=tail
+hx_shorten "$HOME/a/b/c"; ck 'hx_shorten tail'   "$HX_RET" 'c'
+HX_PATH_STYLE=full; HX_PATH_MAX=4
+
+printf '\n%sconfig safety%s\n' "$HX_bd$HX_forange" "$HX_r"
+ck 'HX_HOME is not settable'  "$(hx_key_valid HX_HOME  && echo yes || echo no)" 'no'
+ck 'HX_STATE is not settable' "$(hx_key_valid HX_STATE && echo yes || echo no)" 'no'
+ck 'HX_THEME is settable'     "$(hx_key_valid HX_THEME && echo yes || echo no)" 'yes'
+# hx_key_valid must not clobber its caller's loop variable (it used to).
+hx_k=sentinel; hx_key_valid HX_THEME >/dev/null
+ck 'hx_key_valid keeps hx_k'  "$hx_k" 'sentinel'
+# NB: written with `if`, not `$(case ...)`. hellish cannot parse a case
+# statement inside a command substitution (bash and dash both can), so that
+# construct is avoided throughout this repository.
+hx_clash=separate
+case "$HX_PROMPT_CONF" in */hellish.conf) hx_clash=clash ;; esac
+ck 'prompt conf is not hellish.conf' "$hx_clash" 'separate'
+
+printf '\n%sclock%s\n' "$HX_bd$HX_forange" "$HX_r"
+ckn 'clock source' "$HX_CLOCK"
+hx_now_ms; hx_t0="$HX_RET"
+hx_now_ms; hx_t1="$HX_RET"
+ck 'hx_now_ms is monotonic' "$([ "$hx_t1" -ge "$hx_t0" ] && echo yes || echo no)" 'yes'
+hx_num=yes
+case "$hx_t0" in ''|*[!0-9]*) hx_num=no ;; esac
+ck 'hx_now_ms is numeric' "$hx_num" 'yes'
+# The preexec guard is what makes durations work at all; see section 11.
+HX_ARMED=0; HX_T0=''
+hx_preexec; hx_first="$HX_T0"
+hx_preexec                      # the second DEBUG fire must not re-stamp
+ck 'preexec double-fire guarded' "$HX_T0" "$hx_first"
+
+printf '\n%scollectors%s\n' "$HX_bd$HX_forange" "$HX_r"
+hx_collect 0
+ckn 'HX_P'  "$HX_P"
+ckn 'HX_U'  "$HX_U"
+ck  'HX_X'  "$HX_X" 0
+hx_collect 139
+ck  'HX_XSIG for 139' "$HX_XSIG" 'SIGSEGV'
+ck  'HX_XOK for 139'  "$HX_XOK" 0
+
+# The prompt is on the hot path: a held Enter key renders it as fast as the
+# terminal repeats. It used to start nine processes per render (git seven
+# times, date, a subshell for jobs), 77 ms a prompt in a repository with
+# submodules. Stand-ins for git and date, first on PATH, log every call.
+# hellish's own background scan runs git too -- always as `git -C <root>`,
+# which the rc never does -- so those calls are not counted as the hook's.
+printf '\n%sthe prompt hook%s\n' "$HX_bd$HX_forange" "$HX_r"
+pt_tmp=$(mktemp -d)
+mkdir "$pt_tmp/bin" "$pt_tmp/repo" "$pt_tmp/up"
+pt_git=$(command -v git)
+pt_date=$(command -v date)
+if [ -n "$pt_git" ]; then
+    (
+        cd "$pt_tmp/up" && git init -q --bare -b main
+        cd "$pt_tmp/repo" && git init -q -b main
+        git config user.email t@t && git config user.name t
+        echo a > a && echo b > b && git add a b && git commit -qm 1
+        git remote add origin "$pt_tmp/up" && git push -q origin main
+        git branch -q -u origin/main
+        echo c > c && git add c && git commit -qm 2
+        echo s >> a && git stash -q
+        echo u >> a && echo t >> b && git add b && : > new
+    ) >/dev/null 2>&1
+    printf '#!/bin/sh\necho "git $1" >> "%s/calls"\nexec "%s" "$@"\n' \
+        "$pt_tmp" "$pt_git" > "$pt_tmp/bin/git"
+    printf '#!/bin/sh\necho date >> "%s/calls"\nexec "%s" "$@"\n' \
+        "$pt_tmp" "$pt_date" > "$pt_tmp/bin/date"
+    chmod +x "$pt_tmp/bin/git" "$pt_tmp/bin/date"
+    pt_path="$PATH"
+    PATH="$pt_tmp/bin:$PATH"
+    pt_here="$PWD"
+    cd "$pt_tmp/repo"
+    hx_precmd >/dev/null 2>&1
+    sleep 1                     # let a background scan finish
+    : > "$pt_tmp/calls"
+    pt_i=0
+    while [ "$pt_i" -lt 20 ]; do
+        hx_precmd >/dev/null 2>&1
+        pt_i=$((pt_i + 1))
+    done
+    pt_git_n=$(grep -c '^git [^-]\|^git --no' "$pt_tmp/calls")
+    pt_date_n=$(grep -c '^date' "$pt_tmp/calls")
+    if [ "$HX_NATIVE" = "1" ]; then
+        ck '20 prompts start no git (native)' "$pt_git_n" 0
+    else
+        ck '20 prompts start one git each' "$pt_git_n" 20
+    fi
+    if [ "$HX_SHELL" = "posix" ]; then
+        ck '20 prompts, one date each (dash)' "$pt_date_n" 20
+    else
+        ck '20 prompts start no date' "$pt_date_n" 0
+    fi
+
+    printf '\n%sthe git label%s\n' "$HX_bd$HX_forange" "$HX_r"
+    hx_git_collect; hx_git_label
+    ck 'staged, unstaged, untracked, ahead, stash' "$HX_GLABEL" \
+        "main+~? ${HX_G_UP}1 ${HX_G_STASH}1"
+    ck 'repository name' "$HX_GREPO" repo
+    if [ "$HX_NATIVE" = "1" ]; then
+        pt_native_label="$HX_GLABEL"
+        HX_NATIVE=0
+        hx_git_collect; hx_git_label
+        HX_NATIVE=1
+        ck 'native and portable paths agree' "$HX_GLABEL" "$pt_native_label"
+    fi
+    mkdir -p sub/dir && cd sub/dir
+    hx_git_collect; hx_git_label
+    ck 'from a subdirectory' "$HX_GLABEL" \
+        "main+~? ${HX_G_UP}1 ${HX_G_STASH}1"
+    cd "$pt_tmp/repo"
+    git checkout -q --detach HEAD 2>/dev/null
+    hx_git_collect
+    pt_det=no
+    case "$HX_GB" in "$HX_G_DIAM"???????) pt_det=yes ;; esac
+    ck 'detached HEAD shows the short commit' "$pt_det" yes
+    cd "$pt_tmp"
+    hx_git_collect
+    ck 'outside a repository: no segment' "$HX_GB" ''
+    PATH="$pt_path"
+    cd "$pt_here"
+fi
+command rm -rf "$pt_tmp"
+
+if [ "$HX_NATIVE" = "1" ]; then
+    printf '\n%sright prompt (native)%s\n' "$HX_bd$HX_forange" "$HX_r"
+    HX_RPS1='50% done'; HX_RPROMPT=1
+    hx_rprompt_native
+    ck 'RPROMPT doubles %' "$RPROMPT" '50%% done'
+    HX_RPROMPT=0
+    hx_rprompt_native
+    ck 'HX_RPROMPT=0 clears it' "$RPROMPT" ''
+    HX_RPROMPT=1
+
+    printf '\n%srepaint hook%s\n' "$HX_bd$HX_forange" "$HX_r"
+    pt_has=no
+    case " ${HELLISH_PROMPT_REFRESH_FUNCS-} " in *" hx_refresh "*) pt_has=yes ;; esac
+    ck 'hx_refresh is registered with the shell' "$pt_has" yes
+    hx_hooks_install >/dev/null
+    pt_n=0
+    for pt_f in $HELLISH_PROMPT_REFRESH_FUNCS; do
+        [ "$pt_f" = hx_refresh ] && pt_n=$((pt_n + 1))
+    done
+    ck 'and only once, however often hooks are installed' "$pt_n" 1
+    PS1=''
+    hx_refresh
+    ckn 'hx_refresh rebuilds PS1' "$PS1"
+fi
+
+printf '\n'
+if [ "$hx_fail" = "0" ]; then
+    printf '%s%s all %s checks passed%s\n\n' "$HX_fgreen" "$HX_G_OK" "$hx_run" "$HX_r"
+else
+    printf '%s%s %s of %s checks failed%s\n\n' "$HX_fred" "$HX_G_BAD" "$hx_fail" "$hx_run" "$HX_r"
+fi
+exit "$hx_fail"
