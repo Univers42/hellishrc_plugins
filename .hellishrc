@@ -29,7 +29,13 @@ export HX_HOME HX_CONF HX_STATE
 # if/else rather than an early return.
 if [ ! -d "$HX_HOME/lib" ]; then
     # Degrade to a bare but usable shell instead of erroring at every prompt.
+    # Say what to do about it: someone who just deleted ~/.hellish and still
+    # gets hellish wants to know that the shell is the BINARY and the hook
+    # in their login rc, and where the off switch is (hellish issue: "I
+    # deleted every hellish directory and it still comes up").
     printf 'hellishrc: %s is missing; running unconfigured\n' "$HX_HOME" >&2
+    printf '           restore: curl -fsSL https://raw.githubusercontent.com/Univers42/hellish/main/install.sh | sh\n' >&2
+    printf '           remove hellish for good: sh install.sh --uninstall   (or: touch ~/.hellish-disable)\n' >&2
 else
 
     # Reset the per-load registries so `conf reload` is idempotent.

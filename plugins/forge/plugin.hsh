@@ -199,8 +199,11 @@ _forge_lint_one() {
 
     # 5. does it actually parse? `hellish -n` is a real syntax check (it reports
     #    file:line and sets status 2 without executing), so this is a hard fail.
-    /usr/bin/hellish -n "$f" >/dev/null 2>&1 </dev/null || \
-        _forge_fail "does not parse: $(/usr/bin/hellish -n "$f" 2>&1 </dev/null | head -1)"
+    #    The binary is whichever hellish is running this -- not /usr/bin, which
+    #    a user-mode (42) install does not have.
+    local hsh; hsh="$(hx_shell_bin)"
+    "$hsh" -n "$f" >/dev/null 2>&1 </dev/null || \
+        _forge_fail "does not parse: $("$hsh" -n "$f" 2>&1 </dev/null | head -1)"
 
     if [ "$issues" -eq 0 ]; then
         printf '  %s%-8s%s contract satisfied\n\n' "$HX_GRN" "pass" "$HX_R"
