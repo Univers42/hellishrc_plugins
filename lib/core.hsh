@@ -413,7 +413,12 @@ hx_load_dir() {
     for f in "$d"/*; do
         case "$f" in *.hsh|*.zsh) ;; *) continue ;; esac
         [ -r "$f" ] || continue      # no nullglob on old binaries: guard by hand
-        HX_CURRENT_MODULE="$(hx_module_name "$f")"
+        # hx_module_name, inlined: through $(...) it cost a fork per file,
+        # thirty subshells at startup for four parameter expansions.
+        HX_CURRENT_MODULE="${f##*/}"
+        HX_CURRENT_MODULE="${HX_CURRENT_MODULE%.hsh}"
+        HX_CURRENT_MODULE="${HX_CURRENT_MODULE%.zsh}"
+        HX_CURRENT_MODULE="${HX_CURRENT_MODULE#*-}"
         hx_source "$f"
     done
     HX_CURRENT_MODULE=core

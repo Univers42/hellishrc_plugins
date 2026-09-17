@@ -68,13 +68,18 @@ hx_want_color() {
 # codes rather than 256-colour indices so they follow the user's terminal
 # theme -- someone with a solarized palette gets solarized output.
 hx_color_init() {
+    # Cache the depth HERE, in the parent shell. hx_color_depth caches into
+    # HX_COLOR_DEPTH itself, but every reader called it through $(...) -- a
+    # subshell, whose assignment dies with it -- so each caller forked tput
+    # again: 24 `tput colors` per startup, ~45 ms, until COLORTERM was set.
+    HX_COLOR_DEPTH="${HX_COLOR_DEPTH:-$(hx_color_depth)}"
     if hx_want_color; then
         HX_R=$'\033[0m';    HX_B=$'\033[1m';     HX_DIM=$'\033[2m'
         HX_IT=$'\033[3m';   HX_UL=$'\033[4m';    HX_REV=$'\033[7m'
         HX_RED=$'\033[31m'; HX_GRN=$'\033[32m';  HX_YEL=$'\033[33m'
         HX_BLU=$'\033[34m'; HX_MAG=$'\033[35m';  HX_CYN=$'\033[36m'
         HX_GRY=$'\033[90m'
-        if [ "$(hx_color_depth)" = "8" ]; then
+        if [ "${HX_COLOR_DEPTH:-$(hx_color_depth)}" = "8" ]; then
             HX_ORA=$'\033[33m'; HX_VIO=$'\033[35m'; HX_TEAL=$'\033[36m'
             HX_LIME=$'\033[32m'; HX_SKY=$'\033[36m'; HX_ROSE=$'\033[31m'
         else
@@ -98,7 +103,7 @@ hx_f() { hx_ansi 38 "$1"; }
 hx_b() { hx_ansi 48 "$1"; }
 
 hx_ansi() {
-    case "$(hx_color_depth)" in
+    case "${HX_COLOR_DEPTH:-$(hx_color_depth)}" in
         none) return 0 ;;
         8)
             local c

@@ -127,14 +127,14 @@ hx_theme_known() { [ -n "${HX_THEME_PS1[$1]+set}" ]; }
 # degraded by terminal depth. Emitting %F{n} rather than a raw escape is what
 # lets hellish count the prompt's width correctly.
 _hx_fg() {
-    case "$(hx_color_depth)" in
+    case "${HX_COLOR_DEPTH:-$(hx_color_depth)}" in
         none) HX_RET='' ;;
         8)    HX_RET="%F{$(( $(hx_basic8 "$1") - 30 ))}" ;;
         *)    HX_RET="%F{$1}" ;;
     esac
 }
 _hx_bg() {
-    case "$(hx_color_depth)" in
+    case "${HX_COLOR_DEPTH:-$(hx_color_depth)}" in
         none) HX_RET='' ;;
         8)    HX_RET="%K{$(( $(hx_basic8 "$1") - 30 ))}" ;;
         *)    HX_RET="%K{$1}" ;;
@@ -406,6 +406,11 @@ _hx_seg_path() {
 
 # _hx_seg_vcs — one `git status --porcelain=v2 --branch` and nothing else.
 #
+# --ignore-submodules=dirty, because without it git status forks ANOTHER
+# `git status --porcelain=2` per submodule: in a repository with four of
+# them that was seven processes and 180 ms per prompt for the same answer
+# (hellish's own prompt scan passes the same flag, for the same reason).
+#
 # The v2 porcelain carries the branch, the upstream, the ahead/behind counts
 # and every changed path in ONE invocation. The older way -- symbolic-ref,
 # then diff --quiet, then diff --cached --quiet, then rev-list, then ls-files
@@ -434,7 +439,7 @@ _hx_seg_vcs() {
             '? '*) untracked=$((untracked + 1)) ;;
         esac
     done <<EOF
-$(git status --porcelain=v2 --branch 2>/dev/null)
+$(git status --porcelain=v2 --branch --ignore-submodules=dirty 2>/dev/null)
 EOF
     [ -n "$branch" ] || return 0
     [ "$branch" = "(detached)" ] && branch="$HX_G_DIA"
@@ -996,7 +1001,7 @@ _prompt_palette() {
 _prompt_colors() {
     local i=0
     printf '\n  %sdepth%s %s   %sunicode%s %s   %snerd%s %s   %swidth%s %s\n\n' \
-        "$HX_GRY" "$HX_R" "$(hx_color_depth)" \
+        "$HX_GRY" "$HX_R" "${HX_COLOR_DEPTH:-$(hx_color_depth)}" \
         "$HX_GRY" "$HX_R" "${HX_UNICODE:-0}" \
         "$HX_GRY" "$HX_R" "${HX_NERD:-0}" \
         "$HX_GRY" "$HX_R" "$(hx_cols)"
