@@ -98,5 +98,5 @@ four hellish-vs-bash differences it works around.
 
 ```sh
 hellish test/run.hsh        # loads the real config, asserts the registry
-hellish test/prompt.hsh     # 31 checks against examples/hellishrc
+hellish test/prompt.hsh     # examples/hellishrc; also runs under bash
 ```
