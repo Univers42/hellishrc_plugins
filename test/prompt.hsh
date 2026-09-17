@@ -233,6 +233,20 @@ if [ "$HX_NATIVE" = "1" ]; then
     hx_rprompt_native
     ck 'HX_RPROMPT=0 clears it' "$RPROMPT" ''
     HX_RPROMPT=1
+
+    printf '\n%srepaint hook%s\n' "$HX_bd$HX_forange" "$HX_r"
+    pt_has=no
+    case " ${HELLISH_PROMPT_REFRESH_FUNCS-} " in *" hx_refresh "*) pt_has=yes ;; esac
+    ck 'hx_refresh is registered with the shell' "$pt_has" yes
+    hx_hooks_install >/dev/null
+    pt_n=0
+    for pt_f in $HELLISH_PROMPT_REFRESH_FUNCS; do
+        [ "$pt_f" = hx_refresh ] && pt_n=$((pt_n + 1))
+    done
+    ck 'and only once, however often hooks are installed' "$pt_n" 1
+    PS1=''
+    hx_refresh
+    ckn 'hx_refresh rebuilds PS1' "$PS1"
 fi
 
 printf '\n'

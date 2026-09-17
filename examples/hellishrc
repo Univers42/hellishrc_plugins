@@ -1685,6 +1685,19 @@ hx_precmd() {
     :
 }
 
+# hellish repaints the prompt while a line is being read when its background
+# git scan lands with a new answer (a large repository after a `cd`), and
+# first runs the functions in HELLISH_PROMPT_REFRESH_FUNCS so a prompt built
+# by a hook can follow. This one rebuilds from the fresh scan: variables
+# only -- nothing is started, nothing is printed.
+hx_refresh() {
+    hx_git_collect
+    hx_git_label
+    hx_build
+    PS1="$HX_PS1"
+    hx_rprompt_native
+}
+
 # One-shot renderer for shells with no precmd hook (dash, and anything else
 # without PROMPT_COMMAND). PS1 is expanded per POSIX with parameter expansion
 # + command substitution, so this runs on every prompt.
@@ -1706,6 +1719,12 @@ hx_hooks_install() {
         hx_precmd
     elif [ "$HX_SHELL" = "bash" ]; then
         PROMPT_COMMAND=hx_precmd
+        if [ "$HX_NATIVE" = "1" ]; then
+            case " ${HELLISH_PROMPT_REFRESH_FUNCS-} " in
+                *" hx_refresh "*) : ;;
+                *) HELLISH_PROMPT_REFRESH_FUNCS="${HELLISH_PROMPT_REFRESH_FUNCS:+$HELLISH_PROMPT_REFRESH_FUNCS }hx_refresh" ;;
+            esac
+        fi
         # NOTE: the DEBUG trap is NOT installed here. hellish silently
         # discards a DEBUG trap set inside a function body (a WINCH trap set
         # the same way survives, so this is specific to DEBUG), which left
