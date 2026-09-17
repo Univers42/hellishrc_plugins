@@ -82,12 +82,12 @@ fi
 # hellish(1) reports BASH_VERSION for compatibility, so the bash branch is the
 # right one to take — but it is NOT bash, and the differences bite:
 #
-#   * the DEBUG trap fires twice per command (before it, and again before
-#     PROMPT_COMMAND), which silently zeroes any naive preexec timer;
-#   * `shopt` accepts everything and does nothing;
+#   * the DEBUG trap fires before PROMPT_COMMAND as well as before the
+#     command (bash does too), which silently zeroes a naive preexec timer;
 #   * `bind` does not exist;
-#   * parameter expansion is byte-oriented, not character-oriented;
-#   * COLUMNS is never set.
+#   * it has a real RPROMPT and publishes the repository state itself
+#     (vcs_info's HELLISH_GIT_* variables), so the prompt needs no git
+#     process there -- HX_NATIVE below.
 #
 # Detect it once, here, and let the rest of the file branch on facts instead
 # of guessing. `hx doctor` prints the whole list.
@@ -269,6 +269,40 @@ hx_cols_refresh() {
 hx_cols_refresh
 trap 'hx_cols_refresh' WINCH 2>/dev/null
 
+# --- what the shell can do for the prompt itself -----------------------------
+# Detected once, here, and never by forking.
+#
+# HX_NATIVE  hellish's vcs_info builtin also publishes the repository state
+#            as HELLISH_GIT_* variables, from a background `git status` the
+#            shell caches and refreshes on its own. With it, the git segment
+#            costs the prompt no process at all -- see hx_git_collect. The
+#            probe is the variables themselves: an older hellish has
+#            vcs_info but sets none of them, and keeps the portable path.
+#            RPROMPT is the same shell's native right prompt.
+# HX_PRINTF_T  printf -v VAR '%(fmt)T' works (bash >= 4.2, hellish): the
+#            clock without a `date` fork.
+# HX_FUNSUB  bash >= 5.3's ${ cmd; } runs a builtin without a subshell.
+HX_NATIVE=0
+if [ "$HX_IS_HELLISH" = "1" ] && command -v vcs_info >/dev/null 2>&1; then
+    vcs_info >/dev/null 2>&1
+    [ -n "${HELLISH_GIT_AHEAD+x}" ] && HX_NATIVE=1
+fi
+# The `?` flag needs the untracked walk, which the shell only does when asked.
+[ "$HX_NATIVE" = "1" ] && HELLISH_VCS_UNTRACKED=1
+HX_PRINTF_T=0
+if [ "$HX_SHELL" = "bash" ] && printf -v hx_t '%(%s)T' -1 2>/dev/null \
+        && [ -n "${hx_t-}" ]; then
+    HX_PRINTF_T=1
+fi
+HX_FUNSUB=0
+if [ "$HX_SHELL" = "bash" ] && [ "$HX_IS_HELLISH" = "0" ] \
+        && eval 'hx_t=${ printf ok; }' 2>/dev/null && [ "$hx_t" = "ok" ]; then
+    HX_FUNSUB=1
+fi
+unset hx_t
+HX_HAVE_GIT=0
+command -v git >/dev/null 2>&1 && HX_HAVE_GIT=1
+
 # --- prompt-escape wrapping -------------------------------------------------
 # Non-printing sequences must be marked or the shell miscomputes line width
 # and wrecks multiline editing / history recall.
@@ -435,24 +469,21 @@ hx_strip() {
     done
     HX_RET="$hx_o"
     unset hx_s hx_c
-    # Drop the \001/\002 width markers too; they occupy no columns.
-    # Guarded on a non-empty marker: `case $x in *""*)` matches everything.
-    case "${HX_WS:-}${hx_o}" in
-        ''|"$hx_o") : ;;
-        *)
-            hx_o2=''
-            while [ -n "$hx_o" ]; do
-                hx_c="${hx_o%"${hx_o#?}"}"
-                hx_o="${hx_o#?}"
-                case "$hx_c" in
-                    "$HX_WS"|"$HX_WE") : ;;
-                    *) hx_o2="$hx_o2$hx_c" ;;
-                esac
-            done
-            HX_RET="$hx_o2"
-            unset hx_o2
-            ;;
-    esac
+    # Drop the \001/\002 width markers too; they occupy no columns. A span
+    # at a time, like the escapes above: the old loop took one character
+    # per iteration, which is quadratic in the prompt's length.
+    if [ -n "${HX_WS:-}" ]; then
+        HX_RET=''
+        while :; do
+            case "$hx_o" in
+                *"$HX_WS"*|*"$HX_WE"*) : ;;
+                *) HX_RET="$HX_RET$hx_o"; break ;;
+            esac
+            hx_c="${hx_o%%["$HX_WS$HX_WE"]*}"
+            HX_RET="$HX_RET$hx_c"
+            hx_o="${hx_o#"$hx_c"?}"
+        done
+    fi
     unset hx_o hx_c
 }
 
@@ -626,91 +657,159 @@ hx_now_ms() {
 #     served from the cache in section 9.
 
 # --- git --------------------------------------------------------------------
-# Cheap plumbing calls beat one --porcelain parse loop in a shell.
+# One question, asked the cheapest way the shell allows:
+#
+#   hellish   vcs_info fills HELLISH_GIT_* from the shell's own background
+#             scan. No process is started, so a held Enter key or a `cd`
+#             into a large repository never waits for git.
+#   others    ONE `git status --porcelain=v2 --branch --show-stash`, and
+#             none at all outside a repository (found by walking up for
+#             .git, no fork). It says everything the segment shows: branch
+#             or commit, ahead/behind, stash, and each kind of change.
+#
+# The collector this replaces ran git seven times per prompt, and its
+# `git diff --quiet` walked into every submodule: 77 ms per prompt in a
+# repository with ten of them, half a second when the files were not in
+# the page cache. `--ignore-submodules=dirty` is what zsh's vcs_info passes:
+# a submodule whose recorded commit moved still shows.
 hx_git_collect() {
     HX_GB=''; HX_GF=''; HX_GA=0; HX_GBH=0; HX_GS=0; HX_GST=''
     HX_GDIRTY=0; HX_GREPO=''; HX_GWT=0
 
     [ "$HX_GIT" = "1" ] || return 0
-    hx_has git || return 0
+    if [ "$HX_NATIVE" = "1" ]; then
+        hx_git_native
+    else
+        hx_git_portable
+    fi
+    [ -n "$HX_GF" ] && HX_GDIRTY=1
+    if [ "$HX_GIT_DEEP" != "1" ]; then
+        HX_GA=0; HX_GBH=0; HX_GS=0
+    fi
+    hx_pct "$HX_GB"; HX_GB="$HX_RET"
+    :
+}
 
-    # ONE rev-parse for four facts. Each `git` invocation costs ~2.5ms, and
-    # the naive version of this collector made eleven of them - 40ms per
-    # prompt, which is felt while typing. `hx bench` measures it.
-    #
-    # The output is four lines: is-inside-work-tree, git-dir, toplevel,
-    # branch-or-HEAD. Parsed with parameter expansion so no extra fork is
-    # spent unpicking it, and paths with spaces survive.
-    hx_gi=$(git rev-parse --is-inside-work-tree --git-dir --show-toplevel \
-                          --abbrev-ref HEAD 2>/dev/null)
+hx_git_native() {
+    vcs_info
+    [ -n "$HELLISH_GIT_BRANCH" ] || return 0
+    HX_GB="$HELLISH_GIT_BRANCH"
+    [ "$HELLISH_GIT_DETACHED" = "1" ] && HX_GB="$HX_G_DIAM$HX_GB"
+    HX_GREPO="${HELLISH_GIT_ROOT##*/}"
+    [ "$HELLISH_GIT_STAGED" = "1" ] && HX_GF="${HX_GF}+"
+    [ "$HELLISH_GIT_UNSTAGED" = "1" ] && HX_GF="${HX_GF}~"
+    [ "$HELLISH_GIT_UNTRACKED" = "1" ] && HX_GF="${HX_GF}?"
+    [ "$HELLISH_GIT_UNMERGED" = "1" ] && HX_GF="${HX_GF}!"
+    HX_GA="$HELLISH_GIT_AHEAD"
+    HX_GBH="$HELLISH_GIT_BEHIND"
+    HX_GS="$HELLISH_GIT_STASH"
+    hx_git_state "$HELLISH_GIT_DIR"
+}
 
+# hx_git_root -> HX_GROOT / HX_GDIR for $PWD, or status 1 outside a repo.
+# Pure file tests, cached per directory: the walk runs once per `cd`.
+HX_GROOT_PWD=''
+HX_GROOT=''
+HX_GDIR=''
+hx_git_root() {
+    if [ "$HX_GROOT_PWD" != "$PWD" ]; then
+        HX_GROOT_PWD="$PWD"
+        HX_GROOT=''
+        HX_GDIR=''
+        hx_d="$PWD"
+        while :; do
+            if [ -e "$hx_d/.git" ]; then
+                HX_GROOT="${hx_d:-/}"
+                break
+            fi
+            case "$hx_d" in */*) : ;; *) break ;; esac
+            hx_d="${hx_d%/*}"
+            [ -n "$hx_d" ] || { [ -e "/.git" ] && HX_GROOT=/; break; }
+        done
+        unset hx_d
+        [ -n "$HX_GROOT" ] && hx_git_dir
+    fi
+    [ -n "$HX_GROOT" ]
+}
+
+# The git dir of HX_GROOT: .git itself, or what a `gitdir:` file names
+# (submodules, linked worktrees), relative to the root when relative.
+hx_git_dir() {
+    HX_GDIR="$HX_GROOT/.git"
+    [ -f "$HX_GDIR" ] || return 0
+    hx_line=''
+    read -r hx_line < "$HX_GDIR"
+    case "$hx_line" in
+        'gitdir: /'*) HX_GDIR="${hx_line#gitdir: }" ;;
+        'gitdir: '*)  HX_GDIR="$HX_GROOT/${hx_line#gitdir: }" ;;
+    esac
+    unset hx_line
+}
+
+hx_git_portable() {
+    [ "$HX_HAVE_GIT" = "1" ] || return 0
+    hx_git_root || return 0
     # Check the OUTPUT, not just the status. `alias g=git` followed by a
     # `g() { ... }` definition silently defines a function named git - in
-    # bash, zsh, dash and hellish alike - after which rev-parse returns 0 and
-    # prints nothing, and a status-only check invents a detached HEAD in
-    # every directory. Demanding the literal `true` costs nothing.
-    case "$hx_gi" in
-        true"$HX_NL"*) : ;;
-        *) unset hx_gi; return 0 ;;
-    esac
-
-    hx_gi="${hx_gi#*"$HX_NL"}"
-    hx_gd="${hx_gi%%"$HX_NL"*}"
-    hx_gi="${hx_gi#*"$HX_NL"}"
-    hx_top="${hx_gi%%"$HX_NL"*}"
-    HX_GB="${hx_gi#*"$HX_NL"}"
-    HX_GB="${HX_GB%%"$HX_NL"*}"
-
-    HX_GREPO="${hx_top##*/}"
-
-    if [ "$HX_GB" = "HEAD" ]; then
-        HX_GB="${HX_G_DIAM}$(git rev-parse --short HEAD 2>/dev/null)"
-    fi
-
-    if [ -n "$hx_gd" ]; then
-        if [ -d "$hx_gd/rebase-merge" ] || [ -d "$hx_gd/rebase-apply" ]; then
-            HX_GST='rebase'
-        elif [ -f "$hx_gd/MERGE_HEAD" ]; then
-            HX_GST='merge'
-        elif [ -f "$hx_gd/CHERRY_PICK_HEAD" ]; then
-            HX_GST='cherry'
-        elif [ -f "$hx_gd/REVERT_HEAD" ]; then
-            HX_GST='revert'
-        elif [ -f "$hx_gd/BISECT_LOG" ]; then
-            HX_GST='bisect'
-        fi
-        # A linked worktree's git-dir lives under the main repo's worktrees/.
-        case "$hx_gd" in
-            */worktrees/*) HX_GWT=1 ;;
+    # bash, zsh, dash and hellish alike - which prints nothing and returns
+    # 0. Without a branch header there is no segment.
+    hx_gi=$(git --no-optional-locks status --porcelain=v2 --branch \
+        --show-stash --ignore-submodules=dirty -unormal 2>/dev/null)
+    hx_oid=''; hx_st=0; hx_un=0; hx_ut=0; hx_um=0
+    while IFS= read -r hx_l; do
+        case "$hx_l" in
+            '# branch.oid '*)  hx_oid="${hx_l#\# branch.oid }" ;;
+            '# branch.head '*) HX_GB="${hx_l#\# branch.head }" ;;
+            '# branch.ab +'*)
+                hx_l="${hx_l#\# branch.ab +}"
+                HX_GA="${hx_l%% *}"
+                HX_GBH="${hx_l##*-}" ;;
+            '# stash '*)       HX_GS="${hx_l#\# stash }" ;;
+            [12]' '[!.][!.]*)  hx_st=1; hx_un=1 ;;
+            [12]' '[!.]*)      hx_st=1 ;;
+            [12]' '?[!.]*)     hx_un=1 ;;
+            'u '*)             hx_st=1; hx_un=1; hx_um=1 ;;
+            '? '*)             hx_ut=1 ;;
         esac
+        # Headers come first; once every flag is known the rest is noise.
+        [ "$hx_st$hx_un$hx_ut$hx_um" = "1111" ] && break
+    done <<HX_EOF
+$hx_gi
+HX_EOF
+    if [ "$HX_GB" = "(detached)" ]; then
+        HX_GB="$HX_G_DIAM${hx_oid%"${hx_oid#???????}"}"
     fi
-
-    git diff --cached --quiet 2>/dev/null || { HX_GF="${HX_GF}+"; HX_GDIRTY=1; }
-    git diff --quiet 2>/dev/null        || { HX_GF="${HX_GF}~"; HX_GDIRTY=1; }
-    # No pipe: a command substitution is one fork, `... | head -1` is three.
-    [ -n "$(git ls-files --others --exclude-standard 2>/dev/null)" ] && {
-        HX_GF="${HX_GF}?"; HX_GDIRTY=1
-    }
-    [ -n "$(git ls-files --unmerged 2>/dev/null)" ] && {
-        HX_GF="${HX_GF}!"; HX_GDIRTY=1
-    }
-
-    # Two more forks, and the only ones that touch the object store. Turn
-    # them off with `hx conf set HX_GIT_DEEP 0` in a very large repository.
-    if [ "$HX_GIT_DEEP" = "1" ]; then
-        hx_ab=$(git rev-list --left-right --count '@{upstream}...HEAD' 2>/dev/null)
-        if [ -n "$hx_ab" ]; then
-            HX_GBH="${hx_ab%%	*}"
-            HX_GA="${hx_ab##*	}"
-            case "$HX_GBH" in ''|*[!0-9]*) HX_GBH=0 ;; esac
-            case "$HX_GA"  in ''|*[!0-9]*) HX_GA=0 ;;  esac
-        fi
-        HX_GS=$(git rev-list --walk-reflogs --count refs/stash 2>/dev/null || echo 0)
-        case "$HX_GS" in ''|*[!0-9]*) HX_GS=0 ;; esac
+    if [ -n "$HX_GB" ]; then
+        HX_GREPO="${HX_GROOT##*/}"
+        [ "$hx_st" = "1" ] && HX_GF="${HX_GF}+"
+        [ "$hx_un" = "1" ] && HX_GF="${HX_GF}~"
+        [ "$hx_ut" = "1" ] && HX_GF="${HX_GF}?"
+        [ "$hx_um" = "1" ] && HX_GF="${HX_GF}!"
+        case "$HX_GA$HX_GBH$HX_GS" in *[!0-9]*) HX_GA=0; HX_GBH=0; HX_GS=0 ;; esac
+        hx_git_state "$HX_GDIR"
     fi
+    unset hx_gi hx_l hx_oid hx_st hx_un hx_ut hx_um
+}
 
-    hx_pct "$HX_GB"; HX_GB="$HX_RET"
-    unset hx_gi hx_gd hx_top hx_ab
+# In-progress operation and worktree-ness, from the git dir. File tests only.
+hx_git_state() {
+    [ -n "$1" ] || return 0
+    if [ -d "$1/rebase-merge" ] || [ -d "$1/rebase-apply" ]; then
+        HX_GST='rebase'
+    elif [ -f "$1/MERGE_HEAD" ]; then
+        HX_GST='merge'
+    elif [ -f "$1/CHERRY_PICK_HEAD" ]; then
+        HX_GST='cherry'
+    elif [ -f "$1/REVERT_HEAD" ]; then
+        HX_GST='revert'
+    elif [ -f "$1/BISECT_LOG" ]; then
+        HX_GST='bisect'
+    fi
+    # A linked worktree's git-dir lives under the main repo's worktrees/.
+    case "$1" in
+        */worktrees/*) HX_GWT=1 ;;
+    esac
+    :
 }
 
 # Composed git label used by most themes: main+~ ↑2 ↓1 ⚑3 (merge)
@@ -893,14 +992,15 @@ hx_signame() {
 }
 
 hx_misc_collect() {
-    # Two forks, not four. `jobs | grep -c .` is a subshell plus a grep, and
-    # two `date` calls are two more; one date with a separator and a counting
-    # loop over the jobs output does the same work for half the price.
-    #
-    # printf '%(%H:%M:%S)T' would cost nothing at all, but hellish accepts
-    # that format and prints NOTHING - not even the literal text around it -
-    # so date(1) it is.
-    hx_j=$(jobs 2>/dev/null)
+    # The job count: hellish runs `$(jobs)` in-process and bash >= 5.3 has
+    # ${ ...; } for it; other shells pay one subshell. The clock never
+    # forks where the shell can tell the time itself: printf's %(fmt)T on
+    # bash and hellish, zsh's %D prompt escape. date(1) is for dash.
+    if [ "$HX_FUNSUB" = "1" ]; then
+        eval 'hx_j=${ jobs; }'
+    else
+        hx_j=$(jobs)
+    fi
     HX_JOBS=0
     while [ -n "$hx_j" ]; do
         HX_JOBS=$((HX_JOBS + 1))
@@ -910,9 +1010,16 @@ hx_misc_collect() {
         esac
     done
 
-    hx_d=$(date '+%H:%M:%S|%d %b' 2>/dev/null)
-    HX_TIME="${hx_d%%|*}"
-    HX_DATE="${hx_d#*|}"
+    if [ "$HX_PRINTF_T" = "1" ]; then
+        printf -v HX_TIME '%(%H:%M:%S)T' -1
+        printf -v HX_DATE '%(%d %b)T' -1
+    elif [ "$HX_SHELL" = "zsh" ]; then
+        eval 'HX_TIME=${(%):-%D{%H:%M:%S}}; HX_DATE=${(%):-%D{%d %b}}'
+    else
+        hx_d=$(date '+%H:%M:%S|%d %b' 2>/dev/null)
+        HX_TIME="${hx_d%%|*}"
+        HX_DATE="${hx_d#*|}"
+    fi
     unset hx_j hx_d
     :
 }
@@ -921,10 +1028,11 @@ hx_misc_collect() {
 # 9. CACHE
 # ============================================================================
 #
-# Only values that cannot change without leaving the directory are cached.
-# Dirty state, ahead/behind and stash counts are NOT: a command that edits a
-# file must be reflected by the very next prompt, and a stale git segment is
-# worse than a slow one.
+# Only values that cannot change without leaving the directory are cached
+# here. Dirty state, ahead/behind and stash counts are NOT: a command that
+# edits a file must be reflected by the very next prompt. (Under hellish the
+# shell caches them itself, and throws the answer away whenever a command
+# could have touched the tree -- see hx_git_collect.)
 #
 # What this removes is the toolchain probe - `node -v` and `rustc --version`
 # are 30-60ms forks, paid on every prompt in every project directory. Keyed
@@ -1399,6 +1507,13 @@ hx_theme_quantum() {
 
 HX_T0=''
 HX_MS=0
+HX_PKEY=''
+HX_PCACHED=''
+HX_RWKEY=''
+HX_RWVAL=0
+HX_LWKEY=''
+HX_LWVAL=0
+HX_THEME_OK=''
 HX_DURSTR=''
 HX_ARMED=0
 
@@ -1448,9 +1563,15 @@ hx_collect() {
     hx_signame "$HX_X"
     HX_XSIG="$HX_RET"
 
-    hx_shorten "$PWD"
-    hx_pct "$HX_RET"
-    HX_P="$HX_RET"
+    # The path only changes with a cd or a config change, so it is
+    # shortened once per (directory, style) pair.
+    if [ "$HX_PKEY" != "$PWD|$HX_PATH_STYLE|$HX_PATH_MAX" ]; then
+        HX_PKEY="$PWD|$HX_PATH_STYLE|$HX_PATH_MAX"
+        hx_shorten "$PWD"
+        hx_pct "$HX_RET"
+        HX_PCACHED="$HX_RET"
+    fi
+    HX_P="$HX_PCACHED"
 
     hx_misc_collect
     hx_where_collect
@@ -1476,8 +1597,14 @@ hx_title() {
 hx_build() {
     HX_PS1=''
     HX_RPS1=''
-    if hx_has "hx_theme_$HX_THEME"; then
-        "hx_theme_$HX_THEME" 2>/dev/null
+    # Validated once per theme name, not once per prompt: the check is a
+    # walk of the theme list, and the call it guards used to be a
+    # `command -v` plus a redirection on every render.
+    if [ "$HX_THEME" != "$HX_THEME_OK" ] && hx_theme_valid "$HX_THEME"; then
+        HX_THEME_OK="$HX_THEME"
+    fi
+    if [ "$HX_THEME" = "$HX_THEME_OK" ]; then
+        "hx_theme_$HX_THEME"
     fi
     if [ -z "$HX_PS1" ]; then
         HX_PS1="$HX_U@$HX_H $HX_P$HX_PRIV "
@@ -1487,10 +1614,13 @@ hx_build() {
 
 # --- right prompt -----------------------------------------------------------
 #
-# Only zsh has a real RPROMPT. Everywhere else the 30 themes' right prompts
-# were simply discarded. They need not be: printing the string right-aligned
-# and then returning the cursor to column 0 with a carriage return leaves it
-# on screen, and the left prompt is drawn over the left of the same line.
+# zsh and hellish have a real RPROMPT: the shell paints it, keeps it clear of
+# the typed line, and repaints it after a resize. hellish reads it in zsh's
+# prompt syntax, so a literal % in it has to be doubled (hx_rprompt_native).
+# Everywhere else the right prompt is emulated: printing the string
+# right-aligned and then returning the cursor to column 0 with a carriage
+# return leaves it on screen, and the left prompt is drawn over the left of
+# the same line.
 #
 # The left prompt's first line must be short enough not to collide, so the
 # emulation stands down when the two would overlap. Padding uses a width
@@ -1502,13 +1632,22 @@ hx_rprompt_emit() {
     [ "$HX_SHELL" = "zsh" ] && return 0
     [ -t 1 ] || return 0
 
-    hx_vwidth "$HX_RPS1"
-    hx_rw="$HX_W"
-
-    # First line of the left prompt is what shares the row.
+    # First line of the left prompt is what shares the row. Both widths
+    # are remembered with the strings they were measured from: most
+    # prompts render the same two strings as the last one did.
     hx_l1="${HX_PS1%%"$HX_NL"*}"
-    hx_vwidth "$hx_l1"
-    hx_lw="$HX_W"
+    if [ "$HX_RWKEY" != "$HX_RPS1" ]; then
+        hx_vwidth "$HX_RPS1"
+        HX_RWKEY="$HX_RPS1"
+        HX_RWVAL="$HX_W"
+    fi
+    if [ "$HX_LWKEY" != "$hx_l1" ]; then
+        hx_vwidth "$hx_l1"
+        HX_LWKEY="$hx_l1"
+        HX_LWVAL="$HX_W"
+    fi
+    hx_rw="$HX_RWVAL"
+    hx_lw="$HX_LWVAL"
 
     hx_pad=$((HX_COLS - hx_rw))
     if [ "$hx_pad" -le "$hx_lw" ] || [ "$hx_pad" -lt 1 ]; then
@@ -1517,6 +1656,14 @@ hx_rprompt_emit() {
     fi
     printf '%*s%s\r' "$hx_pad" '' "$HX_RPS1"
     unset hx_rw hx_l1 hx_lw hx_pad
+}
+
+hx_rprompt_native() {
+    if [ "$HX_RPROMPT" = "1" ] && [ -n "$HX_RPS1" ]; then
+        eval 'RPROMPT=${HX_RPS1//\%/%%}'
+    else
+        RPROMPT=''
+    fi
 }
 
 hx_precmd() {
@@ -1530,6 +1677,8 @@ hx_precmd() {
     if [ "$HX_SHELL" = "zsh" ]; then
         RPS1="$HX_RPS1"
         RPROMPT="$HX_RPS1"
+    elif [ "$HX_NATIVE" = "1" ]; then
+        hx_rprompt_native
     else
         hx_rprompt_emit
     fi
@@ -1720,7 +1869,12 @@ hx_doctor() {
     hx_row 'clock'      "$HX_CLOCK"
     hx_row 'theme'      "$HX_THEME ($(printf '%s\n' $HX_THEMES | grep -c .) available)"
     hx_row 'hooks'      "$([ "$HX_SHELL" = posix ] && echo 'PS1 substitution' || echo 'PROMPT_COMMAND + DEBUG')"
-    hx_row 'rprompt'    "$([ "$HX_SHELL" = zsh ] && echo native || { [ "$HX_RPROMPT" = 1 ] && echo emulated || echo off; })"
+    hx_rp=emulated
+    { [ "$HX_SHELL" = zsh ] || [ "$HX_NATIVE" = 1 ]; } && hx_rp=native
+    [ "$HX_RPROMPT" = 1 ] || hx_rp=off
+    hx_row 'rprompt'    "$hx_rp"
+    unset hx_rp
+    hx_row 'git'        "$([ "$HX_NATIVE" = 1 ] && echo 'native (no process per prompt)' || echo 'one git status per prompt, in a repo')"
     hx_row 'cache'      "$([ "$HX_CACHE" = 1 ] && echo on || echo off)"
 
     hx_head 'paths'
@@ -1742,10 +1896,13 @@ hx_doctor() {
     hx_w=0
     if [ "$HX_IS_HELLISH" = "1" ]; then
         printf '  %s%s%s hellish reports BASH_VERSION but is not bash:\n' "$HX_fyellow" "$HX_G_BOLT" "$HX_r"
-        printf '      shopt is accepted and ignored, bind is missing,\n'
-        printf '      COLUMNS is never set, and ${#s} counts bytes not characters.\n'
-        printf '      This file works around all four; see `hx keys`.\n'
+        printf '      bind is missing, so key bindings come from ~/.inputrc;\n'
+        printf '      see `hx keys`.\n'
         hx_w=$((hx_w + 1))
+        if [ "$HX_NATIVE" = "0" ]; then
+            printf '  %s%s%s this hellish predates HELLISH_GIT_*: the git segment\n' "$HX_fyellow" "$HX_G_BOLT" "$HX_r"
+            printf '      runs git once per prompt; a newer hellish runs none.\n'
+        fi
     fi
     if [ -f "$HX_HOME/hellish.conf" ] && [ ! -r "$HX_PROMPT_CONF" ]; then
         printf '  %s%s%s prompt config not written yet; `hx conf save` creates it.\n' "$HX_fdark" "$HX_G_DOT" "$HX_r"

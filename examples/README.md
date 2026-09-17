@@ -66,28 +66,28 @@ syntax error even where they cannot execute every branch. Capability detection
 is at runtime, so it degrades rather than breaks: no colour becomes plain text,
 no UTF-8 becomes ASCII, no git drops the vcs segment.
 
-Rendering a prompt does no work that can be avoided. `hx bench` reports the
-real figure; on this machine it is ~21ms inside a git repository (six `git`
-invocations, ~2.5ms each) and ~8ms outside one.
+Rendering a prompt starts no process it can avoid. Under a hellish that
+publishes `HELLISH_GIT_*` (see below) it starts none: the hook measured
+0-2 ms per prompt in a repository with ten submodules, where the old
+collector (seven `git` calls per prompt) took 77 ms. Under bash and zsh the
+git segment is one `git status --porcelain=v2` per prompt inside a
+repository (6-9 ms there) and nothing outside one; the clock comes from
+`printf '%(…)T'` or zsh's `%D`, and only dash still forks `date`. `hx bench`
+reports the real figure.
 
 ### Running under hellish specifically
 
-hellish reports `BASH_VERSION`, so the bash branch is the correct one to take,
-but it is not bash and four differences bite an rc author. This file works
-around all four; `hx doctor` names them.
+hellish reports `BASH_VERSION`, so the bash branch is the correct one to
+take, but two things differ, and `hx doctor` names them:
 
 | | hellish | bash |
 |---|---|---|
-| `shopt -s autocd` | returns 0, does nothing | works |
-| `bind` | not a builtin | works |
-| `COLUMNS` | never set | set, updated on resize |
-| `${#s}` on `❯λ✓` | `8` (bytes) | `3` (characters) |
-| `trap … DEBUG` inside a function | silently discarded | kept |
-| `$(case x in a) … esac)` | syntax error | works |
+| `bind` | not a builtin (use `~/.inputrc`) | works |
+| repository state | `vcs_info` sets `HELLISH_GIT_*` from the shell's own background `git status` | a `git` process per question |
+| right prompt | native `RPROMPT` (zsh syntax: `%` is doubled) | emulated with a padded `\r` |
 
-The last two were found while writing this file and are reported upstream.
-The DEBUG one is why the trap is installed at top level rather than inside
-`hx_hooks_install`, and why command durations work at all.
+The native path is detected, not assumed: a hellish that predates
+`HELLISH_GIT_*` takes the same portable path as bash.
 
 ### Tests
 
@@ -95,5 +95,10 @@ The DEBUG one is why the trap is installed at top level rather than inside
 hellish test/prompt.hsh
 ```
 
-31 checks: the theme registry, every theme rendering with and without colour,
-the string helpers, the config whitelist, the clock, and the preexec guard.
+The theme registry, every theme rendering with and without colour, the
+string helpers, the config whitelist, the clock, the preexec guard, and the
+prompt hook itself: stand-in `git` and `date` binaries count what 20
+prompts start (nothing under hellish, one `git status` each under bash),
+and the git label is checked in a real repository -- staged, unstaged,
+untracked, ahead, stash, a subdirectory, a detached HEAD -- with the native
+and portable paths required to agree. It also runs under `bash`.
