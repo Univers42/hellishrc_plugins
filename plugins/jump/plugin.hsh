@@ -123,10 +123,17 @@ mark() {
 }
 hx_func_doc mark "bookmark the current directory" "mark [name]"
 
+# _jump_mark_path <name> — the bookmark's directory. The name is compared as
+# a string, not a regex: `to a.b` must not land on a bookmark named a-b.
+_jump_mark_path() {
+    awk -F'|' -v n="$1" '$1 == n { sub(/^[^|]*\|/, ""); print; exit }' \
+        "$HX_MARK_DB" 2>/dev/null
+}
+
 to() {
     local p
     [ -n "$1" ] || { marks; return 0; }
-    p=$(grep "^$1|" "$HX_MARK_DB" 2>/dev/null | head -1 | cut -d'|' -f2-)
+    p=$(_jump_mark_path "$1")
     [ -n "$p" ] || { hx_err "no mark named '$1'"; return 1; }
     cd "$p" && pwd
 }
@@ -144,10 +151,13 @@ marks() {
 }
 hx_func_doc marks "list bookmarks"
 
+# awk rather than grep -v: grep exits 1 when it prints nothing, so removing
+# the last bookmark skipped the mv and left it in place.
 unmark() {
     local tmp="$HX_MARK_DB.$$"
     [ -n "$1" ] || { hx_err "usage: unmark <name>"; return 2; }
-    grep -v "^$1|" "$HX_MARK_DB" > "$tmp" 2>/dev/null && command mv "$tmp" "$HX_MARK_DB"
+    [ -n "$(_jump_mark_path "$1")" ] || { hx_err "no mark named '$1'"; return 1; }
+    awk -F'|' -v n="$1" '$1 != n' "$HX_MARK_DB" > "$tmp" && command mv "$tmp" "$HX_MARK_DB"
     hx_ok "removed mark '$1'"
 }
 hx_func_doc unmark "remove a bookmark" "unmark <name>"

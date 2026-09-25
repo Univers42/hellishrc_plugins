@@ -1,0 +1,126 @@
+# plugins/jump/test.hsh — the jump plugin, function by function.
+#
+# Sourced by test/run.hsh through t_isolated: a subshell whose cwd and HOME
+# are a scratch directory ($T_DIR, $HOME), so every database here is a
+# throwaway and nothing touches the real ~/.hellish/state.
+
+t_head "jump"
+
+HX_JUMP_DB="$T_DIR/jump.db"
+HX_MARK_DB="$T_DIR/marks.db"
+HX_JUMP_LAST=""
+: > "$HX_JUMP_DB"
+: > "$HX_MARK_DB"
+mkdir -p "$T_DIR/w/alpha" "$T_DIR/w/Beta" "$T_DIR/w/gamma" "$T_DIR/w/alphabet"
+_jt_now=$(date +%s)
+
+# ── _jump_record ────────────────────────────────────────────────────────────
+_jump_record "$T_DIR/w/alpha"
+t_eq "1|$T_DIR/w/alpha" "$(cut -d'|' -f1,3 "$HX_JUMP_DB")" \
+    "_jump_record adds a new directory with score 1"
+_jt_t=$(cut -d'|' -f2 "$HX_JUMP_DB")
+if [ "$_jt_t" -ge "$_jt_now" ] 2>/dev/null; then t_ok "_jump_record stamps the visit with the current time"
+else t_bad "_jump_record stamps the visit with the current time — got [$_jt_t], now [$_jt_now]"; fi
+_jump_record "$T_DIR/w/alpha"
+_jump_record "$T_DIR/w/alpha"
+t_eq "3|$T_DIR/w/alpha" "$(cut -d'|' -f1,3 "$HX_JUMP_DB")" \
+    "_jump_record bumps an existing directory instead of adding a second line"
+_jump_record "$HOME"
+_jump_record /
+_jump_record "$T_DIR/w/nonexistent"
+t_eq "1" "$(wc -l < "$HX_JUMP_DB" | tr -d ' ')" \
+    "_jump_record ignores HOME, / and a directory that does not exist"
+_jt_state="$HX_STATE"
+HX_STATE="$T_DIR/w/gamma"
+_jump_record "$T_DIR/w/gamma"
+HX_STATE="$_jt_state"
+t_eq "1" "$(wc -l < "$HX_JUMP_DB" | tr -d ' ')" \
+    "_jump_record ignores the framework's own state directory"
+printf 'garbage line\n' >> "$HX_JUMP_DB"
+_jump_record "$T_DIR/w/gamma"
+t_hasnt "garbage" "$(cat "$HX_JUMP_DB")" "_jump_record drops a malformed line on rewrite"
+t_eq "2" "$(wc -l < "$HX_JUMP_DB" | tr -d ' ')" "_jump_record keeps every well-formed line"
+
+# ── _jump_rank: frequency times recency ─────────────────────────────────────
+{
+    printf '3|%s|%s\n'  "$((_jt_now - 10))"      "$T_DIR/w/alpha"      # 3 x4    = 12
+    printf '5|%s|%s\n'  "$((_jt_now - 7200))"    "$T_DIR/w/Beta"       # 5 x2    = 10
+    printf '8|%s|%s\n'  "$((_jt_now - 172800))"  "$T_DIR/w/gamma"      # 8 x0.5  = 4
+    printf '20|%s|%s\n' "$((_jt_now - 2592000))" "$T_DIR/w/alphabet"   # 20 x0.25 = 5
+} > "$HX_JUMP_DB"
+t_eq "12.0000|$T_DIR/w/alpha" "$(_jump_rank | sed -n 1p)" "_jump_rank weighs a visit in the last hour x4"
+t_eq "10.0000|$T_DIR/w/Beta"  "$(_jump_rank | sed -n 2p)" "_jump_rank weighs a visit in the last day x2"
+t_eq "5.0000|$T_DIR/w/alphabet" "$(_jump_rank | sed -n 3p)" "_jump_rank weighs a visit older than a week x0.25"
+t_eq "4.0000|$T_DIR/w/gamma"  "$(_jump_rank | sed -n 4p)" "_jump_rank weighs a visit in the last week x0.5"
+t_eq "2" "$(_jump_rank alpha | wc -l | tr -d ' ')" "_jump_rank filters by a fragment"
+t_eq "10.0000|$T_DIR/w/Beta" "$(_jump_rank BETA)" "_jump_rank matches case-insensitively"
+t_eq "" "$(_jump_rank zzz-no-such)" "_jump_rank prints nothing when nothing matches"
+
+# ── j ───────────────────────────────────────────────────────────────────────
+t_eq "$T_DIR/w/alpha" "$(j alph)" "j jumps to the best-scoring match and prints it"
+( j bet >/dev/null && [ "$PWD" = "$T_DIR/w/Beta" ] ) && t_ok "j changes directory" || t_bad "j changes directory"
+( cd "$T_DIR" && j >/dev/null && [ "$PWD" = "$HOME" ] ) && t_ok "j with no argument goes home" || t_bad "j with no argument goes home"
+mkdir -p "$T_DIR/literal"
+( cd "$T_DIR" && j literal >/dev/null && [ "$PWD" = "$T_DIR/literal" ] ) \
+    && t_ok "j prefers an existing path over the database" || t_bad "j prefers an existing path over the database"
+t_rc 1 "j fails when nothing matches" j zzz-no-such
+t_has "no match for 'zzz-no-such'" "$(j zzz-no-such 2>&1)" "j says what it could not find"
+printf '99|%s|%s\n' "$_jt_now" "$T_DIR/w/vanished" >> "$HX_JUMP_DB"
+t_rc 1 "j fails on a match that no longer exists" j vanished
+t_has "no longer exists" "$(j vanished 2>&1)" "j says the directory is gone"
+
+# ── jl / jrm / jclean ───────────────────────────────────────────────────────
+_jt_out=$(jl alpha)
+t_has "matching 'alpha'" "$_jt_out" "jl names the fragment in its header"
+t_has "$T_DIR/w/alphabet" "$_jt_out" "jl lists every candidate"
+t_hasnt "$T_DIR/w/Beta" "$_jt_out" "jl leaves out what does not match"
+
+jrm ALPHABET >/dev/null
+t_hasnt "$T_DIR/w/alphabet" "$(cat "$HX_JUMP_DB")" "jrm forgets a matching entry, case-insensitively"
+t_eq "1" "$(grep -c "|$T_DIR/w/alpha\$" "$HX_JUMP_DB")" "jrm keeps the rest"
+t_rc 2 "jrm without an argument is a usage error" jrm
+
+HX_JUMP_MAX=2
+_jt_before=$(wc -l < "$HX_JUMP_DB" | tr -d ' ')
+_jt_out=$(jclean)
+t_hasnt "$T_DIR/w/vanished" "$(cat "$HX_JUMP_DB")" "jclean drops a directory that no longer exists"
+t_eq "2" "$(wc -l < "$HX_JUMP_DB" | tr -d ' ')" "jclean prunes to HX_JUMP_MAX"
+t_eq "8" "$(head -1 "$HX_JUMP_DB" | cut -d'|' -f1)" "jclean keeps the highest scores"
+t_has "$_jt_before -> 2 entries" "$_jt_out" "jclean reports before and after"
+HX_JUMP_MAX=800
+
+# ── the prompt hook ─────────────────────────────────────────────────────────
+: > "$HX_JUMP_DB"
+( cd "$T_DIR/w/gamma" && _jump_on_prompt && _jump_on_prompt && _jump_on_prompt )
+t_eq "1|$T_DIR/w/gamma" "$(cut -d'|' -f1,3 "$HX_JUMP_DB")" \
+    "the prompt hook records a directory once, not once per prompt"
+
+# ── bookmarks ───────────────────────────────────────────────────────────────
+( cd "$T_DIR/w/alpha" && mark >/dev/null )
+t_eq "alpha|$T_DIR/w/alpha" "$(cat "$HX_MARK_DB")" "mark defaults to the directory's name"
+( cd "$T_DIR/w/gamma" && mark work >/dev/null )
+( cd "$T_DIR/w/Beta" && mark work >/dev/null )
+t_eq "work|$T_DIR/w/Beta" "$(grep '^work|' "$HX_MARK_DB")" "mark replaces a bookmark of the same name"
+t_eq "2" "$(wc -l < "$HX_MARK_DB" | tr -d ' ')" "mark never keeps two of one name"
+t_rc 2 "mark refuses a name with a space" mark "a b"
+t_rc 2 "mark refuses a name with a regex character" mark "a.b"
+
+t_eq "$T_DIR/w/Beta" "$(to work)" "to jumps to a bookmark and prints it"
+( to work >/dev/null && [ "$PWD" = "$T_DIR/w/Beta" ] ) && t_ok "to changes directory" || t_bad "to changes directory"
+t_rc 1 "to fails on an unknown bookmark" to nosuch
+_jt_out=$(to)
+t_has "bookmarks" "$_jt_out" "to with no argument lists the bookmarks"
+t_has "work" "$_jt_out" "the listing names each bookmark"
+
+( cd "$T_DIR/w/gamma" && mark a-b >/dev/null )
+t_rc 1 "to compares the name as a string, not a regex" to 'a.b'
+t_rc 1 "unmark fails on a bookmark that does not exist" unmark 'a.b'
+t_eq "a-b|$T_DIR/w/gamma" "$(grep '^a-b|' "$HX_MARK_DB")" "unmark of a near-miss name leaves the real one alone"
+unmark a-b >/dev/null
+
+unmark work >/dev/null
+t_eq "alpha|$T_DIR/w/alpha" "$(cat "$HX_MARK_DB")" "unmark removes one bookmark"
+unmark alpha >/dev/null
+t_eq "" "$(cat "$HX_MARK_DB")" "unmark removes the last bookmark too"
+t_rc 2 "unmark without an argument is a usage error" unmark
+t_has "none yet" "$(marks)" "marks says so when there are none"
