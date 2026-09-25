@@ -13,7 +13,7 @@ help_conf -s <term>       search every name and description
 hxp info <plugin>         one plugin, in detail
 ```
 
-Generated 2026-09-15 from hellish 2.10.2, 208 items.
+Generated 2026-09-25 from hellish 3.1.3, 203 items.
 
 ## Contents
 
@@ -25,7 +25,7 @@ Generated 2026-09-15 from hellish 2.10.2, 208 items.
 - [Shell options](#shell-options) — 11 items
 - [Completion](#completion) — 6 items
 - [Prompt](#prompt) — 2 items
-- [Framework internals](#framework-internals) — 10 items
+- [Framework internals](#framework-internals) — 11 items
 - [git plugin](#git-plugin) — 15 items
 - [jump plugin](#jump-plugin) — 11 items
 - [devkit plugin](#devkit-plugin) — 10 items
@@ -89,7 +89,7 @@ Short forms. An alias is expanded when a file is PARSED, so these are live insid
 | `ll` | `ls -lh --color=auto --group-directories-first` | long listing, human sizes |
 | `ln` | `ln -i` | ln -i (prompt before overwrite) |
 | `ls` | `ls --color=auto --group-directories-first` | colourised ls, directories first |
-| `lt` | `ls -lhtr --color=auto` | long listing, oldest-modified last |
+| `lt` | `command ls -lhtr --color=auto` | long listing by time, newest last |
 | `mv` | `mv -i` | mv -i (prompt before overwrite) |
 | `now` | `date "+%Y-%m-%d %H:%M:%S"` | current timestamp |
 | `path` | `path_list` | print PATH one entry per line |
@@ -194,7 +194,7 @@ Every `set -o` and `shopt` decision, with the reason. Several of these are delib
 
 | variable | what it controls |
 |---|---|
-| `COLUMNS` | NOT maintained by hellish (bash sets it); hx_cols forks tput and caches |
+| `COLUMNS` | maintained by hellish in interactive shells; hx_cols reads it, tput only as fallback |
 
 
 | option | state and reason |
@@ -260,9 +260,10 @@ The registry, the capability probe and the hook system. You need these only when
 | `HX_NERD` | 1 to use powerline glyphs (needs a patched font) |
 | `HX_PATH_MAX` | path components before {path} elides the middle |
 | `HX_PATH_STYLE` | how {path} is drawn: smart \| short \| fish \| tail \| full |
+| `HX_PROMPT_LOCAL` | a PS1/PROMPT you saved with `prompt ps1`; overrides the theme |
 | `HX_PS_ACCENT` | the palette colour themes lean on (prompt palette) |
 | `HX_THEME` | the prompt theme (prompt list to browse, prompt save to keep) |
-| `PROMPT_COMMAND` | the fallback prompt hook; inert when hellish has native HELLISH_PRECMD_FUNCS |
+| `PROMPT_COMMAND` | the fallback prompt hook; unset when hellish has native HELLISH_PRECMD_FUNCS |
 
 
 ## git plugin

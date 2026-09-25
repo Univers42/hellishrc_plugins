@@ -1,0 +1,125 @@
+# test/bin_tools.hsh — the scripts under bin/ that are not a plugin's own:
+# hx-fetch-plugin (what `hxp install` and the installer call) and hx-gendoc
+# (what writes docs/reference.md). hx-clean is the clean plugin's worker and
+# is tested in plugins/clean/test.hsh.
+#
+# Nothing is downloaded: curl and wget are stubs that write a small script
+# wherever -o / -O points, or nothing at all when LP_DL_EMPTY=1.
+
+_bt_fetch="$HX_HOME/bin/hx-fetch-plugin"
+_bt_home="$T_DIR/fh"
+_bt_dl='out=; while [ $# -gt 0 ]; do case "$1" in -o|-O) out="$2"; shift ;; esac; shift; done
+[ "${LP_DL_EMPTY:-0}" = 1 ] && { : > "$out"; exit 0; }
+printf "bt_fetched() { echo fetched; }\n" > "$out"'
+t_stub curl "$_bt_dl"
+export LP_DL_EMPTY=0
+
+# _bt_run <args...> — run hx-fetch-plugin, output and status on stdout
+_bt_run() { sh "$_bt_fetch" "$@" 2>&1; printf '|%s' "$?"; }
+
+t_head "hx-fetch-plugin: arguments"
+_bt_out=$(_bt_run)
+t_has "usage: hx-fetch-plugin" "$_bt_out" "no name prints the usage"
+t_has "|2" "$_bt_out" "and is status 2"
+_bt_out=$(_bt_run omz-sudo --nope)
+t_has "unknown argument '--nope'" "$_bt_out" "an unknown argument is named"
+t_has "|2" "$_bt_out" "and is status 2"
+_bt_out=$(_bt_run bt_no_such_plugin --home "$_bt_home")
+t_has "'bt_no_such_plugin' is not in the catalog" "$_bt_out" "a name not in the catalog is refused"
+t_has "|1" "$_bt_out" "with status 1"
+_bt_out=$(_bt_run git --home "$_bt_home")
+t_has "ships with the framework" "$_bt_out" "a builtin plugin is not fetched"
+t_has "|1" "$_bt_out" "with status 1"
+t_false "and nothing is written for it" test -e "$_bt_home/.hellish/plugins/git"
+
+t_head "hx-fetch-plugin: fetch and wrap"
+t_calls_reset
+_bt_out=$(_bt_run omz-sudo --home "$_bt_home")
+_bt_dest="$_bt_home/.hellish/plugins/omz-sudo"
+t_has "|0" "$_bt_out" "a catalog plugin is fetched"
+t_has "installed omz-sudo -> $_bt_dest" "$_bt_out" "and says where"
+t_has "curl|-fsSL|https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/plugins/sudo/sudo.plugin.zsh|-o|$_bt_dest/sudo.plugin.zsh" \
+    "$(t_calls)" "from the catalog's URL, into a file of the same name"
+t_false "--home decides where, not HOME" test -e "$HOME/.hellish/plugins/omz-sudo"
+_bt_out=$(cat "$_bt_dest/plugin.hsh" 2>/dev/null)
+t_has 'hx_plugin omz-sudo on external "ESC-ESC prepends sudo to the line" || return 0' \
+    "$_bt_out" "the wrapper declares the plugin with the catalog's description"
+t_has '. "$HX_PLUGIN_DIR/omz-sudo/sudo.plugin.zsh"' "$_bt_out" \
+    "and sources the file by its own name, so a .zsh file arms the zsh dialect"
+t_hasnt "progcomp" "$_bt_out" "an ordinary plugin leaves progcomp alone"
+t_true "the wrapper parses" "$(hx_shell_bin)" -n "$_bt_dest/plugin.hsh"
+_bt_out=$( HX_PLUGIN_DIR="$_bt_home/.hellish/plugins"
+    hx_plugin() { return 0; }
+    . "$_bt_dest/plugin.hsh"; bt_fetched )
+t_eq "fetched" "$_bt_out" "sourcing the wrapper loads the fetched file"
+
+_bt_run git-completion --home "$_bt_home" >/dev/null
+t_has "shopt -s progcomp" "$(cat "$_bt_home/.hellish/plugins/git-completion/plugin.hsh" 2>/dev/null)" \
+    "git-completion's wrapper arms progcomp, or its specs never reach TAB"
+
+LP_DL_EMPTY=1
+_bt_out=$(_bt_run omz-extract --home "$_bt_home")
+LP_DL_EMPTY=0
+t_has "empty download for omz-extract" "$_bt_out" "an empty download is an error"
+t_has "|1" "$_bt_out" "with status 1"
+t_false "and leaves no directory behind" test -d "$_bt_home/.hellish/plugins/omz-extract"
+
+# No curl on PATH: wget, with -O. The PATH here holds only what the script
+# runs, so the real curl in /usr/bin cannot answer.
+mkdir -p "$T_DIR/nocurl"
+# By directory, not `command -v`: the rc aliases grep, and an alias is what
+# `command -v` reports first.
+for _bt_t in sh grep awk cut mkdir rm dirname cat; do
+    for _bt_d in /usr/local/bin /usr/bin /bin; do
+        [ -x "$_bt_d/$_bt_t" ] || continue
+        ln -s "$_bt_d/$_bt_t" "$T_DIR/nocurl/$_bt_t"
+        break
+    done
+done
+printf '#!/bin/sh\nprintf "wget" >> "%s"; printf "|%%s" "$@" >> "%s"; echo >> "%s"\n%s\n' \
+    "$T_CALLS" "$T_CALLS" "$T_CALLS" "$_bt_dl" > "$T_DIR/nocurl/wget"
+chmod +x "$T_DIR/nocurl/wget"
+t_calls_reset
+_bt_out=$(PATH="$T_DIR/nocurl" "$T_DIR/nocurl/sh" "$_bt_fetch" z --home "$_bt_home" 2>&1; printf '|%s' "$?")
+t_has "|0" "$_bt_out" "without curl the fetch still works"
+t_has "wget|-q|-O|$_bt_home/.hellish/plugins/z/z.sh|https://raw.githubusercontent.com/rupa/z/master/z.sh" \
+    "$(t_calls)" "through wget -O"
+
+t_head "hx-gendoc"
+# A copy of the configuration, so loading it writes no state anywhere real,
+# plus one plugin of our own that ORDER does not know.
+_bt_hx="$T_DIR/hx"
+mkdir -p "$_bt_hx"
+for _bt_d in lib rc.d bin plugins themes; do
+    [ -d "$HX_HOME/$_bt_d" ] && command cp -R "$HX_HOME/$_bt_d" "$_bt_hx/"
+done
+command cp "$HX_CONF" "$_bt_hx/hellish.conf" 2>/dev/null
+mkdir -p "$_bt_hx/plugins/btdoc"
+printf '%s\n' 'hx_plugin btdoc on dev "a plugin of your own" || return 0' \
+    'bt_doc_fn() { :; }' \
+    'hx_func_doc bt_doc_fn "one | two" "bt_doc_fn <x>"' > "$_bt_hx/plugins/btdoc/plugin.hsh"
+_bt_rc="${HX_RC:-$T_REAL_HOME/.hellishrc}"
+if [ -r "$_bt_rc" ]; then
+    _bt_out=$(HX_HOME="$_bt_hx" HX_RC="$_bt_rc" \
+        "$(hx_shell_bin)" "$_bt_hx/bin/hx-gendoc" 2>/dev/null; printf '|%s' "$?")
+else
+    _bt_out="|skip"
+fi
+case "$_bt_out" in
+    *"|skip") t_skip "hx-gendoc — no ~/.hellishrc to load" ;;
+    *)
+    t_has "|0" "$_bt_out" "hx-gendoc succeeds"
+    t_eq "# Reference" "$(printf '%s\n' "$_bt_out" | head -1)" "and writes the reference"
+    t_has "## Contents" "$_bt_out" "with a table of contents"
+    t_has "| \`mkcd\` |" "$_bt_out" "a shipped function has its row"
+    t_has "## btdoc plugin" "$_bt_out" "a plugin ORDER does not know still has its section"
+    t_has "[btdoc plugin](#btdoc-plugin)" "$_bt_out" "and its entry in the contents"
+    t_has "| \`bt_doc_fn\` | \`bt_doc_fn <x>\` | one \\| two |" "$_bt_out" \
+        "its function is listed, with a pipe in the description escaped"
+    _bt_n=$(printf '%s\n' "$_bt_out" | sed -n 's/^Generated .*, \([0-9]*\) items\.$/\1/p')
+    _bt_rows=$(printf '%s\n' "$_bt_out" | grep -c '^| `')
+    _bt_plugs=$(printf '%s\n' "$_bt_out" | grep -c '^conf on ')
+    t_eq "$_bt_n" "$((_bt_rows + _bt_plugs))" \
+        "every registered item is in the file: a row each, a section for a plugin"
+    ;;
+esac

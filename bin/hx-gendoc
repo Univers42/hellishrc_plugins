@@ -48,7 +48,9 @@ _title() {
         sentinel)   echo "sentinel plugin" ;;
         forge)      echo "forge plugin" ;;
         ai)         echo "AI block" ;;
-        *)          echo "$1" ;;
+        *)  if [ -n "${HX_PLUG_DESC[$1]:-}" ]; then echo "$1 plugin"
+            else echo "$1"
+            fi ;;
     esac
 }
 
@@ -109,6 +111,23 @@ _rows() {   # _rows <owner> <kind>
     printf '\n'
 }
 
+# Every owner: ORDER's first, then any other -- a plugin you wrote or
+# installed -- by name. The footer promises that a registered name is in
+# this file, and an owner missing from ORDER used to drop out silently.
+_owners() {
+    local key o
+    printf '%s\n' $ORDER
+    for key in $(hx_item_keys_sorted); do
+        printf '%s\n' "${HX_ITEM_OWNER[$key]}"
+    done | sort -u | while read -r o; do
+        case " $(printf '%s ' $ORDER)" in
+            *" $o "*) ;;
+            *) printf '%s\n' "$o" ;;
+        esac
+    done
+}
+OWNERS="$(_owners)"
+
 # ── the document ────────────────────────────────────────────────────────────
 cat <<'HEADER'
 # Reference
@@ -133,7 +152,7 @@ printf 'Generated %s from hellish %s, %s items.\n' \
 
 # Contents
 printf '\n## Contents\n\n'
-for owner in $ORDER; do
+for owner in $OWNERS; do
     n=0
     for key in $(hx_item_keys_sorted); do
         [ "${HX_ITEM_OWNER[$key]}" = "$owner" ] && n=$((n + 1))
@@ -145,7 +164,7 @@ for owner in $ORDER; do
         "$(printf '%s' "$t" | tr 'A-Z ' 'a-z-')" "$n" "$word"
 done
 
-for owner in $ORDER; do
+for owner in $OWNERS; do
     n=0
     for key in $(hx_item_keys_sorted); do
         [ "${HX_ITEM_OWNER[$key]}" = "$owner" ] && n=$((n + 1))
