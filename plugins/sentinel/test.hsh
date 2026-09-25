@@ -1,0 +1,136 @@
+# plugins/sentinel/test.hsh — the dashboard's pieces, on canned numbers.
+#
+# df, free, ps, uptime and nproc are stubs, so every threshold and every row
+# is checked against numbers chosen here rather than whatever this machine
+# happens to be doing. The colours are replaced by visible markers.
+
+t_head "sentinel"
+
+HX_GRN="<g>" HX_YEL="<y>" HX_RED="<r>" HX_R="</>"
+
+# ── _sent_bar ───────────────────────────────────────────────────────────────
+t_eq "<g>#####.....</>  50%" "$(_sent_bar 50 10)"  "_sent_bar fills in proportion"
+t_eq "<g>..........</>   0%" "$(_sent_bar 0 10)"   "_sent_bar at 0% is empty"
+t_eq "<r>##########</> 100%" "$(_sent_bar 100 10)" "_sent_bar at 100% is full"
+t_eq "<y>########..</>  85%" "$(_sent_bar 85% 10)" "_sent_bar takes df's trailing %"
+t_eq "<g>..........</>   0%" "$(_sent_bar abc 10)" "_sent_bar treats a non-number as 0"
+t_eq "<g>" "$(_sent_bar 69 10 | cut -c1-3)" "_sent_bar is green below 70%"
+t_eq "<y>" "$(_sent_bar 70 10 | cut -c1-3)" "_sent_bar is yellow from 70%"
+t_eq "<y>" "$(_sent_bar 89 10 | cut -c1-3)" "_sent_bar is yellow below 90%"
+t_eq "<r>" "$(_sent_bar 90 10 | cut -c1-3)" "_sent_bar is red from 90%"
+t_eq "20" "$(_sent_bar 50 | tr -d -c '#.' | wc -c | tr -d ' ')" "_sent_bar is 20 wide by default"
+
+# ── sys_disk ────────────────────────────────────────────────────────────────
+t_stub df 'cat <<"EOF"
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       100G   42G   58G  42% /
+/dev/sdb1       500G  475G   25G  95% /data
+none               0     0     0    - /proc/weird
+EOF'
+_st_out=$(sys_disk)
+t_has "/          " "$_st_out" "sys_disk lists the root mount"
+t_has " 42%  " "$_st_out" "sys_disk shows each mount's use"
+t_has "58G free of 100G" "$_st_out" "sys_disk shows free and total"
+t_has "<r>" "$(printf '%s\n' "$_st_out" | grep /data)" "sys_disk colours a 95% mount red"
+t_hasnt "/proc/weird" "$_st_out" "sys_disk skips a zero-sized filesystem"
+t_calls_reset; sys_disk >/dev/null
+t_eq "df|-h|-x|tmpfs|-x|devtmpfs|-x|overlay" "$(t_calls)" \
+    "sys_disk leaves out tmpfs, devtmpfs and overlay, and no alias adds to it"
+
+# ── sys_mem ─────────────────────────────────────────────────────────────────
+# Like the real free, the stub prints human units when -h is anywhere in its
+# arguments: the rc aliases free='free -h', and a sys_mem that let the alias
+# in read "15Gi" as 15 megabytes.
+t_stub free 'case " $* " in *" -h "*) cat <<"EOF"
+               total        used        free      shared  buff/cache   available
+Mem:            15Gi       3.9Gi       8.8Gi       100Mi       2.9Gi        11Gi
+Swap:          1.9Gi       976Mi       1.0Gi
+EOF
+exit 0 ;; esac
+cat <<"EOF"
+               total        used        free      shared  buff/cache   available
+Mem:           16000        4000        9000         100        3000       11800
+Swap:           2000        1000        1000
+EOF'
+t_calls_reset
+_st_out=$(sys_mem)
+t_eq "free|-m
+free|-m" "$(t_calls)" "sys_mem runs free -m, whatever the user aliased free to"
+t_has "4000 / 16000 MB" "$_st_out" "sys_mem shows used and total RAM"
+t_has " 25%" "$(printf '%s\n' "$_st_out" | grep ram)" "sys_mem computes RAM use"
+t_has "1000 / 2000 MB" "$_st_out" "sys_mem shows swap when there is some"
+t_stub free 'printf "Mem: 8000 2000 6000 0 0 6000\nSwap: 0 0 0\n"'
+t_hasnt "swap" "$(sys_mem)" "sys_mem leaves out a machine with no swap"
+
+# ── sys_load ────────────────────────────────────────────────────────────────
+if [ -r /proc/loadavg ]; then
+    t_stub nproc 'echo 8'
+    t_stub uptime 'echo "up 3 hours, 2 minutes"'
+    _st_out=$(sys_load)
+    read -r _st_l1 _st_rest < /proc/loadavg
+    t_has "$_st_l1" "$_st_out" "sys_load shows the load averages"
+    t_has "(8 cores)" "$_st_out" "sys_load shows the core count"
+    t_has "up 3 hours, 2 minutes" "$_st_out" "sys_load shows the uptime"
+else
+    t_skip "sys_load — no /proc/loadavg on this machine"
+fi
+
+# ── sys_top ─────────────────────────────────────────────────────────────────
+t_stub ps 'cat <<"EOF"
+%MEM %CPU COMMAND
+12.5  3.0 firefox
+ 8.1  0.5 code
+ 4.0  0.1 slack
+ 2.2  9.9 hellish
+ 1.0  0.0 sshd
+ 0.5  0.0 cron
+EOF'
+_st_out=$(sys_top)
+t_eq "5" "$(printf '%s\n' "$_st_out" | grep -c '%mem')" "sys_top shows the five hungriest processes"
+t_has " 12.5%mem   3.0%cpu  firefox" "$_st_out" "sys_top formats memory, cpu and name"
+t_hasnt "cron" "$_st_out" "sys_top stops at five"
+t_calls_reset; sys_top >/dev/null
+t_eq "ps|-eo|pmem,pcpu,comm|--sort=-pmem" "$(t_calls)" "sys_top sorts by memory"
+
+# ── repos ───────────────────────────────────────────────────────────────────
+if command -v git >/dev/null 2>&1; then
+    command rm -f "$T_DIR/stubs/ps"; hash -r 2>/dev/null
+    export GIT_CONFIG_NOSYSTEM=1 GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t.invalid
+    export GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t.invalid
+    git init -q "$T_DIR/code/dirty" && git -C "$T_DIR/code/dirty" checkout -q -b topic 2>/dev/null
+    git -C "$T_DIR/code/dirty" commit -q --allow-empty -m first
+    printf 'x\n' > "$T_DIR/code/dirty/new.txt"; printf 'y\n' > "$T_DIR/code/dirty/two.txt"
+    git init -q "$T_DIR/code/clean"
+    git init -q "$T_DIR/code/a/b/c/toodeep"
+    printf 'z\n' > "$T_DIR/code/a/b/c/toodeep/f"
+    _st_out=$(repos "$T_DIR/code")
+    t_has "$T_DIR/code/dirty" "$_st_out" "repos lists a repository with uncommitted work"
+    t_has "topic" "$_st_out" "repos shows its branch"
+    t_has "2 file(s)" "$_st_out" "repos counts its changes"
+    t_hasnt "$T_DIR/code/clean" "$_st_out" "repos leaves out a clean repository"
+    t_hasnt "toodeep" "$_st_out" "repos looks no deeper than four levels"
+    t_has "~/" "$(HOME="$T_DIR/code"; repos "$T_DIR/code")" "repos writes paths under HOME with ~"
+else
+    t_skip "repos — no git on this machine"
+fi
+
+# ── sentinel, the whole dashboard ───────────────────────────────────────────
+_st_out=$(sentinel 2>&1)
+for _st_sec in load memory disk "top processes"; do
+    t_has "$_st_sec" "$_st_out" "sentinel shows the $_st_sec panel"
+done
+
+# ── _sent_check: the once-per-shell disk warning ────────────────────────────
+HX_SENTINEL_WATCH=0; HX_SENT_WARNED=0
+t_eq "" "$(_sent_check 2>&1)" "_sent_check is silent unless HX_SENTINEL_WATCH=1"
+HX_SENTINEL_WATCH=1; HX_SENTINEL_DISK_WARN=90
+t_has "disk /data is 95% full" "$(_sent_check 2>&1)" "_sent_check warns about the fullest mount over the threshold"
+_sent_check >/dev/null 2>&1
+t_eq "1" "$HX_SENT_WARNED" "_sent_check remembers that it warned"
+t_eq "" "$(_sent_check 2>&1)" "_sent_check warns only once per shell"
+HX_SENT_WARNED=0; HX_SENTINEL_DISK_WARN=96
+t_eq "" "$(_sent_check 2>&1)" "_sent_check is silent below the threshold"
+t_stub df 'printf "Filesystem Size Used Avail Use%% Mounted\n"'
+HX_SENTINEL_DISK_WARN=0
+t_rc 0 "_sent_check survives a df with no mounts" _sent_check
+HX_SENTINEL_WATCH=0
