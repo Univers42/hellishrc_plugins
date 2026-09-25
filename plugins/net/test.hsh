@@ -1,0 +1,120 @@
+# plugins/net/test.hsh — every net helper, offline.
+#
+# ss, ip, curl and dig are stubs that print canned answers. waitport and scan
+# use /dev/tcp, so they get a real listener on 127.0.0.1 (python3, when the
+# machine has it) and a port that was just freed for the closed case.
+
+t_head "net"
+
+# _nt <function> [args...] — the calls it made, one per line
+_nt() {
+    t_calls_reset
+    "$@" >/dev/null 2>&1 </dev/null
+    t_calls
+}
+
+# ── ports / port ────────────────────────────────────────────────────────────
+t_stub ss 'cat <<"EOF"
+Netid State  Recv-Q Send-Q Local Address:Port Peer Address:Port Process
+tcp   LISTEN 0      128    0.0.0.0:8080       0.0.0.0:*    users:(("node",pid=11,fd=3))
+tcp   LISTEN 0      128    0.0.0.0:80         0.0.0.0:*    users:(("nginx",pid=12,fd=6))
+udp   UNCONN 0      0      127.0.0.1:5353     0.0.0.0:*    users:(("Avahi",pid=13,fd=12))
+EOF'
+t_eq "4" "$(ports | wc -l | tr -d ' ')" "ports lists every listening socket"
+t_eq "ss|-tulpn" "$(_nt ports)" "ports asks ss for TCP and UDP listeners with their processes"
+t_eq "1" "$(ports AVAHI | wc -l | tr -d ' ')" "ports filters case-insensitively"
+t_eq "0" "$(ports -x | wc -l | tr -d ' ')" "ports takes a filter that starts with a dash"
+t_rc 2 "port without a number is a usage error" port
+t_has "nginx" "$(port 80)" "port names the process on a port"
+t_hasnt "node" "$(port 80)" "port 80 does not match :8080"
+t_has "node" "$(port 8080)" "port matches the whole port number"
+t_rc 1 "port fails when nothing listens" port 9999
+t_has "nothing listening on port 9999" "$(port 9999 2>&1)" "and says so"
+
+# ── localip ─────────────────────────────────────────────────────────────────
+t_stub ip 'cat <<"EOF"
+2: eth0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc fq_codel state UP
+    inet 192.168.1.5/24 brd 192.168.1.255 scope global dynamic eth0
+3: wlan0: <BROADCAST,MULTICAST,UP,LOWER_UP> mtu 1500 qdisc noqueue state UP
+    inet 10.0.0.7/8 brd 10.255.255.255 scope global wlan0
+EOF'
+t_eq "eth0       192.168.1.5
+wlan0      10.0.0.7" "$(localip)" "localip prints each interface and its address, no prefix length"
+t_eq "ip|-4|addr|show|scope|global" "$(_nt localip)" "localip asks for global IPv4 addresses only"
+
+# ── HTTP ────────────────────────────────────────────────────────────────────
+export NT_CURL_RC=0
+t_stub curl 'printf "203.0.113.7"; exit "$NT_CURL_RC"'
+t_eq "203.0.113.7" "$(pubip)" "pubip prints the address"
+t_eq "curl|-fsS|--max-time|5|https://ifconfig.me" "$(_nt pubip)" "pubip asks ifconfig.me, with a timeout"
+NT_CURL_RC=7
+t_rc 1 "pubip fails when the service cannot be reached" pubip
+t_has "could not reach ifconfig.me" "$(pubip 2>&1)" "and says so"
+NT_CURL_RC=0
+
+t_rc 2 "hdr without a URL is a usage error" hdr
+t_eq "curl|-sSIL|--max-time|10|https://example.test" "$(_nt hdr https://example.test)" \
+    "hdr asks for headers only, following redirects"
+t_rc 2 "httptime without a URL is a usage error" httptime
+_nt_out=$(_nt httptime https://example.test)
+t_has "curl|-sS|-o|/dev/null|--max-time|15|-w|" "$_nt_out" "httptime discards the body and times the request"
+for _nt_w in time_namelookup time_connect time_appconnect time_starttransfer time_total http_code size_download; do
+    t_has "%{$_nt_w}" "$_nt_out" "httptime reports $_nt_w"
+done
+t_has "|https://example.test" "$_nt_out" "httptime passes the URL last"
+
+# Without curl on PATH, each says so rather than failing obscurely.
+mkdir -p "$T_DIR/nocurl"
+( PATH="$T_DIR/nocurl"; hash -r 2>/dev/null
+  t_rc 1 "pubip without curl fails" pubip
+  t_has "needs curl" "$(hdr https://x.test 2>&1)" "hdr without curl says it needs curl"
+  t_has "needs curl" "$(httptime https://x.test 2>&1)" "httptime without curl says it needs curl"
+  printf '%s %s %s\n' "$HX_T_PASS" "$HX_T_FAIL" "$HX_T_SKIP" > "$T_DIR/nocurl.counts" )
+read -r HX_T_PASS HX_T_FAIL HX_T_SKIP < "$T_DIR/nocurl.counts"
+
+# ── dns ─────────────────────────────────────────────────────────────────────
+t_stub dig 'case "$3" in
+    A) printf "93.184.216.34\n" ;;
+    MX) printf "10 mx1.example.test.\n20 mx2.example.test.\n" ;;
+esac'
+t_rc 2 "dns without a name is a usage error" dns
+_nt_out=$(dns example.test)
+t_has "93.184.216.34" "$_nt_out" "dns prints the A record"
+t_has "10 mx1.example.test. 20 mx2.example.test." "$_nt_out" "dns joins a multi-line answer onto one line"
+t_hasnt "CNAME" "$_nt_out" "dns leaves out a type with no answer"
+t_eq "dig|+short|example.test|A
+dig|+short|example.test|AAAA
+dig|+short|example.test|CNAME
+dig|+short|example.test|MX
+dig|+short|example.test|TXT
+dig|+short|example.test|NS" "$(_nt dns example.test)" "dns asks for A, AAAA, CNAME, MX, TXT and NS"
+
+# ── waitport / scan, against a real socket ──────────────────────────────────
+t_rc 2 "waitport without a port is a usage error" waitport localhost
+if command -v python3 >/dev/null 2>&1; then
+    # the listener, and a port that was free a moment ago
+    python3 -c 'import socket,time
+s=socket.socket(); s.bind(("127.0.0.1",0)); s.listen(16)
+print(s.getsockname()[1], flush=True); time.sleep(30)' > "$T_DIR/port" &
+    _nt_pid=$!
+    _nt_closed=$(python3 -c 'import socket
+s=socket.socket(); s.bind(("127.0.0.1",0)); print(s.getsockname()[1]); s.close()')
+    _nt_i=0
+    while [ ! -s "$T_DIR/port" ] && [ "$_nt_i" -lt 50 ]; do sleep 0.1; _nt_i=$((_nt_i + 1)); done
+    _nt_open=$(cat "$T_DIR/port")
+
+    t_has "127.0.0.1:$_nt_open is up (after 0s)" "$(waitport 127.0.0.1 "$_nt_open" 3 2>&1)" \
+        "waitport returns at once on an open port"
+    t_rc 0 "waitport succeeds on an open port" waitport 127.0.0.1 "$_nt_open" 3
+    t_rc 1 "waitport fails on a port that stays closed" waitport 127.0.0.1 "$_nt_closed" 1
+    t_has "did not open within 1s" "$(waitport 127.0.0.1 "$_nt_closed" 1 2>&1)" "and says after how long"
+
+    _nt_out=$(scan 127.0.0.1 "$_nt_open" "$_nt_open")
+    t_has "open" "$_nt_out" "scan reports an open port"
+    t_has "1 open port(s)" "$_nt_out" "scan counts it"
+    t_has "0 open port(s)" "$(scan 127.0.0.1 "$_nt_closed" "$_nt_closed")" "scan finds nothing on a closed port"
+    kill "$_nt_pid" 2>/dev/null
+    wait "$_nt_pid" 2>/dev/null
+else
+    t_skip "waitport/scan against a live socket — no python3 to listen with"
+fi
