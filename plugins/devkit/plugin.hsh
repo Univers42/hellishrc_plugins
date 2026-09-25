@@ -117,7 +117,8 @@ proj() {
     hx_head "$(basename "$r")"
     hx_kv "type" "$t"
     hx_kv "root" "${r/#$HOME/\~}"
-    [ "$t" = "node" ] && hx_kv "runner" "$(_devkit_runner)"
+    # The lock files sit at the root, not in whatever subdirectory we are in.
+    [ "$t" = "node" ] && hx_kv "runner" "$(cd "$r" && _devkit_runner)"
     command -v git >/dev/null 2>&1 && [ -d "$r/.git" ] && hx_kv "branch" "$(git -C "$r" rev-parse --abbrev-ref HEAD 2>/dev/null)"
     [ -f "$r/.env" ] && hx_kv "env file" ".env present (envload to export it)"
     printf '\n%s  verbs%s\n' "$HX_ORA" "$HX_R"

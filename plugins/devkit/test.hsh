@@ -1,0 +1,195 @@
+# plugins/devkit/test.hsh — detection, dispatch and every verb.
+#
+# The toolchains are stubs (t_stub): the question is WHICH command devkit runs
+# for each kind of project, with which arguments, and that is answered
+# without cargo, go, npm or maven installed.
+
+t_head "devkit"
+
+# _dk_proj <dir> <marker...> — a fresh directory holding the given files.
+_dk_proj() {
+    local d="$T_DIR/p/$1"
+    shift
+    mkdir -p "$d"
+    for _m in "$@"; do : > "$d/$_m"; done
+    printf '%s' "$d"
+}
+
+# ── proj_type: every marker, and the order they win in ──────────────────────
+for _dk_case in rust:Cargo.toml go:go.mod python:pyproject.toml python:setup.py \
+    python:requirements.txt node:package.json maven:pom.xml gradle:build.gradle \
+    cmake:CMakeLists.txt make:Makefile docker:Dockerfile; do
+    _dk_want="${_dk_case%%:*}"
+    _dk_file="${_dk_case#*:}"
+    t_eq "$_dk_want" "$(proj_type "$(_dk_proj "t-$_dk_file" "$_dk_file")")" \
+        "proj_type: $_dk_file means $_dk_want"
+done
+t_eq "unknown" "$(proj_type "$(_dk_proj empty)")" "proj_type: no marker means unknown"
+t_eq "rust"   "$(proj_type "$(_dk_proj o1 Makefile Cargo.toml)")"      "proj_type: Cargo.toml wins over a Makefile"
+t_eq "go"     "$(proj_type "$(_dk_proj o2 package.json go.mod)")"      "proj_type: go.mod wins over package.json"
+t_eq "python" "$(proj_type "$(_dk_proj o3 Dockerfile setup.py)")"      "proj_type: python wins over a Dockerfile"
+t_eq "cmake"  "$(proj_type "$(_dk_proj o4 Makefile CMakeLists.txt)")"  "proj_type: CMakeLists.txt wins over its Makefile"
+t_eq "node" "$(cd "$(_dk_proj here package.json)" && proj_type)" "proj_type defaults to the current directory"
+
+# ── proj_root ───────────────────────────────────────────────────────────────
+_dk_r=$(_dk_proj root Makefile)
+mkdir -p "$_dk_r/src/deep"
+t_eq "$_dk_r" "$(cd "$_dk_r/src/deep" && proj_root)" "proj_root climbs to the nearest project marker"
+mkdir -p "$T_DIR/p/vcs/.git" "$T_DIR/p/vcs/a/b"
+t_eq "$T_DIR/p/vcs" "$(cd "$T_DIR/p/vcs/a/b" && proj_root)" "proj_root stops at a .git directory"
+# The failure case holds only if nothing above the scratch directory looks
+# like a project itself (a stray /tmp/Makefile would make it one).
+_dk_up="$T_DIR"; _dk_clean=1
+while [ "$_dk_up" != "/" ]; do
+    _dk_up=$(dirname "$_dk_up")
+    { [ -d "$_dk_up/.git" ] || [ "$(proj_type "$_dk_up")" != "unknown" ]; } && _dk_clean=0
+done
+mkdir -p "$T_DIR/p/none/x"
+if [ "$_dk_clean" = "1" ]; then
+    t_rc 1 "proj_root fails where there is no project" eval 'cd "$T_DIR/p/none/x" && proj_root'
+else
+    t_skip "proj_root failure case — a directory above $T_DIR looks like a project"
+fi
+
+# ── node helpers ────────────────────────────────────────────────────────────
+_dk_n=$(_dk_proj node)
+printf '{\n  "scripts": {\n    "test": "jest",\n    "build" : "tsc"\n  }\n}\n' > "$_dk_n/package.json"
+cd "$_dk_n"
+t_true  "_devkit_node_script finds a declared script"         _devkit_node_script test
+t_true  "_devkit_node_script allows a space before the colon" _devkit_node_script build
+t_false "_devkit_node_script rejects an undeclared script"    _devkit_node_script lint
+t_eq "npm" "$(_devkit_runner)" "_devkit_runner defaults to npm"
+: > yarn.lock;       t_eq "yarn" "$(_devkit_runner)" "_devkit_runner: yarn.lock means yarn"
+: > pnpm-lock.yaml;  t_eq "pnpm" "$(_devkit_runner)" "_devkit_runner: pnpm-lock.yaml wins over yarn.lock"
+: > bun.lockb;       t_eq "bun"  "$(_devkit_runner)" "_devkit_runner: bun.lockb wins over every other lock"
+command rm -f yarn.lock pnpm-lock.yaml bun.lockb
+cd "$T_DIR"
+t_false "_devkit_node_script is false without a package.json" _devkit_node_script test
+
+# ── make helper ─────────────────────────────────────────────────────────────
+_dk_m=$(_dk_proj mk)
+printf 'all: x\ntest : all\n\tcc -o x x.c\nre:\n' > "$_dk_m/Makefile"
+cd "$_dk_m"
+t_true  "_devkit_make_target finds a target"                  _devkit_make_target all
+t_true  "_devkit_make_target allows a space before the colon" _devkit_make_target test
+t_false "_devkit_make_target rejects a missing target"        _devkit_make_target lint
+t_false "_devkit_make_target does not take a prefix for a target" _devkit_make_target t
+cd "$T_DIR"
+t_false "_devkit_make_target is false without a Makefile" _devkit_make_target all
+
+# ── dispatch: what each verb runs, per project type ─────────────────────────
+for _dk_tool in cargo go pytest python3 ruff black npm pnpm yarn bun mvn cmake ctest make; do
+    t_stub "$_dk_tool"
+done
+
+# _dk_verb <dir> <function> [args...] — the calls it made, one per line
+_dk_verb() {
+    local d="$1"
+    shift
+    t_calls_reset
+    ( cd "$d" && "$@" ) >/dev/null 2>&1
+    t_calls
+}
+
+_dk_d=$(_dk_proj rs Cargo.toml)
+t_eq "cargo|build|--release" "$(_dk_verb "$_dk_d" build --release)" "rust: build is cargo build"
+t_eq "cargo|run|--|-v"       "$(_dk_verb "$_dk_d" run -- -v)"       "rust: run is cargo run"
+t_eq "cargo|test|x"          "$(_dk_verb "$_dk_d" test_ x)"         "rust: test_ is cargo test"
+t_eq "cargo|fmt"             "$(_dk_verb "$_dk_d" fmt)"             "rust: fmt is cargo fmt"
+t_eq "cargo|clippy"          "$(_dk_verb "$_dk_d" lint)"            "rust: lint is cargo clippy"
+
+_dk_d=$(_dk_proj g go.mod)
+t_eq "go|build|./..."      "$(_dk_verb "$_dk_d" build)"      "go: build is go build ./..."
+t_eq "go|run|.|a b"        "$(_dk_verb "$_dk_d" run "a b")"  "go: run is go run . with the arguments intact"
+t_eq "go|test|./...|-run|X" "$(_dk_verb "$_dk_d" test_ -run X)" "go: test_ is go test ./..."
+t_eq "go|fmt|./..."        "$(_dk_verb "$_dk_d" fmt)"        "go: fmt is go fmt ./..."
+t_eq "go|vet|./..."        "$(_dk_verb "$_dk_d" lint)"       "go: lint is go vet ./..."
+
+_dk_d=$(_dk_proj py pyproject.toml)
+t_eq "pytest|-k|x"            "$(_dk_verb "$_dk_d" test_ -k x)" "python: test_ is pytest when it is installed"
+t_eq "ruff|format|."          "$(_dk_verb "$_dk_d" fmt)"        "python: fmt is ruff format when ruff is installed"
+t_eq "ruff|check|."           "$(_dk_verb "$_dk_d" lint)"       "python: lint is ruff check when ruff is installed"
+t_eq "python3|app.py|--flag"  "$(_dk_verb "$_dk_d" run app.py --flag)" "python: run is python3"
+t_eq "python3|-m|build"       "$(_dk_verb "$_dk_d" build)"      "python: build is python3 -m build"
+# Without pytest and ruff: a PATH of stubs plus the few tools devkit itself
+# needs, so a real pytest or ruff on this machine cannot answer instead.
+mkdir -p "$T_DIR/only"
+for _dk_tool in python3 black; do command cp "$T_DIR/stubs/$_dk_tool" "$T_DIR/only/"; done
+_dk_verb_bare() {
+    local d="$1"
+    shift
+    t_calls_reset
+    ( PATH="$T_DIR/only"; hash -r 2>/dev/null; cd "$d" && "$@" ) >/dev/null 2>&1
+    t_calls
+}
+t_eq "python3|-m|unittest" "$(_dk_verb_bare "$_dk_d" test_)" "python: test_ falls back to unittest without pytest"
+t_eq "black|."             "$(_dk_verb_bare "$_dk_d" fmt)"   "python: fmt falls back to black without ruff"
+t_eq "python3|-m|pyflakes|." "$(_dk_verb_bare "$_dk_d" lint)" "python: lint falls back to pyflakes without ruff"
+
+_dk_d=$(_dk_proj nd)
+printf '{ "scripts": { "test": "jest", "build": "tsc" } }\n' > "$_dk_d/package.json"
+t_eq "npm|run|test|--watch" "$(_dk_verb "$_dk_d" test_ --watch)" "node: test_ runs the package's test script"
+: > "$_dk_d/pnpm-lock.yaml"
+t_eq "pnpm|run|build" "$(_dk_verb "$_dk_d" build)" "node: the verb goes through the repo's own runner"
+t_eq "" "$(_dk_verb "$_dk_d" lint)" "node: a verb with no script runs nothing"
+t_rc 1 "node: a verb with no script fails" eval 'cd "$_dk_d" && lint'
+t_has 'no "lint" script' "$(cd "$_dk_d" && lint 2>&1)" "node: and says which script is missing"
+
+_dk_d=$(_dk_proj mv pom.xml)
+t_eq "mvn|package|-q" "$(_dk_verb "$_dk_d" build -q)" "maven: build is mvn package"
+t_eq "mvn|test"       "$(_dk_verb "$_dk_d" test_)"    "maven: test_ is mvn test"
+t_rc 1 "maven: an unmapped verb fails" eval 'cd "$_dk_d" && fmt'
+
+_dk_d=$(_dk_proj gr build.gradle)
+{ printf '#!/bin/sh\n'; printf 'printf "gradlew"; for a in "$@"; do printf "|%%s" "$a"; done; printf "\\n"\n'; } > "$_dk_d/gradlew"
+chmod +x "$_dk_d/gradlew"
+t_eq "gradlew|build" "$(cd "$_dk_d" && build 2>&1)" "gradle: build is ./gradlew build"
+t_eq "gradlew|test"  "$(cd "$_dk_d" && test_ 2>&1)" "gradle: test_ is ./gradlew test"
+
+_dk_d=$(_dk_proj cm CMakeLists.txt)
+t_eq "cmake|-B|build
+cmake|--build|build|-j4" "$(_dk_verb "$_dk_d" build -j4)" "cmake: build configures, then builds"
+t_eq "ctest|--test-dir|build" "$(_dk_verb "$_dk_d" test_)" "cmake: test_ is ctest in build/"
+
+_dk_d=$(_dk_proj mf)
+printf 'test:\n\ttrue\nfmt:\n\ttrue\n' > "$_dk_d/Makefile"
+t_eq "make|test|V=1" "$(_dk_verb "$_dk_d" test_ V=1)" "make: test_ is make test"
+t_eq "make|fmt"      "$(_dk_verb "$_dk_d" fmt)"       "make: fmt is make fmt"
+t_eq "" "$(_dk_verb "$_dk_d" lint)" "make: a missing target runs nothing"
+t_has "no 'lint' target" "$(cd "$_dk_d" && lint 2>&1)" "make: and says which target is missing"
+
+_dk_d=$(_dk_proj dk Dockerfile)
+t_rc 1 "docker: devkit has no verbs for it" eval 'cd "$_dk_d" && build'
+t_has "don't know how to 'build' a 'docker' project" "$(cd "$_dk_d" && build 2>&1)" \
+    "an unknown combination says which verb and which type"
+t_has "a 'unknown' project" "$(cd "$T_DIR/p/none/x" && build 2>&1)" "a directory with no project says so"
+
+# ── proj ────────────────────────────────────────────────────────────────────
+_dk_d=$(_dk_proj desc package.json)
+: > "$_dk_d/yarn.lock"; : > "$_dk_d/.env"
+mkdir -p "$_dk_d/sub"
+_dk_out=$(cd "$_dk_d/sub" && proj)
+t_has "desc" "$_dk_out" "proj names the project from its root"
+t_has "node" "$_dk_out" "proj shows the type"
+t_has "yarn" "$_dk_out" "proj shows a node project's runner"
+t_has ".env present" "$_dk_out" "proj points out a .env file"
+t_has "build  run  test_  fmt  lint" "$_dk_out" "proj lists the verbs"
+if [ "$_dk_clean" = "1" ]; then
+    t_rc 1 "proj fails where there is no project" eval 'cd "$T_DIR/p/none/x" && proj'
+fi
+
+# ── scratch ─────────────────────────────────────────────────────────────────
+HX_STATE="$T_DIR/state"
+mkdir -p "$HX_STATE"
+t_stub myeditor
+_dk_f=$(EDITOR=myeditor scratch py)
+case "$_dk_f" in
+    "$HX_STATE"/scratch-*.py) t_ok "scratch names a timestamped file in HX_STATE with the extension" ;;
+    *) t_bad "scratch names a timestamped file in HX_STATE — got [$_dk_f]" ;;
+esac
+t_true "scratch creates the file" test -f "$_dk_f"
+t_eq "myeditor|$_dk_f" "$(grep '^myeditor' "$T_CALLS")" "scratch opens it in \$EDITOR"
+case "$(EDITOR=myeditor scratch)" in
+    *.sh) t_ok "scratch defaults to a .sh file" ;;
+    *) t_bad "scratch defaults to a .sh file" ;;
+esac
