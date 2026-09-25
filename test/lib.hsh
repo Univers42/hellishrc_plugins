@@ -1,0 +1,133 @@
+# ~/.hellish/test/lib.hsh — what every test file shares.
+#
+# run.hsh sources this first. Each plugin's own tests (plugins/<name>/test.hsh)
+# and each unit file under test/ then run through t_isolated, in a subshell of
+# their own, so a test that cd's, stubs a command or rebinds HOME cannot leak
+# into the next one.
+#
+# The assertions only count. A file never exits on a failure, so one broken
+# check cannot hide the others behind it.
+
+HX_T_PASS=${HX_T_PASS:-0}
+HX_T_FAIL=${HX_T_FAIL:-0}
+HX_T_SKIP=${HX_T_SKIP:-0}
+HX_T_VERBOSE=${HX_T_VERBOSE:-0}
+
+t_head() { printf '\n\033[1;38;5;209m%s\033[0m\n' "$*"; }
+
+t_ok()   {
+    HX_T_PASS=$((HX_T_PASS + 1))
+    [ "$HX_T_VERBOSE" = "1" ] && printf '  \033[32mpass\033[0m %s\n' "$*"
+    return 0
+}
+t_bad()  { HX_T_FAIL=$((HX_T_FAIL + 1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; return 0; }
+t_skip() { HX_T_SKIP=$((HX_T_SKIP + 1)); printf '  \033[90mskip\033[0m %s\n' "$*"; return 0; }
+
+# t_eq <expected> <actual> <label>
+t_eq() {
+    if [ "$1" = "$2" ]; then t_ok "$3"
+    else t_bad "$3 — expected [$1], got [$2]"
+    fi
+}
+t_true()  { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_ok "$l"; else t_bad "$l"; fi; }
+t_false() { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_bad "$l (expected failure)"; else t_ok "$l"; fi; }
+t_defined() { if command -v "$1" >/dev/null 2>&1; then t_ok "$2"; else t_bad "$2 — '$1' not defined"; fi; }
+
+# t_has <needle> <haystack> <label> — the text contains the needle, verbatim.
+t_has() {
+    case "$2" in
+        *"$1"*) t_ok "$3" ;;
+        *) t_bad "$3 — [$1] not in [$2]" ;;
+    esac
+}
+# t_hasnt <needle> <haystack> <label>
+t_hasnt() {
+    case "$2" in
+        *"$1"*) t_bad "$3 — [$1] should not be in [$2]" ;;
+        *) t_ok "$3" ;;
+    esac
+}
+
+# t_rc <status> <label> <command...> — the command's exit status, output
+# discarded. For a function that has to FAIL in one particular way.
+t_rc() {
+    local want="$1" l="$2" got
+    shift 2
+    "$@" >/dev/null 2>&1
+    got=$?
+    t_eq "$want" "$got" "$l"
+}
+
+# ── stubs ───────────────────────────────────────────────────────────────────
+# t_stub <name> [sh-body] — put a fake <name> first on PATH. Every call is
+# logged to $T_CALLS as one line, the name and each argument joined by '|':
+#
+#     docker|ps|-q
+#
+# and the body, if any, then runs as a /bin/sh script with the same "$@". A
+# plugin that wraps docker, curl or ss is tested for WHAT it asks them, with
+# no daemon, no network and no dependence on what this machine has installed.
+t_stub() {
+    local name="$1" body="${2:-}" f
+    f="$T_DIR/stubs/$name"
+    {
+        printf '#!/bin/sh\n'
+        printf '{ printf %%s %s; for _a in "$@"; do printf "|%%s" "$_a"; done; printf "\\n"; } >> "$T_CALLS"\n' "$name"
+        printf '%s\n' "$body"
+    } > "$f"
+    chmod +x "$f"
+    hash -r 2>/dev/null
+    return 0
+}
+
+# t_calls — the log, one call per line. t_calls_reset empties it.
+t_calls() { cat "$T_CALLS" 2>/dev/null; }
+t_calls_reset() { : > "$T_CALLS"; }
+
+# ── isolation ───────────────────────────────────────────────────────────────
+# t_isolated <file> — run one test file in a subshell, in a scratch directory
+# of its own that is also its HOME, with a stub directory first on PATH, and
+# add its counts to ours. A file that dies half-way is a failure, not silence.
+#
+# HOME is the scratch directory on purpose: this suite runs on real machines
+# (`hellish ~/.hellish/test/run.hsh`), and a test that drives `clean`, `jump`
+# or `mark` must not touch the real home even when it gets a path wrong.
+t_isolated() {
+    local f="$1" name cnt p="" b="" s=""
+    name="${f#"$HX_HOME"/}"
+    [ -r "$f" ] || { t_bad "$name — not readable"; return 0; }
+    cnt=$(mktemp "${TMPDIR:-/tmp}/hx-t-counts.XXXXXX") || { t_bad "$name — no mktemp"; return 0; }
+    (
+        T_DIR=$(mktemp -d "${TMPDIR:-/tmp}/hx-t.XXXXXX") || exit 1
+        T_CALLS="$T_DIR/calls"
+        export T_CALLS
+        mkdir -p "$T_DIR/stubs" "$T_DIR/home"
+        : > "$T_CALLS"
+        T_REAL_HOME="$HOME"
+        HOME="$T_DIR/home"
+        # The real configuration is read, never written: a file that saves
+        # the conf or records state does it here. HX_HOME stays, since that
+        # is where the code under test lives.
+        mkdir -p "$T_DIR/state"
+        command cp "$HX_CONF" "$T_DIR/hellish.conf" 2>/dev/null
+        HX_CONF="$T_DIR/hellish.conf"
+        HX_STATE="$T_DIR/state"
+        PATH="$T_DIR/stubs:$PATH"
+        hash -r 2>/dev/null
+        HX_T_PASS=0; HX_T_FAIL=0; HX_T_SKIP=0
+        cd "$T_DIR" || exit 1
+        . "$f"
+        printf '%s %s %s\n' "$HX_T_PASS" "$HX_T_FAIL" "$HX_T_SKIP" > "$cnt"
+        cd / && command rm -rf "$T_DIR"
+    )
+    read -r p b s < "$cnt"
+    command rm -f "$cnt"
+    if [ -z "$p" ]; then
+        t_bad "$name — the file stopped before its end"
+        return 0
+    fi
+    HX_T_PASS=$((HX_T_PASS + p))
+    HX_T_FAIL=$((HX_T_FAIL + b))
+    HX_T_SKIP=$((HX_T_SKIP + s))
+    return 0
+}

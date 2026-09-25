@@ -11,31 +11,15 @@
 # user-mode install (every 42 machine) puts the binary in ~/.local/bin, and the
 # absolute path made this file unrunnable there.
 
-HX_T_PASS=0
-HX_T_FAIL=0
-HX_T_SKIP=0
 HX_T_VERBOSE=0
 [ "${1:-}" = "-v" ] && HX_T_VERBOSE=1
 
-t_head() { printf '\n\033[1;38;5;209m%s\033[0m\n' "$*"; }
-
-t_ok()   {
-    HX_T_PASS=$((HX_T_PASS + 1))
-    [ "$HX_T_VERBOSE" = "1" ] && printf '  \033[32mpass\033[0m %s\n' "$*"
-    return 0
-}
-t_bad()  { HX_T_FAIL=$((HX_T_FAIL + 1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; return 0; }
-t_skip() { HX_T_SKIP=$((HX_T_SKIP + 1)); printf '  \033[90mskip\033[0m %s\n' "$*"; return 0; }
-
-# t_eq <expected> <actual> <label>
-t_eq() {
-    if [ "$1" = "$2" ]; then t_ok "$3"
-    else t_bad "$3 — expected [$1], got [$2]"
-    fi
-}
-t_true()  { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_ok "$l"; else t_bad "$l"; fi; }
-t_false() { local l="$1"; shift; if "$@" >/dev/null 2>&1; then t_bad "$l (expected failure)"; else t_ok "$l"; fi; }
-t_defined() { if command -v "$1" >/dev/null 2>&1; then t_ok "$2"; else t_bad "$2 — '$1' not defined"; fi; }
+# The assertions, the stubs and t_isolated. They live in test/lib.hsh so a
+# plugin's own test.hsh and each unit file under test/ use the same ones.
+. "${HX_HOME:-$HOME/.hellish}/test/lib.hsh"
+HX_T_PASS=0
+HX_T_FAIL=0
+HX_T_SKIP=0
 
 # ── load the real configuration ─────────────────────────────────────────────
 t_head "load"
@@ -355,6 +339,22 @@ if t_on forge; then
         t_bad "forge new failed"
     fi
 fi
+
+# ── unit suites ─────────────────────────────────────────────────────────────
+# Every function of lib/ and rc.d/, and each plugin's own test.hsh, one file
+# at a time through t_isolated: a subshell with a scratch HOME, a copy of the
+# conf and stubs first on PATH, so no file can leak into the next one or
+# touch the real home. A plugin that is off skips its own checks.
+for _f in "$HX_HOME"/test/lib_*.hsh "$HX_HOME"/test/rc_*.hsh \
+          "$HX_HOME"/test/bin_*.hsh "$HX_HOME"/plugins/*/test.hsh; do
+    [ -r "$_f" ] || continue              # no nullglob: guard by hand
+    case "$_f" in
+        "$HX_HOME"/plugins/*)
+            _p="${_f%/test.hsh}"; _p="${_p##*/}"
+            t_on "$_p" || continue ;;
+    esac
+    t_isolated "$_f"
+done
 
 # ── prompt ──────────────────────────────────────────────────────────────────
 # The theme engine has its own file, because it is the largest single piece of
