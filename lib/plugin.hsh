@@ -25,6 +25,9 @@ HX_PLUG_ORDER=()
 hx_plugin() {
     local name="$1" def="$2" group="$3" desc="$4"
     HX_CURRENT_MODULE="$name"
+    # A reload declares the plugin again: forget what the last load found
+    # missing, or a command installed since would still be reported.
+    unset "HX_PLUG_NEEDS[$name]" "HX_PLUG_MISSING[$name]"
     hx_feature "$name" "$def" "$group" "$desc"
     hx_item plugin "$name" "$name" "$desc"
     hx_aset HX_PLUG_DESC  "$name" "$desc"
@@ -35,14 +38,16 @@ hx_plugin() {
 
 # hx_needs <cmd> [cmd ...] — record external dependencies of the current plugin.
 # Never fails the load: a plugin degrades, it does not explode. Missing commands
-# surface in `hxp doctor` and `help_conf --doctor`.
+# surface in `hxp doctor` and `help_conf --doctor`. Several calls add up.
 hx_needs() {
-    local p="$HX_CURRENT_MODULE" c miss=
+    local p="$HX_CURRENT_MODULE" c had miss
+    had="${HX_PLUG_NEEDS[$p]:-}"
+    miss="${HX_PLUG_MISSING[$p]:-}"
     for c in "$@"; do
-        command -v "$c" >/dev/null 2>&1 || miss="$miss $c"
+        command -v "$c" >/dev/null 2>&1 || miss="${miss:+$miss }$c"
     done
-    hx_aset HX_PLUG_NEEDS "$p" "$*"
-    [ -n "$miss" ] && hx_aset HX_PLUG_MISSING "$p" "${miss# }"
+    hx_aset HX_PLUG_NEEDS "$p" "${had:+$had }$*"
+    [ -n "$miss" ] && hx_aset HX_PLUG_MISSING "$p" "$miss"
     return 0
 }
 
@@ -83,7 +88,10 @@ hxp() {
         catalog)   _hxp_catalog ;;
         doctor)    _hxp_doctor ;;
         path)      printf '%s\n' "$HX_PLUGIN_DIR" ;;
-        new)       hx_have forge_new && forge_new "$@" || hx_err "the 'forge' plugin provides 'hxp new' (conf on forge)" ;;
+        # An if, not `a && b || c`: that blamed a missing forge for every
+        # forge_new failure (a name taken, a bad name) and returned 0.
+        new)       if hx_have forge_new; then forge_new "$@"
+                   else hx_err "the 'forge' plugin provides 'hxp new' (conf on forge)"; return 1; fi ;;
         help|-h|--help) _hxp_help ;;
         *)         hx_err "hxp: unknown command '$cmd'"; _hxp_help; return 2 ;;
     esac
@@ -131,8 +139,13 @@ _hxp_install() {
 _hxp_remove() {
     local n="${1:-}"
     [ -n "$n" ] || { hx_err "usage: hxp remove <name>"; return 2; }
+    # The name is a path component and nothing else. `hxp remove ../rc.d`
+    # used to pass the -d test and delete ~/.hellish/rc.d.
+    case "$n" in
+        .*|*[!A-Za-z0-9_-]*) hx_err "not a plugin name: $n"; return 2 ;;
+    esac
     [ -d "$HX_PLUGIN_DIR/$n" ] || { hx_err "not installed: $n"; return 1; }
-    rm -rf "$HX_PLUGIN_DIR/$n"
+    command rm -rf "$HX_PLUGIN_DIR/$n"
     hx_ok "$n removed — open a new shell or run: conf reload"
 }
 
@@ -162,7 +175,7 @@ _hxp_list() {
         printf '  '
         hx_badge "${HX_FEAT_STATE[$n]:-off}"
         printf ' %s%-22s%s %s' "$HX_B" "$n" "$HX_R" "${HX_PLUG_DESC[$n]}"
-        [ -n "$miss" ] && printf ' %s(missing:%s)%s' "$HX_YEL" "$miss" "$HX_R"
+        [ -n "$miss" ] && printf ' %s(missing: %s)%s' "$HX_YEL" "$miss" "$HX_R"
         printf '\n'
     done
     printf '\n  %s%s%s\n' "$HX_GRY" "hxp info <name> for detail - conf on|off <name> to toggle" "$HX_R"
@@ -203,7 +216,7 @@ _hxp_doctor() {
     hx_head "plugin doctor"
     for n in $(hx_plugins_sorted); do
         if [ -n "${HX_PLUG_MISSING[$n]:-}" ]; then
-            printf '  %s%-10s%s missing:%s\n' "$HX_YEL" "$n" "$HX_R" "${HX_PLUG_MISSING[$n]}"
+            printf '  %s%-10s%s missing: %s\n' "$HX_YEL" "$n" "$HX_R" "${HX_PLUG_MISSING[$n]}"
             bad=$((bad + 1))
         fi
     done

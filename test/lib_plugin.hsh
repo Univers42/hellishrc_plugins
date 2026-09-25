@@ -1,0 +1,184 @@
+# test/lib_plugin.hsh — lib/plugin.hsh: the plugin contract, the loader and
+# the hxp command.
+#
+# HX_PLUGIN_DIR is a scratch directory here, so `hxp remove` can only ever
+# delete what this file planted. `hxp install` writes under $HOME, which is
+# scratch too, and curl is a stub: nothing is downloaded.
+
+HX_COLOR=never
+hx_color_init
+
+_lp_real_dir="$HX_PLUGIN_DIR"
+HX_PLUGIN_DIR="$T_DIR/plugins"
+mkdir -p "$HX_PLUGIN_DIR"
+
+# _lp_plugin <name> <body...> — a plugin directory, one line per argument
+_lp_plugin() {
+    local n="$1"
+    shift
+    mkdir -p "$HX_PLUGIN_DIR/$n"
+    printf '%s\n' "$@" > "$HX_PLUGIN_DIR/$n/plugin.hsh"
+}
+
+t_head "plugin: the contract"
+hx_plugin lpa on dev "plugin a" && t_ok "hx_plugin returns 0 for a plugin that is on" \
+    || t_bad "hx_plugin returns 0 for a plugin that is on"
+hx_plugin lpb off dev "plugin b" && t_bad "hx_plugin returns 1 for a plugin that is off" \
+    || t_ok "hx_plugin returns 1 for a plugin that is off"
+t_true "hx_plugin registers the plugin as a feature" hx_known lpb
+t_eq "plugin" "${HX_ITEM_KIND[plugin:lpa]}" "and as a registry item"
+t_eq "plugin a" "${HX_PLUG_DESC[lpa]}" "with its description"
+t_eq "dev" "${HX_PLUG_GROUP[lpa]}" "and its group"
+t_eq "lpb" "$HX_CURRENT_MODULE" "and makes it the current module, so its items are its own"
+hx_needs sh lp_no_such_cmd_1 lp_no_such_cmd_2
+t_eq "sh lp_no_such_cmd_1 lp_no_such_cmd_2" "${HX_PLUG_NEEDS[lpb]}" "hx_needs records every dependency"
+t_eq "lp_no_such_cmd_1 lp_no_such_cmd_2" "${HX_PLUG_MISSING[lpb]}" "and which of them are missing"
+t_rc 0 "hx_needs never fails a load" hx_needs lp_no_such_cmd_3
+t_eq "sh lp_no_such_cmd_1 lp_no_such_cmd_2 lp_no_such_cmd_3" "${HX_PLUG_NEEDS[lpb]}" "a second hx_needs adds to the first"
+t_eq "lp_no_such_cmd_1 lp_no_such_cmd_2 lp_no_such_cmd_3" "${HX_PLUG_MISSING[lpb]}" "and so do its missing commands"
+# A reload declares the plugin again. What it found missing last time must
+# not stick: the command may have been installed since.
+hx_plugin lpc on dev "plugin c"
+hx_needs lp_no_such_cmd_4
+hx_plugin lpc on dev "plugin c"
+hx_needs sh
+t_eq "sh" "${HX_PLUG_NEEDS[lpc]}" "declaring a plugin again starts its dependencies afresh"
+t_eq "" "${HX_PLUG_MISSING[lpc]:-}" "and forgets what was missing"
+t_true  "hx_have finds a command" hx_have sh
+t_false "hx_have does not find a missing one" hx_have lp_no_such_cmd_1
+hx_plugin lpa on dev "plugin a"
+t_eq "1" "$(hx_plugins_sorted | grep -c '^lpa$')" "a plugin declared twice is listed once"
+t_eq "$(hx_plugins_sorted | sort -u)" "$(hx_plugins_sorted)" "hx_plugins_sorted is sorted"
+HX_CURRENT_MODULE=core
+
+t_head "plugin: the loader"
+_lp_plugin lpon  'hx_plugin lpon on dev "on by default" || return 0' 'lpon_fn() { echo on; }'
+_lp_plugin lpoff 'hx_plugin lpoff off dev "off by default" || return 0' 'lpoff_fn() { echo off; }'
+mkdir -p "$HX_PLUGIN_DIR/lpempty"
+: > "$HX_PLUGIN_DIR/lpfile"
+hx_load_plugins
+t_eq "on" "$(lpon_fn)" "a plugin that is on is loaded"
+t_true "and registered" hx_known lpon
+t_false "a plugin that is off defines nothing past its declaration" hx_have lpoff_fn
+t_true "but is still registered, so conf can switch it on" hx_known lpoff
+t_false "a directory without plugin.hsh is not a plugin" hx_known lpempty
+t_eq "core" "$HX_CURRENT_MODULE" "the current module is core again after loading"
+( HX_PLUGIN_DIR="$T_DIR/none"; hx_load_plugins; printf '%s' "$?" > "$T_DIR/lp_rc" )
+t_eq "0" "$(cat "$T_DIR/lp_rc")" "hx_load_plugins of a missing directory succeeds"
+
+t_head "hxp: dispatch"
+t_has "hxp list" "$(hxp help)" "hxp help prints the commands"
+t_has "hxp list" "$(hxp -h)" "and so does -h"
+t_rc 2 "hxp rejects an unknown command" hxp frobnicate
+t_has "unknown command 'frobnicate'" "$(hxp frobnicate 2>&1)" "and names it"
+t_eq "$HX_PLUGIN_DIR" "$(hxp path)" "hxp path prints the plugin directory"
+
+t_head "hxp: list, info, doctor"
+_lp_out=$(hxp)
+t_has "lpon" "$_lp_out" "hxp with no command lists the plugins"
+t_has "(missing: lp_no_such_cmd_1 lp_no_such_cmd_2 lp_no_such_cmd_3)" "$(hxp ls)" "hxp ls marks a plugin's missing commands"
+hx_func_doc lpon_fn "prints on"
+hx_item func lpon_fn lpon "prints on"
+_lp_out=$(hxp info lpon)
+t_has "on by default" "$_lp_out" "hxp info shows the purpose"
+t_has "dev" "$_lp_out" "and the group"
+t_has "lpon_fn" "$_lp_out" "and what the plugin provides"
+t_has "missing" "$(hxp info lpb)" "hxp info shows missing commands"
+t_rc 2 "hxp info with no name is a usage error" hxp info
+t_rc 1 "hxp info of an unknown plugin fails" hxp info lp_nope
+_lp_out=$(hxp doctor)
+t_has "missing: lp_no_such_cmd_1" "$_lp_out" "hxp doctor lists what is missing"
+t_has "lpb" "$_lp_out" "hxp doctor names a plugin with missing commands"
+t_has "lp_no_such_cmd_1" "$_lp_out" "and the commands"
+_lp_out=$( for _p in $(hx_plugins_sorted); do unset "HX_PLUG_MISSING[$_p]"; done; hxp doctor )
+t_has "every enabled plugin has its dependencies" "$_lp_out" "hxp doctor with nothing missing says so"
+
+t_head "hxp: enable, disable"
+hxp disable lpon >/dev/null
+t_false "hxp disable switches a plugin off" hx_enabled lpon
+t_true "and saves it" grep -q '^feature lpon *off$' "$HX_CONF"
+hxp enable lpon >/dev/null
+t_true "hxp enable switches it on" hx_enabled lpon
+hxp off lpon >/dev/null; hxp on lpoff >/dev/null
+t_false "hxp off is hxp disable" hx_enabled lpon
+t_true  "hxp on is hxp enable"   hx_enabled lpoff
+t_rc 2 "hxp enable with no name is a usage error" hxp enable
+t_rc 1 "hxp enable of an unknown plugin fails" hxp enable lp_nope
+
+t_head "hxp: catalog, install, update"
+t_has "omz-sudo" "$(hxp catalog)" "hxp catalog lists the external plugins"
+t_has "hxp install" "$(hxp catalog)" "and says how to install one"
+# The curl stub writes a small script wherever -o points. LP_CURL_EMPTY=1
+# makes it write nothing, as a failed download does.
+t_stub curl 'out=; while [ $# -gt 0 ]; do [ "$1" = -o ] && out="$2"; shift; done
+[ "${LP_CURL_EMPTY:-0}" = 1 ] && { : > "$out"; exit 0; }
+printf "lp_fetched() { echo fetched; }\n" > "$out"'
+export LP_CURL_EMPTY=0
+_lp_dest="$HOME/.hellish/plugins/omz-sudo"
+t_rc 2 "hxp install with no name is a usage error" hxp install
+t_rc 1 "hxp install of a name not in the catalog fails" hxp install lp_nope
+t_rc 1 "hxp install of a builtin plugin fails" hxp install git
+t_has "ships with the framework" "$(hxp install git 2>&1)" "and says it is already there"
+t_calls_reset
+hxp install omz-sudo >/dev/null 2>&1
+t_has "curl|-fsSL|https://" "$(t_calls)" "hxp install downloads the catalog's URL"
+t_true "into the plugin's directory under the file's own name" test -s "$_lp_dest/sudo.plugin.zsh"
+t_true "and writes a plugin.hsh wrapper" test -r "$_lp_dest/plugin.hsh"
+_lp_out=$(cat "$_lp_dest/plugin.hsh" 2>/dev/null)
+t_has 'hx_plugin omz-sudo on external' "$_lp_out" "the wrapper declares the plugin"
+t_has '. "$HX_PLUGIN_DIR/omz-sudo/sudo.plugin.zsh"' "$_lp_out" "and sources the fetched file"
+t_true "the wrapper parses" "$(hx_shell_bin)" -n "$_lp_dest/plugin.hsh"
+LP_CURL_EMPTY=1
+t_rc 1 "an empty download fails" hxp install omz-extract
+t_false "and leaves no directory behind" test -d "$HOME/.hellish/plugins/omz-extract"
+LP_CURL_EMPTY=0
+t_calls_reset
+hxp add omz-copypath >/dev/null 2>&1
+t_true "hxp add is hxp install" test -r "$HOME/.hellish/plugins/omz-copypath/plugin.hsh"
+t_calls_reset
+hxp update omz-copypath >/dev/null 2>&1
+t_eq "1" "$(t_calls | grep -c '^curl|')" "hxp update <name> fetches that plugin again"
+
+# hxp update with no name re-fetches what is in HX_PLUGIN_DIR and in the
+# catalog as external -- a builtin plugin, or one the catalog does not know,
+# is left alone.
+mkdir -p "$HX_PLUGIN_DIR/omz-sudo" "$HX_PLUGIN_DIR/git"
+t_calls_reset
+hxp update >/dev/null 2>&1
+t_eq "1" "$(t_calls | grep -c '^curl|')" "hxp update re-fetches every external plugin, and only those"
+t_has "sudo.plugin.zsh" "$(t_calls)" "the one that is installed"
+
+t_head "hxp: remove"
+_lp_plugin lpgone 'hx_plugin lpgone off dev "x" || return 0'
+mkdir -p "$T_DIR/outside"
+: > "$T_DIR/outside/keep"
+t_rc 2 "hxp remove with no name is a usage error" hxp remove
+t_rc 1 "hxp remove of a plugin that is not there fails" hxp remove lp_nope
+for _lp_bad in ../outside .. . ./lpgone lpgone/.. "a b" '*'; do
+    t_rc 2 "hxp remove refuses the name '$_lp_bad'" hxp remove "$_lp_bad"
+done
+t_true "and deletes nothing outside the plugin directory" test -f "$T_DIR/outside/keep"
+t_true "or inside it" test -d "$HX_PLUGIN_DIR/lpgone"
+t_has "not a plugin name: ../outside" "$(hxp remove ../outside 2>&1)" "a refused name is reported"
+hxp remove lpgone >/dev/null 2>&1
+t_false "hxp remove deletes the plugin's directory" test -d "$HX_PLUGIN_DIR/lpgone"
+_lp_plugin lpgone2 'x=1'
+hxp rm lpgone2 >/dev/null 2>&1
+t_false "hxp rm is hxp remove" test -d "$HX_PLUGIN_DIR/lpgone2"
+
+t_head "hxp: new"
+if hx_have forge_new; then
+    _lp_out=$(hxp new lpnew "made by hxp new" 2>&1)
+    t_true "hxp new scaffolds a plugin through forge" test -r "$HX_PLUGIN_DIR/lpnew/plugin.hsh"
+    _lp_out=$(hxp new lpnew 2>&1)
+    t_rc 1 "hxp new of a name that exists fails" hxp new lpnew
+    t_has "already exists" "$_lp_out" "with forge's reason"
+    t_hasnt "provides 'hxp new'" "$_lp_out" "and does not claim forge is missing"
+else
+    t_skip "hxp new through forge — the forge plugin is off"
+fi
+_lp_out=$( unset -f forge_new; hxp new lpx 2>&1; printf '|%s' "$?" )
+t_has "the 'forge' plugin provides 'hxp new'" "$_lp_out" "without forge, hxp new says what provides it"
+t_has "|1" "$_lp_out" "and fails"
+
+HX_PLUGIN_DIR="$_lp_real_dir"
