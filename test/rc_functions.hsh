@@ -1,0 +1,699 @@
+# test/rc_functions.hsh — rc.d/40-functions.hsh, every function in it.
+#
+# Everything happens under $T_DIR. The rules that keep it there:
+#   * killport only ever kills `sleep` processes this file started: lsof and
+#     ss are stubs that name those pids and nothing else.
+#   * serve's python3 is a stub; nothing here listens on the network.
+#   * retry's sleep is a stub, so its back-off is asserted, not waited for.
+#   * hxnew is driven through a stand-in forge_new: the real one writes a
+#     plugin into $HX_HOME.
+# A function that changes directory runs in a subshell (_rf_in), so this
+# file's own cwd never moves.
+
+if ! hx_enabled functions; then t_skip "rc.d/40-functions.hsh — the functions module is off"; return 0; fi
+
+# Messages are compared as text: no colour, even when the suite runs in a
+# terminal.
+HX_COLOR=never
+hx_color_init
+
+# _rf_in <dir> <command...> — run it in a subshell whose cwd is <dir>
+_rf_in() { ( cd "$1" && shift && "$@" ); }
+# _rf_calls <command...> — the stub calls it made, one per line
+_rf_calls() {
+    t_calls_reset
+    "$@" >/dev/null 2>&1 </dev/null
+    t_calls
+}
+# _rf_plain — strip colour escapes (grepf asks for --color=always)
+_rf_plain() { sed 's/\x1b\[[0-9;]*[mK]//g'; }
+# _rf_line <needle> <text> — the first line of <text> that contains <needle>
+_rf_line() { printf '%s\n' "$2" | grep -F -- "$1" | head -1; }
+# _rf_answer <reply> <command...> — run it with one line of input
+_rf_answer() { local a="$1"; shift; printf '%s\n' "$a" | "$@"; }
+# _rf_alive <pid> — true while the process exists and is not a zombie
+_rf_alive() {
+    case "$(ps -o stat= -p "$1" 2>/dev/null)" in ''|Z*) return 1 ;; *) return 0 ;; esac
+}
+# _rf_gone <pid> — wait up to ~1s for the process to die
+_rf_gone() {
+    local i=0
+    while _rf_alive "$1" && [ "$i" -lt 20 ]; do sleep 0.05; i=$((i + 1)); done
+    ! _rf_alive "$1"
+}
+# _rf_path <dir> <command...> — run it in a subshell whose PATH is only <dir>
+_rf_path() { ( PATH="$1"; hash -r 2>/dev/null; shift; "$@" ); }
+# _rf_bin <tool> — the tool's path on PATH. Not `command -v`, which prints
+# the alias for grep, df, du and free.
+_rf_bin() {
+    local d IFS=:
+    for d in $PATH; do [ -x "$d/$1" ] && { printf '%s' "$d/$1"; return 0; }; done
+    return 1
+}
+# _rf_only <dir> <tool...> — a directory of symlinks to just these tools, for
+# running a function on a PATH where something else is missing
+_rf_only() {
+    local d="$1" t
+    shift
+    mkdir -p "$d"
+    for t in "$@"; do ln -sf "$(_rf_bin "$t")" "$d/$t"; done
+}
+
+# ═══ shims ══════════════════════════════════════════════════════════════════
+t_head "functions: shims"
+
+# ── glob_into ───────────────────────────────────────────────────────────────
+mkdir -p "$T_DIR/gl"
+: > "$T_DIR/gl/a.txt"
+: > "$T_DIR/gl/b.txt"
+: > "$T_DIR/gl/it's \"q\" \$x.txt"
+ln -s "$T_DIR/gl/nowhere" "$T_DIR/gl/dangling.lnk"
+glob_into _rf_g "$T_DIR"/gl/*.txt
+t_eq "3" "${#_rf_g[@]}" "glob_into keeps every real match"
+t_eq "$T_DIR/gl/it's \"q\" \$x.txt" "${_rf_g[2]}" "glob_into keeps a name with quotes and a dollar sign verbatim"
+glob_into _rf_g "$T_DIR"/gl/*.nope
+t_eq "0" "${#_rf_g[@]}" "glob_into yields an empty array when nothing matches"
+_rf_g=(stale entries)
+glob_into _rf_g "$T_DIR"/gl/*.nope
+t_eq "0" "${#_rf_g[@]}" "glob_into empties an array that already had elements"
+glob_into _rf_g "$T_DIR"/gl/*.lnk
+t_eq "1" "${#_rf_g[@]}" "glob_into keeps a dangling symlink, which is a real directory entry"
+glob_into _rf_g "$T_DIR"/gl/a.txt "$T_DIR"/gl/*.nope "$T_DIR"/gl/b.txt
+t_eq "$T_DIR/gl/a.txt|$T_DIR/gl/b.txt" "${_rf_g[0]}|${_rf_g[1]}" \
+    "glob_into takes several patterns and keeps only the ones that matched"
+t_rc 0 "glob_into succeeds when nothing matches" glob_into _rf_g "$T_DIR/gl/*.nope"
+
+# ── rglob ───────────────────────────────────────────────────────────────────
+mkdir -p "$T_DIR/rg/a/b" "$T_DIR/rg/dir.c"
+: > "$T_DIR/rg/top.c"
+: > "$T_DIR/rg/a/b/deep.c"
+: > "$T_DIR/rg/a/x.h"
+t_eq "$T_DIR/rg/a/b/deep.c $T_DIR/rg/top.c" "$(rglob "$T_DIR/rg" '*.c' | sort | tr '\n' ' ' | sed 's/ $//')" \
+    "rglob finds matching files at every depth"
+t_hasnt "dir.c" "$(rglob "$T_DIR/rg" '*.c')" "rglob lists files, not directories"
+t_eq "3" "$(_rf_in "$T_DIR/rg" rglob | wc -l | tr -d ' ')" "rglob defaults to every file below here"
+t_eq "" "$(rglob "$T_DIR/nowhere" '*' 2>&1)" "rglob is silent on a directory that does not exist"
+
+# ── is_set ──────────────────────────────────────────────────────────────────
+_rf_empty=""
+t_true  "is_set is true for a variable set to the empty string" is_set _rf_empty
+t_true  "is_set is true for a variable with a value"             is_set HOME
+t_false "is_set is false for a variable that was never set"      is_set _rf_never_set
+_rf_gone_var=1
+unset _rf_gone_var
+t_false "is_set is false again after unset"                      is_set _rf_gone_var
+_rf_local() { local _rf_l=; is_set _rf_l; }
+t_true  "is_set sees a function's local variable"                _rf_local
+# A non-name never reaches is_set's eval: it used to be a bad substitution,
+# which ends a POSIX shell running a script (bash --posix too), and a name
+# like $(cmd) ran the command.
+_rf_o=$( (is_set 'not a name'; printf 'returned %s' "$?") 2>/dev/null )
+t_eq "returned 1" "$_rf_o" "is_set is false for something that is not a variable name"
+t_false "is_set is false for an empty name" is_set ''
+t_false "and for a name that starts with a digit" is_set 1abc
+is_set "\$(: > \"$T_DIR/is_set_ran\")"
+t_false "and never runs what the name holds" test -e "$T_DIR/is_set_ran"
+
+# ── quote ───────────────────────────────────────────────────────────────────
+t_eq "'a b'"        "$(quote 'a b')"   "quote wraps a string in single quotes"
+t_eq "'it'\\''s'"   "$(quote "it's")"  "quote escapes an embedded single quote"
+t_eq "''"           "$(quote '')"      "quote turns the empty string into ''"
+t_eq "''\\'''\\'''" "$(quote "''")"    "quote escapes a string made only of quotes"
+for _rf_s in "plain" "'leading" "trailing'" "a'b'c" "\$HOME \`id\` \$(id)" 'back\slash\' '*?[x]' "!bang" "; echo pwned"; do
+    eval "_rf_back=$(quote "$_rf_s")"
+    t_eq "$_rf_s" "$_rf_back" "quote output evaluates back to [$_rf_s]"
+done
+_rf_s="tab	and
+newline"
+eval "_rf_back=$(quote "$_rf_s")"
+t_eq "$_rf_s" "$_rf_back" "quote output evaluates back to a string with a tab and a newline"
+
+# ═══ navigation ═════════════════════════════════════════════════════════════
+t_head "functions: navigation"
+
+# ── mkcd ────────────────────────────────────────────────────────────────────
+t_rc 2 "mkcd without a directory is a usage error" mkcd
+t_has "usage: mkcd <dir>" "$(mkcd 2>&1)" "and prints the usage"
+t_eq "$T_DIR/mk/a b/c" "$(mkcd "$T_DIR/mk/a b/c" && pwd)" "mkcd creates missing parents and enters the directory"
+t_true "the directory stays behind" test -d "$T_DIR/mk/a b/c"
+t_eq "$T_DIR/mk" "$(mkcd "$T_DIR/mk" && pwd)" "mkcd enters a directory that already exists"
+: > "$T_DIR/mk/file"
+t_rc 1 "mkcd fails on a path that is a file" _rf_in "$T_DIR" mkcd "$T_DIR/mk/file"
+t_eq "$T_DIR" "$(mkcd "$T_DIR/mk/file" 2>/dev/null; pwd)" "and stays where it was"
+
+# ── up ──────────────────────────────────────────────────────────────────────
+mkdir -p "$T_DIR/u/1/2/3"
+t_eq "$T_DIR/u/1/2" "$(cd "$T_DIR/u/1/2/3" && up)"   "up climbs one level by default and prints where it landed"
+t_eq "$T_DIR/u"     "$(cd "$T_DIR/u/1/2/3" && up 3)" "up N climbs N levels"
+t_eq "$T_DIR/u/1/2/3" "$(cd "$T_DIR/u/1/2/3" && up 0)" "up 0 stays put"
+t_eq "/" "$(cd "$T_DIR/u" && up 64)" "up stops at / instead of failing"
+t_rc 2 "up rejects a count that is not a number" up two
+t_rc 2 "up rejects a negative count" up -1
+t_has "usage: up [count]" "$(up two 2>&1)" "and prints the usage"
+t_eq "$T_DIR/u/1" "$(cd "$T_DIR/u/1" && up x >/dev/null 2>&1; pwd)" "a rejected count does not move"
+
+# ── cdf ─────────────────────────────────────────────────────────────────────
+mkdir -p "$T_DIR/cf/src/alpha/deep" "$T_DIR/cf/.git/refs/alphaobj" "$T_DIR/cf/docs"
+: > "$T_DIR/cf/alphafile"
+t_rc 2 "cdf without a pattern is a usage error" cdf
+t_eq "$T_DIR/cf/src/alpha" "$(cd "$T_DIR/cf" && cdf alpha)" "cdf enters the matching directory below here and prints it"
+t_eq "$T_DIR/cf/src/alpha" "$(cd "$T_DIR/cf" && cdf 'alp*')" "cdf takes a glob"
+t_rc 1 "cdf matches the whole name, not a fragment" _rf_in "$T_DIR/cf" cdf alp
+t_rc 1 "cdf fails when nothing matches" _rf_in "$T_DIR/cf" cdf nothing-here
+t_has "no directory matching 'nothing-here'" "$(_rf_in "$T_DIR/cf" cdf nothing-here 2>&1)" "and says what it looked for"
+t_rc 1 "cdf does not look inside .git" _rf_in "$T_DIR/cf" cdf alphaobj
+t_rc 1 "cdf matches directories, not files" _rf_in "$T_DIR/cf" cdf alphafile
+t_eq "$T_DIR/cf" "$(cd "$T_DIR/cf" && cdf nothing-here 2>/dev/null; pwd)" "a failed cdf does not move"
+
+# ── root ────────────────────────────────────────────────────────────────────
+mkdir -p "$T_DIR/rt/proj/.git" "$T_DIR/rt/proj/a/b"
+t_eq "$T_DIR/rt/proj" "$(cd "$T_DIR/rt/proj/a/b" && root)" "root climbs to the repository top and prints it"
+t_eq "$T_DIR/rt/proj" "$(cd "$T_DIR/rt/proj" && root)" "root at the top stays there"
+for _rf_m in Cargo.toml go.mod package.json Makefile; do
+    mkdir -p "$T_DIR/rt/m-$_rf_m/x/y"
+    : > "$T_DIR/rt/m-$_rf_m/$_rf_m"
+    t_eq "$T_DIR/rt/m-$_rf_m" "$(cd "$T_DIR/rt/m-$_rf_m/x/y" && root)" "root stops at a directory with a $_rf_m"
+done
+mkdir -p "$T_DIR/rt/wt/src"
+printf 'gitdir: /elsewhere\n' > "$T_DIR/rt/wt/.git"
+t_eq "$T_DIR/rt/wt" "$(cd "$T_DIR/rt/wt/src" && root)" "root accepts a .git file (a worktree or submodule)"
+mkdir -p "$T_DIR/rt/proj/sub/in"
+: > "$T_DIR/rt/proj/sub/Makefile"
+t_eq "$T_DIR/rt/proj/sub" "$(cd "$T_DIR/rt/proj/sub/in" && root)" "root stops at the nearest marker, not the outermost"
+: > "$T_DIR/rt/proj/a/Cargo.toml.bak"
+t_eq "$T_DIR/rt/proj" "$(cd "$T_DIR/rt/proj/a/b" && root)" "a file that only resembles a marker is not one"
+# The failure case holds only if nothing above the scratch directory is a
+# project itself (a stray /tmp/Makefile would make it one).
+_rf_up="$T_DIR"; _rf_clean=1
+while [ "$_rf_up" != "/" ]; do
+    _rf_up=$(dirname "$_rf_up")
+    [ "$_rf_up" = "/" ] && break
+    for _rf_m in .git Cargo.toml go.mod package.json Makefile; do
+        [ -e "$_rf_up/$_rf_m" ] && _rf_clean=0
+    done
+done
+mkdir -p "$T_DIR/rt/none/x"
+if [ "$_rf_clean" = "1" ]; then
+    t_rc 1 "root fails where there is no project above" _rf_in "$T_DIR/rt/none/x" root
+    t_has "no repository or project root above here" "$(_rf_in "$T_DIR/rt/none/x" root 2>&1)" "and says so"
+    t_eq "$T_DIR/rt/none/x" "$(cd "$T_DIR/rt/none/x" && root 2>/dev/null; pwd)" "a failed root does not move"
+else
+    t_skip "root failure case — a directory above $T_DIR looks like a project"
+fi
+
+# ── tmpd ────────────────────────────────────────────────────────────────────
+mkdir -p "$T_DIR/tmp"
+_rf_o=$(export TMPDIR="$T_DIR/tmp"; tmpd; printf '%s\n' "$PWD")
+_rf_d=$(printf '%s\n' "$_rf_o" | sed -n 1p)
+t_eq "$_rf_d" "$(printf '%s\n' "$_rf_o" | sed -n 2p)" "tmpd enters the directory it prints"
+case "$_rf_d" in
+    "$T_DIR/tmp/"?*) t_ok "tmpd creates the directory under TMPDIR" ;;
+    *) t_bad "tmpd creates the directory under TMPDIR — got [$_rf_d]" ;;
+esac
+t_eq "" "$(ls -A "$_rf_d" 2>&1)" "the directory is new and empty"
+t_false "two tmpd calls get two directories" test "$_rf_d" = "$(export TMPDIR="$T_DIR/tmp"; tmpd)"
+
+# ═══ files ══════════════════════════════════════════════════════════════════
+t_head "functions: archives"
+
+mkdir -p "$T_DIR/ar/src/sub"
+printf 'hello\n' > "$T_DIR/ar/src/a.txt"
+printf 'deep\n'  > "$T_DIR/ar/src/sub/b.txt"
+cd "$T_DIR/ar"
+
+# ── pack ────────────────────────────────────────────────────────────────────
+t_rc 2 "pack without arguments is a usage error" pack
+t_rc 2 "pack with nothing to put in the archive is a usage error" pack out.tar.gz
+t_has "nothing to pack" "$(pack out.tar.gz 2>&1)" "and says so"
+t_rc 1 "pack refuses an extension it does not know" pack out.cpio src
+t_false "and writes nothing" test -e out.cpio
+t_has "ok a.tar.gz" "$(pack a.tar.gz src 2>&1)" "pack names the archive it wrote"
+t_false "pack fails when a path to pack does not exist" pack miss.tar src/nope
+
+# ── extract, round-tripped through pack ─────────────────────────────────────
+for _rf_x in tar.gz:gzip tgz:gzip tar.bz2:bzip2 tbz2:bzip2 tar.xz:xz txz:xz tar:tar zip:unzip; do
+    _rf_ext="${_rf_x%%:*}"
+    _rf_tool="${_rf_x#*:}"
+    if ! command -v "$_rf_tool" >/dev/null 2>&1 || { [ "$_rf_ext" = zip ] && ! command -v zip >/dev/null 2>&1; }; then
+        t_skip "pack/extract .$_rf_ext — $_rf_tool is not installed"
+        continue
+    fi
+    mkdir -p "out-$_rf_ext"
+    pack "rt.$_rf_ext" src >/dev/null 2>&1
+    _rf_in "out-$_rf_ext" extract "../rt.$_rf_ext" >/dev/null 2>&1
+    t_eq "deep" "$(cat "out-$_rf_ext/src/sub/b.txt" 2>/dev/null)" \
+        "a tree packed as .$_rf_ext comes back whole from extract, in the current directory"
+done
+
+# ── extract: single-file compressors, beside the archive ────────────────────
+for _rf_x in gz:gzip bz2:bzip2 xz:xz; do
+    _rf_ext="${_rf_x%%:*}"
+    _rf_tool="${_rf_x#*:}"
+    if ! command -v "$_rf_tool" >/dev/null 2>&1; then
+        t_skip "extract .$_rf_ext — $_rf_tool is not installed"
+        continue
+    fi
+    printf 'single %s\n' "$_rf_ext" | "$_rf_tool" -c > "one-$_rf_ext.$_rf_ext"
+    extract "one-$_rf_ext.$_rf_ext" >/dev/null 2>&1
+    t_eq "single $_rf_ext" "$(cat "one-$_rf_ext" 2>/dev/null)" "extract decompresses a .$_rf_ext file in place"
+done
+
+# ── extract: the formats this machine may not have, by what they run ───────
+: > f.zst; : > f.rar; : > f.7z; : > f.Z; : > f.tar.zst
+t_stub unzstd
+t_stub unrar
+t_stub 7z
+t_stub uncompress
+t_eq "unzstd|f.zst"    "$(_rf_calls extract f.zst)" "extract hands a .zst to unzstd"
+t_eq "unrar|x|f.rar"   "$(_rf_calls extract f.rar)" "extract hands a .rar to unrar x"
+t_eq "7z|x|f.7z"       "$(_rf_calls extract f.7z)"  "extract hands a .7z to 7z x"
+t_eq "uncompress|f.Z"  "$(_rf_calls extract f.Z)"   "extract hands a .Z to uncompress"
+t_stub unrar 'exit 3'
+t_rc 3 "extract returns the extractor's own exit status" extract f.rar
+t_stub tar
+t_eq "tar|--zstd|-xf|f.tar.zst" "$(_rf_calls extract f.tar.zst)" "extract hands a .tar.zst to tar --zstd"
+t_eq "tar|--zstd|-cf|p.tar.zst|src" "$(_rf_calls pack p.tar.zst src)" "pack builds a .tar.zst with tar --zstd"
+command rm -f "$T_DIR/stubs/tar" "$T_DIR/stubs/unzstd" "$T_DIR/stubs/unrar" "$T_DIR/stubs/7z" "$T_DIR/stubs/uncompress"
+hash -r 2>/dev/null
+
+# ── extract: errors ─────────────────────────────────────────────────────────
+t_rc 2 "extract without an archive is a usage error" extract
+t_rc 2 "extract fails on a file that does not exist" extract nosuch.tar.gz
+t_has "not a file: nosuch.tar.gz" "$(extract nosuch.tar.gz 2>&1)" "and names it"
+t_rc 2 "extract refuses a directory" extract src
+: > f.unknown
+t_rc 1 "extract refuses an extension it does not know" extract f.unknown
+t_has "don't know how to extract: f.unknown" "$(extract f.unknown 2>&1)" "and says so"
+mkdir -p bad
+printf 'not an archive' > bad/bad.tar.gz
+t_false "extract fails on a corrupt archive" _rf_in bad extract bad.tar.gz
+cd "$T_DIR"
+
+# ── bak ─────────────────────────────────────────────────────────────────────
+t_head "functions: bak ff fd_ grepf biggest"
+
+mkdir -p "$T_DIR/bk/one" "$T_DIR/bk/two" "$T_DIR/bk/miss" "$T_DIR/bk/dir/tree"
+printf 'v1\n' > "$T_DIR/bk/one/conf.txt"
+chmod 640 "$T_DIR/bk/one/conf.txt"
+t_rc 2 "bak without a file is a usage error" bak
+_rf_o=$(_rf_in "$T_DIR/bk/one" bak conf.txt 2>&1)
+glob_into _rf_g "$T_DIR"/bk/one/conf.txt.bak.*
+t_eq "1" "${#_rf_g[@]}" "bak writes one copy beside the original"
+case "${_rf_g[0]##*/}" in
+    conf.txt.bak.[0-9][0-9][0-9][0-9][0-9][0-9][0-9][0-9]-[0-9][0-9][0-9][0-9][0-9][0-9])
+        t_ok "the copy is named <file>.bak.YYYYMMDD-HHMMSS" ;;
+    *) t_bad "the copy is named <file>.bak.YYYYMMDD-HHMMSS — got [${_rf_g[0]##*/}]" ;;
+esac
+t_eq "v1" "$(cat "${_rf_g[0]}" 2>/dev/null)" "the copy has the original's content"
+t_eq "640" "$(stat -c %a "${_rf_g[0]}" 2>/dev/null)" "the copy keeps the original's mode"
+t_eq "ok ${_rf_g[0]##*/}" "$_rf_o" "bak names the copy it made"
+printf 'a\n' > "$T_DIR/bk/two/x"
+printf 'b\n' > "$T_DIR/bk/two/y"
+_rf_in "$T_DIR/bk/two" bak x y >/dev/null 2>&1
+glob_into _rf_g "$T_DIR"/bk/two/*.bak.*
+t_eq "2" "${#_rf_g[@]}" "bak copies every file it is given"
+t_eq "${_rf_g[0]##*.bak.}" "${_rf_g[1]##*.bak.}" "the copies of one call share one timestamp"
+_rf_in "$T_DIR/bk/dir" bak tree >/dev/null 2>&1
+glob_into _rf_g "$T_DIR"/bk/dir/tree.bak.*
+t_true "bak copies a directory whole" test -d "${_rf_g[0]:-/nonexistent}"
+t_has "no such file: nosuch" "$(_rf_in "$T_DIR/bk/miss" bak nosuch 2>&1)" "bak says which file does not exist"
+t_rc 1 "bak fails when the file does not exist" _rf_in "$T_DIR/bk/miss" bak nosuch
+printf 'c\n' > "$T_DIR/bk/miss/real"
+t_rc 1 "bak fails when any of its files does not exist" _rf_in "$T_DIR/bk/miss" bak nosuch real
+glob_into _rf_g "$T_DIR"/bk/miss/real.bak.*
+t_eq "1" "${#_rf_g[@]}" "and still copies the ones that do"
+
+# ── ff / fd_ ────────────────────────────────────────────────────────────────
+mkdir -p "$T_DIR/ff/src" "$T_DIR/ff/MainDir"
+for _rf_n in .git node_modules/m target build .venv __pycache__; do
+    mkdir -p "$T_DIR/ff/$_rf_n"
+    : > "$T_DIR/ff/$_rf_n/main.c"
+done
+: > "$T_DIR/ff/src/Main.c"
+: > "$T_DIR/ff/src/other.c"
+t_rc 2 "ff without a pattern is a usage error" ff
+_rf_o=$(_rf_in "$T_DIR/ff" ff main)
+t_eq "./src/Main.c" "$_rf_o" "ff finds files by a case-insensitive fragment of their name"
+for _rf_n in .git node_modules target build .venv __pycache__; do
+    t_hasnt "$_rf_n/" "$_rf_o" "ff skips $_rf_n"
+done
+t_hasnt "MainDir" "$_rf_o" "ff lists files, not directories"
+t_eq "" "$(_rf_in "$T_DIR/ff" ff zzz-nothing)" "ff prints nothing when nothing matches"
+
+t_rc 2 "fd_ without a pattern is a usage error" fd_
+mkdir -p "$T_DIR/ff/.git/srcobj" "$T_DIR/ff/node_modules/srcmod"
+_rf_o=$(_rf_in "$T_DIR/ff" fd_ SRC)
+t_eq "./src" "$_rf_o" "fd_ finds directories by a case-insensitive fragment of their name"
+t_hasnt ".git/" "$_rf_o" "fd_ skips .git"
+t_hasnt "node_modules/" "$_rf_o" "fd_ skips node_modules"
+t_eq "" "$(_rf_in "$T_DIR/ff" fd_ other)" "fd_ lists directories, not files"
+
+# ── grepf ───────────────────────────────────────────────────────────────────
+_rf_gt="$T_DIR/gf"
+mkdir -p "$_rf_gt/sub"
+printf 'one\nfind the needle here\n' > "$_rf_gt/a.txt"
+printf 'needle in sub\n' > "$_rf_gt/sub/s.txt"
+printf 'needle\000binary\n' > "$_rf_gt/bin.dat"
+printf -- '-dash needle\ndecoy edle\n' > "$_rf_gt/dash.txt"
+for _rf_n in .git node_modules target build .venv; do
+    mkdir -p "$_rf_gt/$_rf_n"
+    printf 'needle\n' > "$_rf_gt/$_rf_n/noise.txt"
+done
+# the grep branch: a PATH with grep and without rg
+_rf_only "$T_DIR/nrg" grep
+_rf_nrg() { ( PATH="$T_DIR/nrg"; hash -r 2>/dev/null; "$@" ); }
+
+t_rc 2 "grepf without a pattern is a usage error" grepf
+_rf_o=$(_rf_nrg _rf_in "$_rf_gt" grepf needle 2>&1 | _rf_plain)
+t_has "./a.txt:2:find the needle here" "$_rf_o" "grepf (grep) prints file:line:text for each match"
+t_has "./sub/s.txt:1:needle in sub" "$_rf_o" "grepf (grep) searches subdirectories"
+t_hasnt "bin.dat" "$_rf_o" "grepf (grep) skips binary files"
+for _rf_n in .git node_modules target build .venv; do
+    t_hasnt "$_rf_n/" "$_rf_o" "grepf (grep) skips $_rf_n"
+done
+_rf_o=$(_rf_nrg grepf needle "$_rf_gt/sub" 2>&1 | _rf_plain)
+t_eq "$_rf_gt/sub/s.txt:1:needle in sub" "$_rf_o" "grepf (grep) searches the directory it is given"
+_rf_o=$(_rf_nrg _rf_in "$_rf_gt" grepf -dash 2>&1 | _rf_plain)
+t_has "./dash.txt:1:-dash needle" "$_rf_o" "grepf (grep) takes a pattern that starts with a dash"
+t_hasnt "decoy" "$_rf_o" "and searches for that pattern, not for options made of it"
+t_rc 1 "grepf (grep) fails when nothing matches" _rf_nrg _rf_in "$_rf_gt" grepf zzz-nothing
+
+if command -v rg >/dev/null 2>&1; then
+    _rf_o=$(_rf_in "$_rf_gt" grepf needle 2>&1 | _rf_plain)
+    t_has "a.txt:2:find the needle here" "$_rf_o" "grepf (ripgrep) prints file:line:text for each match"
+    t_hasnt "bin.dat" "$_rf_o" "grepf (ripgrep) skips binary files"
+    t_hasnt ".git/" "$_rf_o" "grepf (ripgrep) skips .git"
+    _rf_o=$(_rf_in "$_rf_gt" grepf -dash 2>&1 | _rf_plain)
+    t_has "dash.txt:1:-dash needle" "$_rf_o" "grepf (ripgrep) takes a pattern that starts with a dash"
+    t_hasnt "decoy" "$_rf_o" "and searches for that pattern, not for options made of it"
+    t_rc 1 "grepf (ripgrep) fails when nothing matches" _rf_in "$_rf_gt" grepf zzz-nothing
+else
+    t_skip "grepf through ripgrep — rg is not installed"
+fi
+
+# ── biggest ─────────────────────────────────────────────────────────────────
+mkdir -p "$T_DIR/bg/d" "$T_DIR/bg/.git"
+head -c 3072  /dev/zero > "$T_DIR/bg/big one"
+head -c 2048  /dev/zero > "$T_DIR/bg/d/mid"
+head -c 1024  /dev/zero > "$T_DIR/bg/small"
+head -c 100   /dev/zero > "$T_DIR/bg/tiny"
+head -c 99999 /dev/zero > "$T_DIR/bg/.git/pack"
+_rf_o=$(_rf_in "$T_DIR/bg" biggest)
+if command -v numfmt >/dev/null 2>&1; then _rf_k="3.0K"; else _rf_k="3072"; fi
+t_eq "$(printf '%8s  %s' "$_rf_k" './big one')" "$(printf '%s\n' "$_rf_o" | sed -n 1p)" \
+    "biggest puts the largest file first, with a human-readable size"
+t_eq "./big one|./d/mid|./small|./tiny" "$(printf '%s\n' "$_rf_o" | sed 's/^ *[^ ]*  //' | tr '\n' '|' | sed 's/|$//')" \
+    "biggest lists every file, largest to smallest, subdirectories included"
+t_hasnt ".git" "$_rf_o" "biggest skips .git"
+t_eq "2" "$(_rf_in "$T_DIR/bg" biggest 2 | wc -l | tr -d ' ')" "biggest N shows N files"
+
+# ═══ text ═══════════════════════════════════════════════════════════════════
+t_head "functions: count freq cols trim"
+
+# _rf_count — count's output with the alignment squeezed out
+_rf_count() { count "$@" | sed 's/^ *//' | tr '\n' '|' | sed 's/|$//'; }
+t_eq "2 lines|3 words|6 characters" "$(printf 'a b\nc\n' | _rf_count)" "count labels lines, words and characters of stdin"
+printf 'x y z\n' > "$T_DIR/cnt.txt"
+t_eq "1 lines|3 words|6 characters" "$(_rf_count "$T_DIR/cnt.txt")" "count reads a named file"
+t_eq "0 lines|0 words|0 characters" "$(: | _rf_count)" "count of empty input is all zeros"
+t_rc 1 "count fails on a file that does not exist" count "$T_DIR/no-such-file"
+t_eq "" "$(count "$T_DIR/no-such-file" 2>/dev/null)" "and prints no counts for it"
+
+t_eq "3 b|2 a|1 c" "$(printf 'b\na\nb\nc\nb\na\n' | freq | tr '\n' '|' | sed 's/|$//')" \
+    "freq counts each line, most frequent first"
+t_eq "3 b" "$(printf 'b\na\nb\nc\nb\na\n' | freq 1)" "freq N keeps the top N"
+t_eq "20" "$(seq 1 30 | freq | wc -l | tr -d ' ')" "freq keeps the top 20 by default"
+t_eq "1 two words" "$(printf 'two words\n' | freq)" "freq keeps a line with spaces whole"
+
+t_rc 2 "cols without a column is a usage error" cols
+t_eq "b" "$(printf 'a b c\n' | cols 2)" "cols picks one column"
+t_eq "c a" "$(printf 'a b c\n' | cols 3 1)" "cols picks several, in the order asked"
+t_eq "x|y" "$(printf 'x 1\ny 2\n' | cols 1 | tr '\n' '|' | sed 's/|$//')" "cols works line by line"
+t_eq "b" "$(printf '  a \t b  \n' | cols 2)" "cols splits on any run of spaces and tabs"
+t_eq "" "$(printf 'a b\n' | cols 5)" "cols prints an empty line for a column that is not there"
+
+t_eq "ab" "$(printf '   ab  \n' | trim)" "trim strips spaces at both ends"
+t_eq "a b" "$(printf '\t a b \t\n' | trim)" "trim strips tabs too, and keeps inner spaces"
+t_eq "x|y" "$(printf ' x\ny \n' | trim | tr '\n' '|' | sed 's/|$//')" "trim works on every line"
+
+# ═══ dev utilities ══════════════════════════════════════════════════════════
+t_head "functions: serve calc genpass retry timer confirm"
+
+# ── serve ───────────────────────────────────────────────────────────────────
+t_stub python3
+t_eq "python3|-m|http.server|8000|--bind|127.0.0.1|--directory|." "$(_rf_calls serve)" \
+    "serve defaults to port 8000, this directory, bound to localhost"
+t_eq "python3|-m|http.server|9001|--bind|127.0.0.1|--directory|$T_DIR/site" "$(_rf_calls serve 9001 "$T_DIR/site")" \
+    "serve takes a port and a directory"
+t_eq "python3|-m|http.server|9002|--directory|." "$(HX_SERVE_ALL=1; _rf_calls serve 9002)" \
+    "HX_SERVE_ALL=1 drops the localhost binding"
+_rf_o=$(serve 9003 </dev/null 2>&1)
+t_has "http://localhost:9003" "$_rf_o" "serve prints the URL"
+t_has "bound to localhost only" "$_rf_o" "serve says it is bound to localhost"
+t_stub python3 'exit 4'
+t_rc 4 "serve returns the server's exit status" serve 9004
+command rm -f "$T_DIR/stubs/python3"
+hash -r 2>/dev/null
+mkdir -p "$T_DIR/empty"
+t_rc 1 "serve fails without python3" _rf_path "$T_DIR/empty" serve
+t_has "needs python3" "$(_rf_path "$T_DIR/empty" serve 2>&1)" "and says so"
+
+# ── calc ────────────────────────────────────────────────────────────────────
+t_rc 2 "calc without an expression is a usage error" calc
+if command -v bc >/dev/null 2>&1; then
+    t_eq "7.0" "$(calc '3.5 * 2')" "calc does floating point"
+    t_eq "3" "$(calc 1 + 2)" "calc joins its arguments into one expression"
+    t_eq "2.50000000000000000000" "$(calc 10 / 4)" "calc divides with bc -l's twenty decimals"
+    t_eq "1.41421356237309504880" "$(calc 'sqrt(2)')" "calc has bc's math library"
+else
+    t_skip "calc arithmetic — bc is not installed"
+fi
+t_rc 1 "calc fails without bc" _rf_path "$T_DIR/empty" calc 1+1
+t_has "needs bc" "$(_rf_path "$T_DIR/empty" calc 1+1 2>&1)" "and says so"
+
+# ── genpass ─────────────────────────────────────────────────────────────────
+_rf_p=$(genpass)
+t_eq "24" "${#_rf_p}" "genpass is 24 characters by default"
+_rf_p=$(genpass 8)
+t_eq "8" "${#_rf_p}" "genpass N is N characters"
+t_eq "" "$(genpass 200 | tr -d 'A-Za-z0-9!@#%^&*_+=-')" "genpass uses only letters, digits and !@#%^&*_+=-"
+t_eq "1" "$(genpass 12 | wc -l | tr -d ' ')" "genpass ends with a newline"
+t_false "two passwords differ" test "$(genpass)" = "$(genpass)"
+t_rc 2 "genpass rejects a length that is not a number" genpass abc
+t_eq "" "$(genpass abc 2>/dev/null)" "and prints no password for it"
+
+# ── retry ───────────────────────────────────────────────────────────────────
+t_stub sleep
+t_rc 2 "retry without a count is a usage error" retry
+t_rc 2 "retry rejects a count that is not a number" retry x true
+t_rc 0 "retry succeeds when the command does" retry 3 true
+t_eq "" "$(_rf_calls retry 3 true)" "retry does not sleep after a success"
+_rf_try=0
+_rf_flaky() { _rf_try=$((_rf_try + 1)); [ "$_rf_try" -ge 3 ]; }
+t_rc 0 "retry succeeds once the command does" retry 5 _rf_flaky
+t_eq "3" "$_rf_try" "retry runs the command until it succeeds, and no more"
+_rf_try=0
+t_eq "sleep|1
+sleep|2" "$(_rf_calls retry 5 _rf_flaky)" "retry doubles the delay after each failure"
+t_rc 1 "retry fails when every attempt fails" retry 2 false
+t_eq "sleep|1" "$(_rf_calls retry 2 false)" "retry does not sleep after the last attempt"
+t_eq "sleep|1
+sleep|2
+sleep|4
+sleep|8
+sleep|16
+sleep|30
+sleep|30" "$(_rf_calls retry 8 false)" "retry caps the delay at 30 seconds"
+_rf_o=$(retry 2 false 2>&1)
+t_has "attempt 1/2 failed; retrying in 1s" "$_rf_o" "retry warns after each failed attempt"
+t_has "gave up after 2 attempts" "$_rf_o" "retry says when it gives up"
+_rf_args() { [ "$#" = 2 ] && [ "$1" = "a b" ]; }
+t_rc 0 "retry passes the command's arguments intact" retry 1 _rf_args "a b" c
+command rm -f "$T_DIR/stubs/sleep"
+hash -r 2>/dev/null
+
+# ── timer ───────────────────────────────────────────────────────────────────
+t_rc 3 "timer returns the command's own exit status" timer sh -c 'exit 3'
+t_eq "hi" "$(timer echo hi 2>/dev/null)" "timer leaves the command's stdout alone"
+t_has "ms (exit 0)" "$(timer true 2>&1 >/dev/null)" "timer reports the duration and exit status on stderr"
+t_has "(exit 5)" "$(timer sh -c 'exit 5' 2>&1 >/dev/null)" "timer reports a failing exit status"
+_rf_ms=$(timer sleep 0.2 2>&1 >/dev/null | sed -n 's/.*-> \([0-9][0-9]*\) ms.*/\1/p')
+if [ "${_rf_ms:-0}" -ge 200 ] 2>/dev/null; then t_ok "timer measures wall-clock milliseconds"
+else t_bad "timer measures wall-clock milliseconds — sleep 0.2 took [$_rf_ms] ms"; fi
+
+# ── confirm ─────────────────────────────────────────────────────────────────
+for _rf_a in y Y yes YES Yes; do
+    t_rc 0 "confirm takes '$_rf_a' for yes" _rf_answer "$_rf_a" confirm "go?"
+done
+for _rf_a in n no "" yessir x; do
+    t_rc 1 "confirm takes '$_rf_a' for no" _rf_answer "$_rf_a" confirm "go?"
+done
+t_rc 1 "confirm answers no at end of input instead of waiting" confirm "go?" </dev/null
+t_rc 1 "confirm reads only the first line" eval "printf 'n\ny\n' | confirm 'go?'"
+t_has "delete it? [y/N]" "$(confirm 'delete it?' </dev/null)" "confirm prints the question with its [y/N] default"
+t_has "are you sure? [y/N]" "$(confirm </dev/null)" "confirm has a question of its own when given none"
+
+# ── envload ─────────────────────────────────────────────────────────────────
+t_head "functions: envload envdiff"
+
+mkdir -p "$T_DIR/env"
+cat > "$T_DIR/env/.env" <<'EOF'
+# a comment
+RF_A=plain
+
+export RF_B="double quoted"
+RF_C='single quoted'
+RF_D=has=equals
+RF_E=$HOME `touch pwned` $(touch pwned2)
+RF_F="unbalanced
+RF_G="'inner'"
+RF_EMPTY=
+bad key=x
+RF-DASH=x
+not a line
+EOF
+t_rc 1 "envload fails on a file that does not exist" envload "$T_DIR/no.env"
+t_has "no such file: $T_DIR/no.env" "$(envload "$T_DIR/no.env" 2>&1)" "and names it"
+t_rc 1 "envload without a file fails where there is no .env" _rf_in "$T_DIR/empty" envload
+_rf_o=$(envload "$T_DIR/env/.env" 2>&1)
+envload "$T_DIR/env/.env" >/dev/null 2>&1
+t_eq "ok exported 8 variables from $T_DIR/env/.env" "$_rf_o" "envload says how many variables it exported, and from where"
+t_eq "plain" "${RF_A-}" "envload sets a plain value"
+t_eq "double quoted" "${RF_B-}" "envload handles 'export KEY=' and strips double quotes"
+t_eq "single quoted" "${RF_C-}" "envload strips single quotes"
+t_eq "has=equals" "${RF_D-}" "envload keeps an = inside the value"
+t_eq '$HOME `touch pwned` $(touch pwned2)' "${RF_E-}" "envload takes a value literally, expanding nothing"
+t_false "and runs nothing in it" test -e "$T_DIR/pwned" -o -e "$T_DIR/pwned2"
+t_eq '"unbalanced' "${RF_F-}" "envload leaves an unbalanced quote alone"
+t_eq "'inner'" "${RF_G-}" "envload strips one layer of quotes, not two"
+t_true "envload sets a key with an empty value" is_set RF_EMPTY
+t_eq "plain" "$(sh -c 'printf %s "$RF_A"')" "envload exports what it sets"
+t_eq "plain" "$(unset RF_A; cd "$T_DIR/env" && envload >/dev/null 2>&1; printf %s "${RF_A-}")" \
+    "envload reads ./.env by default"
+printf 'RF_N1=first\nRF_N2=last' > "$T_DIR/env/nonl.env"
+envload "$T_DIR/env/nonl.env" >/dev/null 2>&1
+t_eq "last" "${RF_N2-}" "envload reads a last line that has no newline"
+# A key that is not a shell name is a line to skip, like "bad key" above. It
+# used to reach export, which failed (and on hellish, killed a
+# non-interactive shell), so this runs in a subshell.
+printf '1RF=x\n=x\nRF_OK=1\n' > "$T_DIR/env/badkey.env"
+_rf_o=$( (envload "$T_DIR/env/badkey.env") 2>&1 )
+t_eq "ok exported 1 variables from $T_DIR/env/badkey.env" "$_rf_o" \
+    "envload skips a key that starts with a digit or is empty, and counts only what it exported"
+
+# ── envdiff ─────────────────────────────────────────────────────────────────
+printf '# c\nRF_NEW=1\nRF_CHG=new\nexport RF_SAME=same\nbad key=1\nno equals\n' > "$T_DIR/env/diff.env"
+unset RF_NEW
+RF_CHG=old
+RF_SAME=same
+t_rc 1 "envdiff fails on a file that does not exist" envdiff "$T_DIR/no.env"
+_rf_o=$(envdiff "$T_DIR/env/diff.env" 2>&1)
+t_has "$T_DIR/env/diff.env vs this environment" "$_rf_o" "envdiff names the file it compares"
+t_has "would be set" "$(_rf_line "+ RF_NEW" "$_rf_o")" "envdiff marks an unset key as one that would be set"
+t_has "would change" "$(_rf_line "~ RF_CHG" "$_rf_o")" "envdiff marks a different value as one that would change"
+t_has "already matches" "$(_rf_line "= RF_SAME" "$_rf_o")" "envdiff marks an equal value, 'export' prefix and all"
+t_hasnt "bad key" "$_rf_o" "envdiff skips a key that is not a name"
+t_eq "old" "$RF_CHG" "envdiff changes nothing"
+t_false "and sets nothing" is_set RF_NEW
+t_has "RF_A" "$(_rf_in "$T_DIR/env" envdiff 2>&1)" "envdiff reads ./.env by default"
+# What envload just did, envdiff must call a match: it compares the value
+# envload WOULD set, so the quotes come off first.
+_rf_o=$(envdiff "$T_DIR/env/.env" 2>&1)
+t_hasnt "would change" "$_rf_o" "right after envload, envdiff of the same file reports nothing to change"
+t_has "already matches" "$(_rf_line "RF_B" "$_rf_o")" "envdiff compares a quoted value without its quotes"
+t_has "RF_N2" "$(envdiff "$T_DIR/env/nonl.env" 2>&1)" "envdiff reads a last line that has no newline"
+_rf_o=$( (envdiff "$T_DIR/env/badkey.env") 2>&1 )
+t_has "RF_OK" "$_rf_o" "envdiff gets past a key that is not a name"
+t_hasnt "1RF" "$_rf_o" "and does not list it"
+
+# ── killport ────────────────────────────────────────────────────────────────
+t_head "functions: killport"
+
+t_rc 2 "killport without a port is a usage error" killport
+# Two victims of our own: one stands for the process listening on the port,
+# the other for a client that merely has a connection to it.
+sleep 30 &
+_rf_lpid=$!
+sleep 30 &
+_rf_cpid=$!
+export RF_LISTENER="$_rf_lpid" RF_CLIENT="$_rf_cpid"
+# The stub answers as lsof does: -i tcp:PORT alone is every socket on the
+# port, either end; -sTCP:LISTEN narrows it to the listener.
+t_stub lsof 'case " $* " in *" tcp:4242 "*) ;; *) exit 1 ;; esac
+case " $* " in *" -sTCP:LISTEN "*) ;; *) echo "$RF_CLIENT" ;; esac
+echo "$RF_LISTENER"'
+_rf_o=$(killport 4242 2>&1)
+t_has "killing pid $_rf_lpid" "$_rf_o" "killport names the pid it kills"
+t_true "killport stops the process listening on the port" _rf_gone "$_rf_lpid"
+t_true "killport leaves a client connected to the port alone" _rf_alive "$_rf_cpid"
+t_rc 1 "killport fails when nothing listens on the port" killport 4243
+t_has "nothing listening on port 4243" "$(killport 4243 2>&1)" "and says so"
+command rm -f "$T_DIR/stubs/lsof"
+
+# Without lsof it asks ss, whose users:(...) field can name several
+# processes sharing one listening socket (a pre-forking server).
+sleep 30 &
+_rf_p1=$!
+sleep 30 &
+_rf_p2=$!
+export RF_P1="$_rf_p1" RF_P2="$_rf_p2"
+t_stub ss 'case "$*" in *":4242"*) ;; *) exit 0 ;; esac
+echo "LISTEN 0 128 127.0.0.1:4242 0.0.0.0:* users:((\"sleep\",pid=$RF_P1,fd=3),(\"sleep\",pid=$RF_P2,fd=3))"'
+_rf_only "$T_DIR/kp" sed sort ps tr grep cut
+t_calls_reset
+( PATH="$T_DIR/stubs:$T_DIR/kp"; hash -r 2>/dev/null; killport 4242 ) >/dev/null 2>&1
+t_eq "ss|-tlpnH|sport = :4242" "$(t_calls)" "without lsof, killport asks ss for listeners on the port"
+t_true "killport stops the first process ss names" _rf_gone "$_rf_p1"
+t_true "killport stops every process ss names on the line" _rf_gone "$_rf_p2"
+command rm -f "$T_DIR/stubs/ss"
+t_rc 1 "killport fails when there is neither lsof nor ss" _rf_path "$T_DIR/kp" killport 4242
+kill "$_rf_cpid" "$_rf_lpid" "$_rf_p1" "$_rf_p2" 2>/dev/null
+wait 2>/dev/null
+
+# ═══ the shell itself ═══════════════════════════════════════════════════════
+t_head "functions: note sysinfo hxcd hxnew"
+
+# ── note ────────────────────────────────────────────────────────────────────
+t_has "no notes yet" "$(note 2>&1)" "note with nothing written says so"
+t_rc 0 "and that is not an error" note
+t_eq "ok noted" "$(note buy milk 'and eggs' 2>&1)" "note confirms what it wrote"
+t_eq "1" "$(wc -l < "$HX_STATE/notes.txt" | tr -d ' ')" "note appends one line to \$HX_STATE/notes.txt"
+case "$(cat "$HX_STATE/notes.txt")" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]\ [0-9][0-9]:[0-9][0-9]\ \ buy\ milk\ and\ eggs)
+        t_ok "the line is 'YYYY-MM-DD HH:MM  text', the words joined" ;;
+    *) t_bad "the line is 'YYYY-MM-DD HH:MM  text' — got [$(cat "$HX_STATE/notes.txt")]" ;;
+esac
+note second >/dev/null
+t_eq "second" "$(sed -n '2s/^.*  //p' "$HX_STATE/notes.txt")" "a later note goes after the earlier ones"
+_rf_o=$(note)
+t_has "notes" "$(printf '%s\n' "$_rf_o" | sed -n 2p)" "note with no argument prints a header"
+t_has "  $(sed -n 1p "$HX_STATE/notes.txt")" "$_rf_o" "and every note, indented"
+_rf_lost() { ( HX_STATE="$T_DIR/no/such/dir"; note "$@" ); }
+t_rc 1 "note fails when it cannot write" _rf_lost lost
+t_hasnt "ok noted" "$(_rf_lost lost 2>&1)" "and does not claim it noted anything"
+
+# ── sysinfo ─────────────────────────────────────────────────────────────────
+_rf_o=$(sysinfo 2>&1)
+t_has "$(hostname 2>/dev/null)" "$(printf '%s\n' "$_rf_o" | sed -n 2p)" "sysinfo is headed by the host name"
+for _rf_k in os kernel shell uptime cpu memory home term; do
+    t_true "sysinfo has a '$_rf_k' line" eval "printf '%s\n' \"\$_rf_o\" | grep -q '^  $_rf_k '"
+done
+t_has "$(uname -r)" "$(_rf_line "  kernel" "$_rf_o")" "sysinfo reports the running kernel"
+t_has "hellish $(hx_cap_get version)" "$(_rf_line "  shell" "$_rf_o")" "sysinfo reports this hellish's version"
+if command -v nproc >/dev/null 2>&1; then
+    t_has "$(nproc) cores" "$(_rf_line "  cpu" "$_rf_o")" "sysinfo counts the cores"
+else
+    t_skip "sysinfo core count — no nproc"
+fi
+t_has "$(hx_cols) columns" "$(_rf_line "  term" "$_rf_o")" "sysinfo reports the terminal width"
+
+# ── hxcd ────────────────────────────────────────────────────────────────────
+t_eq "$HX_HOME" "$(hxcd)" "hxcd prints the configuration directory"
+t_eq "$HX_HOME" "$(hxcd >/dev/null; pwd)" "hxcd enters it"
+
+# ── hxnew ───────────────────────────────────────────────────────────────────
+_rf_o=$(forge_new() { printf 'forge_new'; printf '|%s' "$@"; return 7; }; hxnew demo "a demo plugin"; printf ' rc=%s' "$?")
+t_eq "forge_new|demo|a demo plugin rc=7" "$_rf_o" "hxnew hands its arguments to forge_new and returns its status"
+_rf_o=$(unset -f forge_new; hxnew demo 2>&1; printf ' rc=%s' "$?")
+t_has "enable the 'forge' plugin first" "$_rf_o" "hxnew without forge says how to get it"
+t_has " rc=1" "$_rf_o" "and fails"

@@ -45,8 +45,13 @@ rglob() {
 }
 hx_func_doc rglob "recursive file search by name (streams, unlike **)" "rglob <dir> <pattern>"
 
-# is_set <VAR> — the `test -v` shim.
-is_set() { eval "[ -n \"\${$1+x}\" ]"; }
+# is_set <VAR> — the `test -v` shim. The name reaches an eval, so it is
+# checked first: `is_set '$(cmd)'` ran cmd, and a name with a blank is a bad
+# substitution, which ends a POSIX shell that is running a script.
+is_set() {
+    case "$1" in ''|[0-9]*|*[!A-Za-z0-9_]*) return 1 ;; esac
+    eval "[ -n \"\${$1+x}\" ]"
+}
 hx_func_doc is_set "true when a variable is set, even if empty (test -v shim)" "is_set <VARNAME>"
 
 # quote <string> — the `printf %q` shim. Wraps in single quotes and escapes
@@ -151,14 +156,19 @@ hx_func_doc pack "build an archive; the extension picks the format" "pack <archi
 # The timestamp is taken ONCE into a variable. Calling date twice -- once for
 # the copy and once for the message -- can straddle a second boundary and
 # report a filename that does not exist.
+#
+# A file that could not be backed up makes the whole call fail. The loop used
+# to end on `continue` or on the last copy, so `bak nosuch` printed "no such
+# file" and returned 0.
 bak() {
-    local f stamp
+    local f stamp rc=0
     [ $# -gt 0 ] || { hx_err "usage: bak <file>..."; return 2; }
     stamp=$(date +%Y%m%d-%H%M%S)
     for f in "$@"; do
-        [ -e "$f" ] || { hx_err "no such file: $f"; continue; }
-        command cp -a "$f" "$f.bak.$stamp" && hx_ok "$f.bak.$stamp"
+        [ -e "$f" ] || { hx_err "no such file: $f"; rc=1; continue; }
+        if command cp -a "$f" "$f.bak.$stamp"; then hx_ok "$f.bak.$stamp"; else rc=1; fi
     done
+    return $rc
 }
 hx_func_doc bak "timestamped backup copy of a file" "bak <file>..."
 
@@ -187,7 +197,9 @@ grepf() {
     local pat="$1" dir="${2:-.}"
     [ -n "$pat" ] || { hx_err "usage: grepf <pattern> [dir]"; return 2; }
     if hx_have rg; then
-        rg --line-number --color=always "$pat" "$dir"
+        # `--`, as the grep branch has: without it rg read a pattern such as
+        # `-dash` as its own flags and failed, or searched for something else.
+        rg --line-number --color=always -- "$pat" "$dir"
     else
         grep -rnI --color=always \
             --exclude-dir=.git --exclude-dir=node_modules \
@@ -214,7 +226,10 @@ hx_func_doc biggest "largest files below here" "biggest [count]"
 # Reading stdin is the NO-REDIRECT case, not a redirect from "-". `wc < -`
 # looks for a file literally called "-" and fails silently into an empty
 # result, which is what `printf 'a\nb\n' | count` used to do.
+# A file it cannot read is an error. The failed redirect used to happen inside
+# the pipeline, whose status is the while loop's: no counts, and 0 returned.
 count() {
+    [ $# -eq 0 ] || [ -r "$1" ] || { hx_err "cannot read: $1"; return 1; }
     if [ $# -eq 0 ]; then wc -lwc; else wc -lwc < "$1"; fi \
         | while read -r l w c; do
               printf '  %8s lines\n  %8s words\n  %8s characters\n' "$l" "$w" "$c"
@@ -273,6 +288,9 @@ hx_func_doc calc "floating-point calculator" "calc '3.5 * 2'"
 
 genpass() {
     local n="${1:-24}"
+    # A length that is not a number used to print head's complaint, then an
+    # empty line, and return 0: a script would have taken that for a password.
+    case "$n" in *[!0-9]*) hx_err "usage: genpass [length]"; return 2 ;; esac
     LC_ALL=C tr -dc 'A-Za-z0-9!@#%^&*_+=-' < /dev/urandom | head -c "$n"
     printf '\n'
 }
@@ -319,13 +337,19 @@ hx_func_doc confirm "ask a yes/no question (returns 0 for yes)" "confirm 'delete
 envload() {
     local f="${1:-.env}" line key val n=0
     [ -r "$f" ] || { hx_err "no such file: $f"; return 1; }
-    while IFS= read -r line; do
+    # `|| [ -n "$line" ]`: a last line with no newline used to be dropped.
+    # `line=` first: bash's read empties it at end of file, but a hellish
+    # that predates that fix leaves the old value, and the loop never ends.
+    # An empty key or one that starts with a digit is skipped like any other
+    # non-name: it used to reach export, which failed (and killed a
+    # non-interactive hellish) while the count went up.
+    while line=; IFS= read -r line || [ -n "$line" ]; do
         case "$line" in ''|'#'*) continue ;; esac
         case "$line" in *=*) ;; *) continue ;; esac
         key="${line%%=*}"
         val="${line#*=}"
         key="${key#export }"
-        case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
+        case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
         # strip one layer of surrounding quotes
         case "$val" in
             \"*\") val="${val#\"}"; val="${val%\"}" ;;
@@ -344,12 +368,18 @@ envdiff() {
     local f="${1:-.env}" line key val cur
     [ -r "$f" ] || { hx_err "no such file: $f"; return 1; }
     hx_head "${f} vs this environment"
-    while IFS= read -r line; do
+    # Read and filtered exactly as envload does, quotes included: comparing
+    # the raw `"quoted value"` reported "would change" right after envload.
+    while line=; IFS= read -r line || [ -n "$line" ]; do
         case "$line" in ''|'#'*) continue ;; esac
         case "$line" in *=*) ;; *) continue ;; esac
         key="${line%%=*}"; key="${key#export }"
         val="${line#*=}"
-        case "$key" in *[!A-Za-z0-9_]*) continue ;; esac
+        case "$key" in ''|[0-9]*|*[!A-Za-z0-9_]*) continue ;; esac
+        case "$val" in
+            \"*\") val="${val#\"}"; val="${val%\"}" ;;
+            \'*\') val="${val#\'}"; val="${val%\'}" ;;
+        esac
         eval "cur=\${$key:-}"
         if ! is_set "$key"; then
             printf '  %s+ %-24s%s would be set\n' "$HX_GRN" "$key" "$HX_R"
@@ -367,9 +397,13 @@ killport() {
     local port="$1" pids p
     [ -n "$port" ] || { hx_err "usage: killport <port>"; return 2; }
     if hx_have lsof; then
-        pids=$(lsof -ti tcp:"$port" 2>/dev/null)
+        # -sTCP:LISTEN: `-i tcp:PORT` alone also names every process with a
+        # connection TO that port (a browser talking to :443), and killed it.
+        pids=$(lsof -ti tcp:"$port" -sTCP:LISTEN 2>/dev/null)
     elif hx_have ss; then
-        pids=$(ss -tlpnH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9]*\).*/\1/p' | sort -u)
+        # Every pid= on the line: processes sharing one socket (a pre-forking
+        # server) are listed on one line, and a greedy sed kept only the last.
+        pids=$(ss -tlpnH "sport = :$port" 2>/dev/null | tr ',' '\n' | sed -n 's/^pid=\([0-9]*\).*/\1/p' | sort -u)
     fi
     [ -n "$pids" ] || { hx_warn "nothing listening on port $port"; return 1; }
     printf '%s\n' "$pids" | while read -r p; do
@@ -390,7 +424,9 @@ note() {
         hx_head "notes"; sed 's/^/  /' "$f"; printf '\n'
         return 0
     fi
-    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$*" >> "$f"
+    # Only a note that was written is "noted": a failed append (no state
+    # directory, a full disk) used to report success all the same.
+    printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M')" "$*" >> "$f" || return 1
     hx_ok "noted"
 }
 hx_func_doc note "jot a timestamped note, or print them all" "note [text]"
