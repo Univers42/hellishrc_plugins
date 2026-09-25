@@ -1,0 +1,93 @@
+# plugins/docker/test.hsh — what each wrapper asks docker to do.
+#
+# docker is a stub: no daemon, no containers, nothing stopped or pruned. The
+# stub answers `compose version`, `ps -q` and `exec` from the DK_* variables
+# below, so each branch of each wrapper can be reached on any machine.
+
+t_head "docker"
+
+export DK_COMPOSE_RC=0 DK_BASH_RC=0 DK_IDS=""
+t_stub docker '
+case "$1 $2" in
+    "compose version") exit "$DK_COMPOSE_RC" ;;
+    "ps -q") [ -n "$DK_IDS" ] && printf "%s\n" $DK_IDS ;;
+    "exec -it") [ "$4" = bash ] && exit "$DK_BASH_RC" ;;
+esac
+exit 0'
+
+# _dt <function> [args...] — the docker calls it made, one per line
+_dt() {
+    t_calls_reset
+    "$@" >/dev/null 2>&1 </dev/null
+    t_calls
+}
+
+# ── listings ────────────────────────────────────────────────────────────────
+t_eq 'docker|ps|--format|table {{.Names}}\t{{.Status}}\t{{.Ports}}\t{{.Image}}|--filter|name=web' \
+    "$(_dt dps --filter name=web)" "dps: running containers, name/status/ports/image, extra args passed on"
+t_eq 'docker|ps|-a|--format|table {{.Names}}\t{{.Status}}\t{{.Image}}' \
+    "$(_dt dpsa)" "dpsa: every container, stopped ones too"
+t_eq 'docker|images|--format|table {{.Repository}}:{{.Tag}}\t{{.Size}}\t{{.CreatedSince}}' \
+    "$(_dt dimg)" "dimg: images with size and age"
+
+# ── one container ───────────────────────────────────────────────────────────
+t_rc 2 "dsh without a container is a usage error" dsh
+t_eq "docker|exec|-it|web|bash" "$(_dt dsh web)" "dsh prefers bash"
+DK_BASH_RC=1
+t_eq "docker|exec|-it|web|bash
+docker|exec|-it|web|sh" "$(_dt dsh web)" "dsh falls back to sh when the container has no bash"
+DK_BASH_RC=0
+
+t_rc 2 "dlog without a container is a usage error" dlog
+t_eq "docker|logs|-f|--tail|100|web" "$(_dt dlog web)" "dlog follows the last 100 lines"
+
+t_rc 2 "dip without a container is a usage error" dip
+t_eq 'docker|inspect|-f|{{range .NetworkSettings.Networks}}{{.IPAddress}}{{"\n"}}{{end}}|web' \
+    "$(_dt dip web)" "dip reads every network's address"
+
+# ── the ones that ask first ─────────────────────────────────────────────────
+DK_IDS=""
+t_has "no running containers" "$(dstopall 2>&1 </dev/null)" "dstopall with nothing running says so"
+t_eq "docker|ps|-q" "$(_dt dstopall)" "dstopall with nothing running stops nothing"
+
+DK_IDS="aaa111 bbb222"
+t_calls_reset
+printf 'n\n' | dstopall >/dev/null 2>&1
+t_eq "1" "$?" "dstopall returns 1 on a no"
+t_hasnt "docker|stop" "$(t_calls)" "dstopall stops nothing on a no"
+t_has "stop all 2 running container(s)?" "$(printf 'n\n' | dstopall 2>&1)" "dstopall asks with the count"
+t_calls_reset
+printf 'y\n' | dstopall >/dev/null 2>&1
+t_has "docker|stop|aaa111|bbb222" "$(t_calls)" "dstopall stops every running container on a yes"
+DK_IDS=""
+
+t_calls_reset
+printf 'n\n' | dclean >/dev/null 2>&1
+t_eq "1" "$?" "dclean returns 1 on a no"
+t_eq "docker|system|df" "$(t_calls)" "dclean shows the reclaimable space and prunes nothing on a no"
+t_calls_reset
+printf 'y\n' | dclean >/dev/null 2>&1
+t_eq "docker|system|df
+docker|system|prune|-f" "$(t_calls)" "dclean prunes on a yes"
+
+# ── compose, v2 then v1 ─────────────────────────────────────────────────────
+t_eq "docker|compose|version
+docker|compose|up|-d|web" "$(_dt dcu web)" "dcu: compose up -d, through docker compose (v2)"
+t_eq "docker|compose|down|-v" "$(_dt dcd -v | tail -1)"   "dcd: compose down"
+t_eq "docker|compose|logs|-f|--tail|100|web" "$(_dt dcl web | tail -1)" "dcl: compose logs, following"
+t_eq "docker|compose|restart|web" "$(_dt dcr web | tail -1)" "dcr: compose restart"
+t_eq "docker|compose|ps"          "$(_dt dcps | tail -1)"    "dcps: compose ps"
+
+DK_COMPOSE_RC=1
+t_stub docker-compose
+t_eq "docker|compose|version
+docker-compose|up|-d" "$(_dt dcu)" "dcu falls back to docker-compose (v1)"
+command rm -f "$T_DIR/stubs/docker-compose"
+hash -r 2>/dev/null
+if command -v docker-compose >/dev/null 2>&1; then
+    t_skip "no compose at all — this machine has a real docker-compose"
+else
+    t_rc 1 "with neither compose, the compose verbs fail" dcu
+    t_has "no docker compose available" "$(dcu 2>&1)" "and say so"
+fi
+DK_COMPOSE_RC=0
