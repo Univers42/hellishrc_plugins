@@ -1,0 +1,168 @@
+# test/lib_ui.hsh — lib/ui.hsh: colour and glyph detection, the palette,
+# terminal width and every output helper.
+#
+# tput is a stub, so the terminal this runs in decides nothing. Each probe
+# runs in a subshell with the variables it reads set explicitly.
+
+_lu_E=$'\033'
+
+t_head "ui: colour depth"
+t_stub tput 'case "$1" in colors) echo "${LU_TPUT_COLORS:-8}" ;; cols) echo "${LU_TPUT_COLS:-80}" ;; esac'
+export LU_TPUT_COLORS=8 LU_TPUT_COLS=80
+
+# _lu_depth <TERM> <COLORTERM> <tput colors> [NO_COLOR|never]
+_lu_depth() {
+    ( unset HX_COLOR_DEPTH NO_COLOR
+      HX_COLOR=auto TERM="$1" COLORTERM="$2" LU_TPUT_COLORS="$3"
+      case "${4:-}" in NO_COLOR) NO_COLOR=1 ;; never) HX_COLOR=never ;; esac
+      hx_color_depth )
+}
+t_eq "24"   "$(_lu_depth xterm truecolor 8)"   "COLORTERM=truecolor means 24-bit"
+t_eq "24"   "$(_lu_depth xterm 24bit 8)"       "COLORTERM=24bit too"
+t_eq "256"  "$(_lu_depth xterm '' 256)"        "otherwise tput colors decides: 256"
+t_eq "8"    "$(_lu_depth xterm '' 16)"         "fewer than 256 is 8"
+t_eq "8"    "$(_lu_depth xterm '' junk)"       "a tput answer that is not a number is 8"
+t_eq "none" "$(_lu_depth dumb '' 256)"         "TERM=dumb has none"
+t_eq "none" "$(_lu_depth '' '' 256)"           "no TERM has none"
+t_eq "none" "$(_lu_depth xterm truecolor 256 NO_COLOR)" "NO_COLOR means none"
+t_eq "none" "$(_lu_depth xterm truecolor 256 never)"    "HX_COLOR=never means none"
+t_eq "256"  "$( HX_COLOR_DEPTH=256; TERM=dumb; hx_color_depth )" "a depth already known is not probed again"
+
+t_head "ui: unicode"
+t_eq "1" "$( unset HX_UNICODE; LC_ALL= LC_CTYPE= LANG=en_US.UTF-8; hx_unicode_init; printf %s "$HX_UNICODE" )" "a UTF-8 LANG means unicode"
+t_eq "1" "$( unset HX_UNICODE; LC_ALL=C.utf8 LC_CTYPE= LANG=; hx_unicode_init; printf %s "$HX_UNICODE" )" "a lower-case utf8 LC_ALL too"
+t_eq "0" "$( unset HX_UNICODE; LC_ALL=C LC_CTYPE= LANG=; hx_unicode_init; printf %s "$HX_UNICODE" )" "LC_ALL=C means ASCII"
+t_eq "0" "$( HX_UNICODE=0; LANG=en_US.UTF-8; hx_unicode_init; printf %s "$HX_UNICODE" )" "an explicit HX_UNICODE is kept"
+t_eq "1" "$( HX_UNICODE=auto; LC_ALL= LC_CTYPE= LANG=en_US.UTF-8; hx_unicode_init; printf %s "$HX_UNICODE" )" "HX_UNICODE=auto detects"
+
+t_head "ui: does this stream get colour"
+( NO_COLOR=1; HX_COLOR=always; hx_want_color ) && t_bad "NO_COLOR refuses colour, even with HX_COLOR=always" \
+    || t_ok "NO_COLOR refuses colour, even with HX_COLOR=always"
+( unset NO_COLOR; HX_COLOR=never; hx_want_color ) && t_bad "HX_COLOR=never refuses colour" || t_ok "HX_COLOR=never refuses colour"
+( unset NO_COLOR; HX_COLOR=always; hx_want_color >/dev/null ) && t_ok "HX_COLOR=always gives colour to a pipe" \
+    || t_bad "HX_COLOR=always gives colour to a pipe"
+( unset NO_COLOR; HX_COLOR=auto; TERM=xterm; hx_want_color >/dev/null ) && t_bad "auto gives no colour to a pipe" \
+    || t_ok "auto gives no colour to a pipe"
+
+t_head "ui: the palette"
+t_eq "|||" "$( HX_COLOR=never; hx_color_init; printf '%s|%s|%s|%s' "$HX_R" "$HX_RED" "$HX_ORA" "$HX_GRY" )" \
+    "with colour off, every palette variable is empty"
+t_eq "${_lu_E}[31m" "$( unset NO_COLOR; HX_COLOR=always HX_COLOR_DEPTH=256; hx_color_init; printf %s "$HX_RED" )" \
+    "the basic colours are the ANSI codes, which follow the terminal's theme"
+t_eq "${_lu_E}[38;5;209m" "$( unset NO_COLOR; HX_COLOR=always HX_COLOR_DEPTH=256; hx_color_init; printf %s "$HX_ORA" )" \
+    "the accent is palette 209 on a 256-colour terminal"
+t_eq "${_lu_E}[33m" "$( unset NO_COLOR; HX_COLOR=always HX_COLOR_DEPTH=8; hx_color_init; printf %s "$HX_ORA" )" \
+    "and the nearest basic colour on an 8-colour one"
+
+t_head "ui: hx_f, hx_b, hx_basic8"
+t_eq "${_lu_E}[38;5;141m" "$( HX_COLOR_DEPTH=256; hx_f 141 )" "hx_f at 256 colours is a palette foreground"
+t_eq "${_lu_E}[48;5;141m" "$( HX_COLOR_DEPTH=24; hx_b 141 )"  "hx_b at 24-bit is a palette background"
+t_eq "${_lu_E}[35m" "$( HX_COLOR_DEPTH=8; hx_f 141 )" "hx_f at 8 colours is the nearest basic foreground"
+t_eq "${_lu_E}[45m" "$( HX_COLOR_DEPTH=8; hx_b 141 )" "hx_b at 8 colours is the basic background"
+t_eq "" "$( HX_COLOR_DEPTH=none; hx_f 141; hx_b 141 )" "at none, both are empty"
+for _lu_pair in 0:30 209:31 149:32 214:33 117:34 141:35 44:36 255:37 250:37; do
+    t_eq "${_lu_pair#*:}" "$(hx_basic8 "${_lu_pair%%:*}")" "hx_basic8 ${_lu_pair%%:*} is ${_lu_pair#*:}"
+done
+
+t_head "ui: glyphs"
+t_eq "->|x" "$( HX_UNICODE=0 HX_NERD=0; hx_glyph_init; printf '%s%s|%s' "$HX_G_H" "$HX_G_ARR" "$HX_G_BAD" )" \
+    "without unicode every glyph is ASCII"
+t_eq "─❯|✘" "$( HX_UNICODE=1 HX_NERD=0; hx_glyph_init; printf '%s%s|%s' "$HX_G_H" "$HX_G_ARR" "$HX_G_BAD" )" \
+    "with unicode they are box-drawing and symbols"
+t_eq "$(printf '\356\202\260')" "$( HX_UNICODE=1 HX_NERD=1; hx_glyph_init; printf %s "$HX_G_SEP" )" \
+    "HX_NERD=1 uses the powerline separator"
+t_eq "|" "$( HX_UNICODE=0 HX_NERD=1; hx_glyph_init; printf %s "$HX_G_SEP" )" \
+    "HX_NERD=1 without unicode still draws ASCII"
+t_eq "▌" "$( HX_UNICODE=1 HX_NERD=0; hx_glyph_init; printf %s "$HX_G_SEP" )" \
+    "unicode without a patched font uses a half block"
+_lu_missing=""
+for _lu_g in TL TR BL BR TLS TRS BLS BRS H V HH VV ARR ARR2 TRI PLAY LAM OK BAD DOT DIA SQ CIRC RING \
+    UP DN ELL STASH BOLT CLK STAR LOCK B1 B2 B3 FULL LHALF RHALF BRANCH GEAR CTL CBR TOPL TOPR SEP SEPT RSEP RSEPT; do
+    for _lu_u in 0 1; do
+        _lu_v=$( HX_UNICODE=$_lu_u HX_NERD=0; hx_glyph_init; eval "printf %s \"\$HX_G_$_lu_g\"" )
+        [ -n "$_lu_v" ] || _lu_missing="$_lu_missing $_lu_g/$_lu_u"
+    done
+done
+t_eq "" "$_lu_missing" "every glyph has a value, in unicode and in ASCII"
+
+t_head "ui: terminal width"
+t_eq "132" "$( COLUMNS=132; hx_cols )" "hx_cols reads \$COLUMNS"
+t_calls_reset
+( COLUMNS=132; hx_cols >/dev/null )
+t_eq "" "$(t_calls)" "and does not run tput when it has it"
+t_eq "90" "$( COLUMNS=; HX_COLS=; LU_TPUT_COLS=90; hx_cols )" "without it, tput cols"
+t_eq "90" "$( COLUMNS=10; HX_COLS=; LU_TPUT_COLS=90; hx_cols )" "a \$COLUMNS under 20 is not believed"
+t_eq "80" "$( COLUMNS=; HX_COLS=; LU_TPUT_COLS=junk; hx_cols )" "a tput answer that is not a number is 80"
+t_eq "80" "$( COLUMNS=; HX_COLS=; LU_TPUT_COLS=5; hx_cols )" "and so is one under 20"
+t_calls_reset
+( COLUMNS=; HX_COLS=; LU_TPUT_COLS=90; hx_cols >/dev/null; hx_cols >/dev/null; hx_cols >/dev/null )
+t_eq "1" "$(t_calls | grep -c '^tput|cols$')" "tput runs once; the width is cached"
+t_eq "100" "$( COLUMNS=; HX_COLS=90; LU_TPUT_COLS=100; hx_cols -r )" "hx_cols -r measures again"
+
+t_head "ui: text helpers"
+HX_COLOR=never
+hx_color_init
+HX_UNICODE=0 HX_NERD=0
+hx_glyph_init
+t_eq "ababab" "$(hx_repeat ab 3)" "hx_repeat repeats"
+t_eq "" "$(hx_repeat ab 0)" "hx_repeat 0 is empty"
+t_eq "" "$(hx_repeat ab -2)" "a negative count is empty"
+t_eq "" "$(hx_repeat ab x)" "a count that is not a number is empty"
+t_eq "a  b" "$(hx_say a " b")" "hx_say joins its words like echo"
+t_eq ":: note" "$(hx_info note)" "hx_info writes to stdout"
+t_eq "ok done" "$(hx_ok done)" "hx_ok writes to stdout"
+t_eq "" "$(hx_warn careful 2>/dev/null)" "hx_warn writes to stderr"
+t_eq "warn careful" "$(hx_warn careful 2>&1)" "with the warn tag"
+t_eq "err broke" "$(hx_err broke 2>&1)" "hx_err writes the err tag to stderr"
+t_eq "" "$(hx_err broke 2>/dev/null)" "and nothing to stdout"
+t_rc 1 "hx_die returns 1" hx_die fatal
+t_eq "err fatal" "$(hx_die fatal 2>&1)" "after printing the error"
+t_eq "$(printf '\nTitle')" "$(hx_head Title)" "hx_head is a blank line and the title"
+t_eq "$(printf '\n  Sub')" "$(hx_sub Sub)" "hx_sub is indented"
+t_eq "  name                   the description" "$(hx_kv name "the description")" "hx_kv aligns the name in 22 columns"
+t_eq "  name               state      desc" "$(hx_kv3 name state desc)" "hx_kv3 aligns three columns"
+t_eq "$(printf '\n  aside')" "$(hx_note aside)" "hx_note is an indented aside"
+t_eq "-----" "$(hx_rule 5)" "hx_rule draws the width it is given"
+t_eq "100" "$(hx_rule 400 | tr -d '\n' | wc -c | tr -d ' ')" "hx_rule stops at 100"
+t_eq "30" "$( COLUMNS=30; hx_rule | tr -d '\n' | wc -c | tr -d ' ' )" "hx_rule defaults to the terminal width"
+t_eq "on " "$(hx_badge on)"   "hx_badge on is three wide"
+t_eq "off" "$(hx_badge off)"  "hx_badge off"
+t_eq "new" "$(hx_badge new)"  "hx_badge shows any other state as it is"
+
+t_head "ui: hx_bar"
+t_eq "#####.....  50%" "$(hx_bar 50 10)" "hx_bar fills its share of the width"
+t_eq "########## 100%" "$(hx_bar 150 10)" "hx_bar stops at 100%"
+t_eq "..........   0%" "$(hx_bar junk 10)" "a percentage that is not a number is 0"
+t_eq "####......  42%" "$(hx_bar 42% 10)" "a trailing % is accepted"
+t_eq "20" "$(hx_bar 10 | sed 's/ .*//' | tr -d '\n' | wc -c | tr -d ' ')" "the default width is 20"
+_lu_c() { ( unset NO_COLOR; HX_COLOR=always HX_COLOR_DEPTH=8; hx_color_init; hx_bar "$1" 4 | cut -c1-5 ); }
+t_eq "${_lu_E}[32m" "$(_lu_c 10)" "under 70% is green"
+t_eq "${_lu_E}[33m" "$(_lu_c 75)" "from 70% it is yellow"
+t_eq "${_lu_E}[31m" "$(_lu_c 95)" "from 90% it is red"
+
+t_head "ui: boxes, links, titles"
+_lu_top=$( COLUMNS=40; hx_box "Title" )
+_lu_bot=$( COLUMNS=40; hx_boxend )
+t_has "Title" "$_lu_top" "hx_box shows its title"
+t_eq "${#_lu_bot}" "${#_lu_top}" "hx_box and hx_boxend are the same width"
+t_eq "39" "${#_lu_bot}" "one less than the terminal"
+t_eq "75" "$( COLUMNS=200; _b=$(hx_boxend); printf %s "${#_b}" )" "a box is never wider than 76 columns"
+t_has "a-very-long-title" "$( COLUMNS=20; hx_box "a-very-long-title-longer-than-the-box" )" "a title wider than the box still prints"
+t_eq "https://x.y" "$(hx_link https://x.y)" "hx_link without colour is the URL"
+t_eq "text" "$(hx_link https://x.y text)" "or the text it is given"
+t_eq "${_lu_E}]8;;https://x.y${_lu_E}\\text${_lu_E}]8;;${_lu_E}\\" \
+    "$( unset NO_COLOR HX_NO_OSC; HX_COLOR=always; hx_link https://x.y text )" "with colour it is an OSC 8 hyperlink"
+t_eq "text" "$( unset NO_COLOR; HX_COLOR=always HX_NO_OSC=1; hx_link https://x.y text )" "HX_NO_OSC turns hyperlinks off"
+t_eq "${_lu_E}]0;my title"$'\a' "$( TERM=xterm-256color; hx_title my title )" "hx_title sets an xterm's title"
+t_eq "" "$( TERM=linux; hx_title my title )" "and writes nothing to a console that has none"
+t_eq "piped" "$(printf 'piped\n' | hx_pager)" "hx_pager passes a pipe through"
+
+t_head "ui: hx_confirm"
+printf 'y\n'   | hx_confirm q >/dev/null && t_ok "y is yes"      || t_bad "y is yes"
+printf 'YES\n' | hx_confirm q >/dev/null && t_ok "YES is yes"    || t_bad "YES is yes"
+printf 'n\n'   | hx_confirm q >/dev/null && t_bad "n is no"      || t_ok "n is no"
+printf 'yep\n' | hx_confirm q >/dev/null && t_bad "anything else is no" || t_ok "anything else is no"
+printf '\n'    | hx_confirm q >/dev/null && t_bad "Enter is no"  || t_ok "Enter is no"
+hx_confirm q </dev/null >/dev/null && t_bad "end of input is no" || t_ok "end of input is no, instead of waiting"
+t_eq "delete it? [y/N] " "$(printf 'n\n' | hx_confirm "delete it?")" "the question ends in [y/N]"
+t_eq "are you sure? [y/N] " "$(printf 'n\n' | hx_confirm)" "with a default question"
