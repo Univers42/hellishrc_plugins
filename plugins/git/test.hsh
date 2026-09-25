@@ -1,0 +1,170 @@
+# plugins/git/test.hsh — every git helper, against throwaway repositories.
+#
+# Real git, in $T_DIR: the helpers are thin, and what matters is what they do
+# to a repository. The destructive ones (gnuke, gsweep) are driven through
+# their confirmation with `printf 'y\n' |`, and must do nothing on a no.
+
+t_head "git"
+
+if ! command -v git >/dev/null 2>&1; then
+    t_skip "git plugin — no git on this machine"
+    return 0
+fi
+
+export GIT_AUTHOR_NAME="Ada Test" GIT_AUTHOR_EMAIL="ada@example.invalid"
+export GIT_COMMITTER_NAME="Ada Test" GIT_COMMITTER_EMAIL="ada@example.invalid"
+export GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0
+git config --global init.defaultBranch main 2>/dev/null
+git config --global advice.detachedHead false 2>/dev/null
+
+# _gt_repo <dir> — a repository on main with one commit
+_gt_repo() {
+    mkdir -p "$1" && cd "$1" || return 1
+    git init -q . && git checkout -q -b main 2>/dev/null
+    printf 'one\n' > a.txt
+    git add a.txt && git commit -q -m "first"
+}
+
+# ── outside a repository ────────────────────────────────────────────────────
+mkdir -p "$T_DIR/norepo"
+cd "$T_DIR/norepo"
+t_rc 1 "groot fails outside a repository" groot
+t_has "not in a git repo" "$(groot 2>&1)" "groot says why"
+t_rc 1 "ginfo fails outside a repository" ginfo
+t_rc 1 "gnuke refuses outside a repository" gnuke
+t_eq "" "$(gbranch)" "gbranch prints nothing outside a repository"
+
+# ── location ────────────────────────────────────────────────────────────────
+_gt_repo "$T_DIR/r1"
+mkdir -p "$T_DIR/r1/src/deep"
+cd "$T_DIR/r1/src/deep"
+t_eq "$T_DIR/r1" "$(groot)" "groot prints the repository root"
+( groot >/dev/null && [ "$PWD" = "$T_DIR/r1" ] ) && t_ok "groot changes directory to it" || t_bad "groot changes directory to it"
+t_eq "main" "$(gbranch)" "gbranch names the current branch"
+cd "$T_DIR/r1"
+
+# ── ginfo ───────────────────────────────────────────────────────────────────
+printf 'two\n' > b.txt; git add b.txt
+printf 'changed\n' >> a.txt
+printf 'x\n' > untracked1; printf 'y\n' > untracked2
+_gt_out=$(ginfo)
+t_has "r1" "$_gt_out" "ginfo heads the screen with the repository name"
+t_has "main" "$_gt_out" "ginfo shows the branch"
+t_has "none" "$_gt_out" "ginfo shows a missing upstream"
+t_has "1 file(s)" "$_gt_out" "ginfo counts staged and unstaged files"
+t_has "2 file(s)" "$_gt_out" "ginfo counts untracked files"
+t_has "first" "$_gt_out" "ginfo shows the recent log"
+git stash -q -u
+t_has "stashes" "$(ginfo)" "ginfo has a stash line"
+t_eq "1" "$(ginfo | grep stashes | tr -dc '0-9')" "ginfo counts stashes"
+git stash pop -q
+git add -A && git commit -q -m "second"
+
+git init -q --bare "$T_DIR/remote.git"
+git remote add origin "$T_DIR/remote.git"
+git push -q -u origin main 2>/dev/null
+printf 'three\n' > c.txt; git add c.txt; git commit -q -m "third"
+t_has "origin/main  (ahead 1, behind 0)" "$(ginfo)" "ginfo shows the upstream and the drift"
+
+# ── safe undo ───────────────────────────────────────────────────────────────
+gundo >/dev/null
+t_eq "second" "$(git log -1 --pretty=%s)" "gundo drops the last commit"
+t_eq "c.txt" "$(git diff --cached --name-only)" "gundo keeps its changes staged"
+git commit -q -m "third"
+
+printf 'p\n' > p1; printf 'q\n' > p2; git add p1 p2
+gunstage p1 >/dev/null
+t_eq "p2" "$(git diff --cached --name-only)" "gunstage <path> unstages just that path"
+gunstage >/dev/null
+t_eq "" "$(git diff --cached --name-only)" "gunstage with no argument unstages everything"
+t_true "gunstage leaves the files in place" test -f p1
+
+git init -q "$T_DIR/empty" && ( cd "$T_DIR/empty" && t_rc 1 "gundo fails when there is no commit" gundo )
+
+# ── gnuke ───────────────────────────────────────────────────────────────────
+printf 'dirty\n' >> a.txt
+printf 'n\n' | gnuke >/dev/null 2>&1
+t_eq "1" "$?" "gnuke returns 1 when the answer is no"
+t_true "gnuke keeps every change on a no" grep -q dirty a.txt
+t_true "gnuke keeps untracked files on a no" test -f p1
+printf 'y\n' | gnuke >/dev/null 2>&1
+t_eq "" "$(git status --porcelain)" "gnuke on a yes leaves a clean tree"
+t_false "gnuke removes untracked files" test -f p1
+t_has "already clean" "$(gnuke 2>&1 </dev/null)" "gnuke on a clean tree says so and asks nothing"
+t_rc 0 "gnuke on a clean tree succeeds" gnuke
+
+# ── wip ─────────────────────────────────────────────────────────────────────
+printf 'w\n' > wip.txt
+gwip >/dev/null 2>&1
+case "$(git log -1 --pretty=%s)" in
+    "wip: "????-??-??" "??:??) t_ok "gwip commits everything as a timestamped wip" ;;
+    *) t_bad "gwip commits everything as a timestamped wip — got [$(git log -1 --pretty=%s)]" ;;
+esac
+t_eq "" "$(git status --porcelain)" "gwip leaves nothing behind"
+gunwip >/dev/null 2>&1
+t_eq "third" "$(git log -1 --pretty=%s)" "gunwip undoes the wip commit"
+t_eq "wip.txt" "$(git diff --cached --name-only)" "gunwip keeps its changes staged"
+git commit -q -m "fourth"
+t_rc 1 "gunwip refuses when the last commit is not a wip" gunwip
+t_eq "fourth" "$(git log -1 --pretty=%s)" "gunwip leaves a real commit alone"
+
+# ── branches ────────────────────────────────────────────────────────────────
+t_rc 2 "gsw without a name is a usage error" gsw
+gsw feature >/dev/null 2>&1
+t_eq "feature" "$(gbranch)" "gsw creates a branch that does not exist"
+gsw main >/dev/null 2>&1
+t_eq "main" "$(gbranch)" "gsw switches to one that does"
+
+git branch merged1; git branch merged2
+git checkout -q -b unmerged && printf 'u\n' > u.txt && git add u.txt && git commit -q -m "unmerged work"
+git checkout -q main
+printf 'n\n' | gsweep >/dev/null 2>&1
+t_true "gsweep deletes nothing on a no" git show-ref --verify --quiet refs/heads/merged1
+_gt_out=$(printf 'y\n' | gsweep 2>&1)
+t_has "merged1" "$_gt_out" "gsweep lists what it will delete"
+t_false "gsweep deletes a merged branch on a yes" git show-ref --verify --quiet refs/heads/merged1
+t_false "gsweep deletes every merged branch"       git show-ref --verify --quiet refs/heads/merged2
+t_true  "gsweep keeps an unmerged branch"          git show-ref --verify --quiet refs/heads/unmerged
+t_true  "gsweep keeps the base branch"             git show-ref --verify --quiet refs/heads/main
+git branch -q -D feature 2>/dev/null
+t_has "no merged branches" "$(gsweep 2>&1 </dev/null)" "gsweep with nothing to do says so"
+
+_gt_repo "$T_DIR/r2"
+git branch -m main master
+git branch old
+t_has "into master" "$(printf 'n\n' | gsweep 2>&1)" "gsweep falls back to master when there is no main"
+cd "$T_DIR/r1"
+
+# ── history ─────────────────────────────────────────────────────────────────
+GIT_AUTHOR_NAME="Bob Other" git commit -q --allow-empty -m "by bob"
+_gt_out=$(gwho)
+t_has "Ada Test" "$_gt_out" "gwho counts each author"
+t_eq "Ada Test" "$(gwho | head -1 | sed 's/^ *[0-9]*[[:space:]]*//')" "gwho puts the most prolific author first"
+t_has "Bob Other" "$_gt_out" "gwho lists every author"
+
+printf 'NEEDLE_XYZ\n' > needle.txt; git add needle.txt; git commit -q -m "add the needle"
+t_has "add the needle" "$(gfind NEEDLE_XYZ)" "gfind finds the commit that added a string"
+t_eq "" "$(gfind NOT_IN_ANY_COMMIT_XYZ)" "gfind prints nothing for a string never committed"
+t_rc 2 "gfind without a string is a usage error" gfind
+
+git mv needle.txt renamed.txt; git commit -q -m "rename the needle"
+_gt_out=$(gwhen renamed.txt)
+t_has "rename the needle" "$_gt_out" "gwhen lists a file's commits"
+t_has "add the needle" "$_gt_out" "gwhen follows the file across a rename"
+t_rc 2 "gwhen without a file is a usage error" gwhen
+t_hasnt "Bob Other" "$(gwho HEAD~2..HEAD)" "gwho honours a revision range"
+
+# ── the prompt hook ─────────────────────────────────────────────────────────
+HX_GIT_LAST_ROOT=""
+HX_GIT_AUTOINFO=0
+t_eq "" "$(_git_on_prompt)" "the prompt hook is silent unless HX_GIT_AUTOINFO=1"
+HX_GIT_AUTOINFO=1
+_git_on_prompt >/dev/null
+t_eq "$T_DIR/r1" "$HX_GIT_LAST_ROOT" "the prompt hook remembers the repository it described"
+t_eq "" "$(_git_on_prompt)" "the prompt hook does not describe the same repository twice"
+cd "$T_DIR/r2"
+t_has "r2" "$(_git_on_prompt)" "the prompt hook describes a new repository on entry"
+cd "$T_DIR/norepo"
+_git_on_prompt >/dev/null
+t_eq "" "$HX_GIT_LAST_ROOT" "leaving every repository resets the hook"
+HX_GIT_AUTOINFO=0

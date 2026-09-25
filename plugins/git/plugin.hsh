@@ -112,7 +112,13 @@ gsw() {
 hx_func_doc gsw "switch to a branch, creating it if needed" "gsw <branch>"
 
 # ── history ─────────────────────────────────────────────────────────────────
-gwho() { git shortlog -sn --no-merges "$@" | head -20; }
+# With no revision, `git shortlog` reads a log from STDIN whenever stdin is
+# not a terminal -- so gwho printed nothing from a script, a pipe or $( ).
+# HEAD is what it reads at a terminal anyway.
+gwho() {
+    [ $# -gt 0 ] || set -- HEAD
+    git shortlog -sn --no-merges "$@" | head -20
+}
 hx_func_doc gwho "commit counts per author" "gwho [rev-range]"
 
 gfind() {
