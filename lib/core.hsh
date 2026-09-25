@@ -247,6 +247,27 @@ hx_cap_all() {
 # appends to them; on an older one it falls back to the PROMPT_COMMAND
 # dispatch list this configuration has always carried. A plugin calls
 # hx_hook_add and never has to know which.
+
+# _hx_hook_strip <list> <names> — the list, less every word in names.
+_hx_hook_strip() {
+    local f out=
+    for f in $1; do
+        case " $2 " in *" $f "*) ;; *) out="$out $f" ;; esac
+    done
+    printf '%s' "$out"
+}
+
+# `conf reload` sources this file again, and the native arrays outlive it.
+# The names the last load put there come out before the lists start over:
+# every reload used to append the whole list once more, so each hook ran
+# once per reload, and a plugin switched off kept its hook. Names put there
+# by anything else stay.
+if [ -n "${HX_PRECMD_FUNCS:-}" ] && [ -n "${HELLISH_PRECMD_FUNCS:-}" ]; then
+    HELLISH_PRECMD_FUNCS=$(_hx_hook_strip "$HELLISH_PRECMD_FUNCS" "$HX_PRECMD_FUNCS")
+fi
+if [ -n "${HX_PREEXEC_FUNCS:-}" ] && [ -n "${HELLISH_PREEXEC_FUNCS:-}" ]; then
+    HELLISH_PREEXEC_FUNCS=$(_hx_hook_strip "$HELLISH_PREEXEC_FUNCS" "$HX_PREEXEC_FUNCS")
+fi
 HX_PRECMD_FUNCS=""
 HX_PREEXEC_FUNCS=""
 
@@ -272,19 +293,18 @@ hx_hook_add() {
 }
 
 # hx_hook_del [precmd|preexec] <function> — unregister, so a plugin can turn
-# itself off without a reload.
+# itself off without a reload. The native list is filtered, not replaced by
+# ours: replacing it dropped every hook that something else had put there.
 hx_hook_del() {
-    local when="precmd" fn out= f
+    local when="precmd" fn
     case "$1" in precmd|preexec) when="$1"; shift ;; esac
     fn="$1"
     if [ "$when" = precmd ]; then
-        for f in $HX_PRECMD_FUNCS; do [ "$f" = "$fn" ] || out="$out $f"; done
-        HX_PRECMD_FUNCS="$out"
-        hx_cap hooks && HELLISH_PRECMD_FUNCS="$out"
+        HX_PRECMD_FUNCS=$(_hx_hook_strip "$HX_PRECMD_FUNCS" "$fn")
+        hx_cap hooks && HELLISH_PRECMD_FUNCS=$(_hx_hook_strip "${HELLISH_PRECMD_FUNCS:-}" "$fn")
     else
-        for f in $HX_PREEXEC_FUNCS; do [ "$f" = "$fn" ] || out="$out $f"; done
-        HX_PREEXEC_FUNCS="$out"
-        hx_cap hooks && HELLISH_PREEXEC_FUNCS="$out"
+        HX_PREEXEC_FUNCS=$(_hx_hook_strip "$HX_PREEXEC_FUNCS" "$fn")
+        hx_cap hooks && HELLISH_PREEXEC_FUNCS=$(_hx_hook_strip "${HELLISH_PREEXEC_FUNCS:-}" "$fn")
     fi
     return 0
 }
@@ -343,14 +363,35 @@ hx_cmd_doc()    { hx_item cmd    "$1" "$HX_CURRENT_MODULE" "$2" "${3:-}"; }
 
 # --- config file ------------------------------------------------------------
 # Format:  feature <name> <on|off>   |   set <VAR> <value>
+
+# hx_var_ok <name> — a shell variable name. What a `set` line and `conf set`
+# assign through eval, so nothing else gets that far.
+hx_var_ok() { case "$1" in ''|[0-9]*|*[!A-Za-z0-9_]*) return 1 ;; *) return 0 ;; esac; }
+
+# The variables conf save writes beyond its fixed six: every one a `set`
+# line or `conf set` has named. hx_conf_save used to write only the six, so
+# `conf set HX_GREET 1` -- the way ~/.hellishrc says to turn the greeting
+# on -- said ok and was gone in the next shell.
+HX_CONF_VARS=""
+_hx_conf_var_add() {
+    case " $HX_CONF_VARS " in *" $1 "*) ;; *) HX_CONF_VARS="$HX_CONF_VARS $1" ;; esac
+}
+
 hx_conf_load() {
     [ -r "$HX_CONF" ] || return 0
     local kind a b
     while read -r kind a b; do
         case "$kind" in
             ''|'#'*) continue ;;
-            feature) [ -n "$a" ] && hx_aset HX_FEAT_STATE "$a" "$b" ;;
-            set)     [ -n "$a" ] && hx_key_ok "$a" && eval "$a=\"\$b\"" ;;
+            # Both names reach an eval, so both are checked: an unchecked
+            # `feature x$(cmd) on` ran cmd at every start, and `set a.b v`
+            # ran a command named `a.b=v`.
+            feature)
+                if hx_key_ok "$a"; then hx_aset HX_FEAT_STATE "$a" "$b"
+                else hx_error_record "hellish.conf: bad feature name '$a'"; fi ;;
+            set)
+                if hx_var_ok "$a"; then eval "$a=\"\$b\""; _hx_conf_var_add "$a"
+                else hx_error_record "hellish.conf: bad variable name '$a'"; fi ;;
             *)       hx_error_record "hellish.conf: unknown directive '$kind'" ;;
         esac
     done < "$HX_CONF"
@@ -358,7 +399,7 @@ hx_conf_load() {
 }
 
 hx_conf_save() {
-    local tmp="$HX_CONF.tmp.$$" name
+    local tmp="$HX_CONF.tmp.$$" name v
     {
         printf '# ~/.hellish/hellish.conf\n'
         printf '# Written by `conf save`. Hand-editing is fine: one directive per line.\n'
@@ -375,6 +416,13 @@ hx_conf_save() {
         printf 'set %-16s %s\n' HX_PATH_STYLE "${HX_PATH_STYLE:-smart}"
         printf 'set %-16s %s\n' HX_PATH_MAX  "${HX_PATH_MAX:-4}"
         printf 'set %-16s %s\n' HX_HIST_SIZE "${HX_HIST_SIZE:-20000}"
+        for name in $HX_CONF_VARS; do
+            case "$name" in
+                HX_THEME|HX_COLOR|HX_NERD|HX_PATH_STYLE|HX_PATH_MAX|HX_HIST_SIZE) continue ;;
+            esac
+            eval "v=\"\${$name:-}\""
+            printf 'set %-16s %s\n' "$name" "$v"
+        done
     } > "$tmp" && command mv "$tmp" "$HX_CONF"
 }
 

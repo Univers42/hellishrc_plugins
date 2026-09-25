@@ -1,0 +1,150 @@
+# test/lib_conf.hsh — lib/conf.hsh: the `conf` command and `help_conf`.
+#
+# HX_CONF is a scratch copy (t_isolated), so every conf on/off/set/reset
+# below persists to it and never to the real hellish.conf.
+
+HX_COLOR=never
+hx_color_init
+
+hx_feature lcf_a on  dev "feature a for the conf tests"
+hx_feature lcf_b off dev "feature b for the conf tests"
+
+t_head "conf: dispatch"
+t_has "features" "$(conf)" "conf with no command lists the features"
+t_has "features" "$(conf ls)" "conf ls is conf list"
+t_has "conf on <name>" "$(conf help)" "conf help prints the commands"
+t_has "conf on <name>" "$(conf -h)" "and so does -h"
+t_rc 2 "conf rejects an unknown command" conf frobnicate
+t_has "unknown command 'frobnicate'" "$(conf frobnicate 2>&1)" "and names it"
+t_eq "$HX_CONF" "$(conf path)" "conf path prints the config file"
+
+t_head "conf: list"
+_lcf_out=$(conf list)
+t_has "lcf_a" "$_lcf_out" "conf list shows every feature"
+t_has "feature a for the conf tests" "$_lcf_out" "with its description"
+t_true "under its group" sh -c 'printf "%s\n" "$1" | grep -A99 "^  dev$" | grep -q lcf_a' _ "$_lcf_out"
+hx_feature lcf_odd on oddgroup "a feature in a group conf list does not name"
+t_has "lcf_odd" "$(conf list)" "a feature in any other group is still listed"
+
+t_head "conf: on, off, toggle"
+t_rc 2 "conf on with no name is a usage error" conf on
+t_rc 1 "conf on of an unknown feature fails" conf on lcf_nope
+t_has "no such feature: lcf_nope" "$(conf on lcf_nope 2>&1)" "and says which"
+conf off lcf_a >/dev/null
+t_false "conf off switches a feature off" hx_enabled lcf_a
+t_true "and saves it" grep -q '^feature lcf_a *off$' "$HX_CONF"
+conf on lcf_a lcf_b >/dev/null
+t_true "conf on takes several names" hx_enabled lcf_b
+t_true "and switches each on" hx_enabled lcf_a
+t_has "conf reload" "$(conf on lcf_a)" "conf on says to reload"
+t_rc 1 "one unknown name among known ones fails the command" conf off lcf_a lcf_nope
+t_false "but the known ones still switch" hx_enabled lcf_a
+conf enable lcf_a >/dev/null; conf disable lcf_b >/dev/null
+t_true  "conf enable is conf on"   hx_enabled lcf_a
+t_false "conf disable is conf off" hx_enabled lcf_b
+conf toggle lcf_a >/dev/null
+t_false "conf toggle switches an on feature off" hx_enabled lcf_a
+conf toggle lcf_a >/dev/null
+t_true  "and back on" hx_enabled lcf_a
+t_rc 2 "conf toggle with no name is a usage error" conf toggle
+t_rc 1 "conf toggle of an unknown feature fails" conf toggle lcf_nope
+
+t_head "conf: get, set"
+unset LCF_UNSET
+t_eq "<unset>" "$(conf get LCF_UNSET)" "conf get of an unset variable says so"
+LCF_V="a value"
+t_eq "a value" "$(conf get LCF_V)" "conf get prints a variable"
+t_rc 2 "conf get with no name is a usage error" conf get
+t_rc 2 "conf get rejects a name that is not a variable" conf get a.b
+t_eq "" "$(conf get 'x$(echo leaked)' 2>/dev/null)" "conf get never evaluates the name"
+conf set LCF_GREET 1 >/dev/null
+t_eq "1" "$LCF_GREET" "conf set assigns"
+t_true "and persists it to hellish.conf" grep -q '^set LCF_GREET *1$' "$HX_CONF"
+unset LCF_GREET
+hx_conf_load
+t_eq "1" "$LCF_GREET" "so the next load reads it back"
+conf set LCF_GREET "two words" >/dev/null
+t_eq "1" "$(grep -c '^set LCF_GREET ' "$HX_CONF")" "setting it again replaces the line"
+t_true "with the new value" grep -q '^set LCF_GREET *two words$' "$HX_CONF"
+t_rc 2 "conf set with no name is a usage error" conf set
+t_rc 2 "conf set rejects a name that is not a variable" conf set a.b v
+t_hasnt "ok" "$(conf set a.b v 2>&1)" "and does not claim it worked"
+t_rc 2 "conf set rejects a value that spans lines" conf set LCF_ML "$(printf 'a\nb')"
+t_false "which is never written" grep -q 'LCF_ML' "$HX_CONF"
+conf set HX_PATH_MAX 7 >/dev/null
+t_eq "1" "$(grep -c '^set HX_PATH_MAX ' "$HX_CONF")" "a fixed setting set by conf set is written once"
+t_true "with its value" grep -q '^set HX_PATH_MAX *7$' "$HX_CONF"
+
+t_head "conf: save, reset, edit"
+: > "$HX_CONF"
+t_has "saved" "$(conf save)" "conf save says where it saved"
+t_true "conf save writes the features" grep -q '^feature lcf_a ' "$HX_CONF"
+hx_set_state lcf_b on
+conf reset >/dev/null
+t_false "conf reset restores a feature's default" hx_enabled lcf_b
+t_true "and saves it" grep -q '^feature lcf_b *off$' "$HX_CONF"
+t_stub lcf-editor
+EDITOR="$T_DIR/stubs/lcf-editor" conf edit
+t_eq "lcf-editor|$HX_CONF" "$(t_calls)" "conf edit opens hellish.conf in \$EDITOR"
+
+t_head "conf: modules, doctor, caps"
+_lcf_saved_loaded=("${HX_LOADED[@]}")
+HX_LOADED=()
+t_has "(nothing recorded)" "$(conf modules)" "conf modules with nothing loaded says so"
+HX_LOADED=("$T_REAL_HOME/x/first.hsh" "/elsewhere/second.hsh")
+_lcf_out=$(HOME="$T_REAL_HOME" conf modules)
+t_has " 1  x/first.hsh" "$_lcf_out" "conf modules numbers the files, relative to HOME"
+t_has " 2  /elsewhere/second.hsh" "$_lcf_out" "and keeps a path outside HOME whole"
+HX_LOADED=("${_lcf_saved_loaded[@]}")
+
+HX_ERRORS=()
+_lcf_out=$(conf doctor)
+t_has "$(hx_cap_get version)" "$_lcf_out" "conf doctor reports the running hellish's version"
+t_has "$(hx_shell_bin)" "$_lcf_out" "and where it is"
+t_has "load errors" "$_lcf_out" "conf doctor has a load errors section"
+t_true "which says none when there are none" sh -c 'printf "%s\n" "$1" | grep -A1 "load errors" | grep -q none' _ "$_lcf_out"
+HX_ERRORS=("hellish.conf: something broke")
+t_has "hellish.conf: something broke" "$(conf doctor)" "conf doctor lists each load error"
+HX_ERRORS=()
+hx_aset HX_PLUG_MISSING lcf_a "somecmd"
+HX_PLUG_ORDER+=(lcf_a)
+t_has "somecmd" "$(conf doctor)" "conf doctor lists a plugin's missing dependencies"
+unset 'HX_PLUG_MISSING[lcf_a]'
+t_eq "$(conf doctor)" "$(help_conf -d)" "help_conf -d is conf doctor"
+t_rc 0 "conf doctor succeeds" conf doctor
+
+_lcf_out=$( hx_cap() { return 1; }; _conf_gaps )
+t_has "builtin_complete" "$_lcf_out" "a capability this hellish lacks is listed as a gap"
+t_has "hooks" "$_lcf_out" "every one of them"
+_lcf_out=$( hx_cap() { return 0; }; COLUMNS=80; _conf_gaps )
+t_hasnt "builtin_complete" "$_lcf_out" "a capability it has is not"
+t_hasnt "COLUMNS" "$_lcf_out" "and \$COLUMNS is not a gap on a hellish that sets it"
+t_has "COLUMNS" "$( hx_cap() { return 0; }; COLUMNS=; _conf_gaps )" "but is on one that does not"
+
+_lcf_out=$(conf caps)
+t_has "capabilities of $(hx_shell_bin)" "$_lcf_out" "conf caps names the binary"
+t_has "printf_q" "$_lcf_out" "and lists every probed capability"
+t_hasnt "    + version" "$_lcf_out" "except the version, which is not a yes or no"
+t_eq "$(conf caps)" "$(conf capabilities)" "conf capabilities is conf caps"
+t_has "re-probed" "$(conf caps -r)" "conf caps -r re-probes"
+
+t_head "help_conf"
+hx_func_doc lcf_fn "a documented function for the search test" "lcf_fn <arg>"
+_lcf_out=$(help_conf)
+t_has "hellish configuration" "$_lcf_out" "help_conf prints the whole reference"
+t_has "lcf_fn" "$_lcf_out" "including every registered function"
+t_has "lcf_fn <arg>" "$_lcf_out" "with its usage"
+for _lcf_s in features feature aliases alias functions func commands cmd vars var options opt plugins plugin; do
+    t_rc 0 "help_conf $_lcf_s is a section" help_conf "$_lcf_s"
+done
+t_has "lcf_fn" "$(help_conf functions)" "help_conf functions lists the functions"
+t_hasnt "lcf_fn" "$(help_conf aliases)" "and help_conf aliases does not"
+t_rc 2 "help_conf rejects an unknown section" help_conf nosuchsection
+t_has "unknown section 'nosuchsection'" "$(help_conf nosuchsection 2>&1)" "and names it"
+t_has "help_conf -s <term>" "$(help_conf -h)" "help_conf -h prints the usage"
+_lcf_out=$(help_conf -s "for the search test")
+t_has "lcf_fn" "$_lcf_out" "help_conf -s searches descriptions"
+t_has "(core)" "$_lcf_out" "and names the owner"
+t_has "lcf_fn" "$(help_conf --search 'lcf_fn <arg>')" "help_conf --search searches usage lines"
+t_has "no match" "$(help_conf -s zzz_nothing_matches_zzz)" "a search with no hit says so"
+t_rc 2 "help_conf -s with no term is a usage error" help_conf -s

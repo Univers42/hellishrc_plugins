@@ -1,0 +1,241 @@
+# test/lib_core.hsh — lib/core.hsh: the registry, capabilities, hooks, the
+# config file and the module loader.
+#
+# Runs through t_isolated, so HX_CONF and HX_STATE are scratch files: every
+# conf save and capability cache below writes there, never to the real one.
+
+t_head "core: hx_aset, hx_key_ok, hx_var_ok"
+declare -A _lc_M
+hx_aset _lc_M k 'a "quoted" $HOME `x` value'
+t_eq 'a "quoted" $HOME `x` value' "${_lc_M[k]}" "hx_aset stores the value as it is, never re-parsed"
+hx_aset _lc_M k2 ""
+t_eq "set" "${_lc_M[k2]+set}" "hx_aset stores an empty value as set"
+t_true  "hx_key_ok accepts letters, digits and _ : . -" hx_key_ok "func:a_b-c.1"
+t_false "hx_key_ok rejects \$"      hx_key_ok 'a$b'
+t_false "hx_key_ok rejects ]"       hx_key_ok 'a]b'
+t_false "hx_key_ok rejects ("       hx_key_ok 'a(b'
+t_true  "hx_var_ok accepts a shell name"          hx_var_ok HX_GREET
+t_true  "hx_var_ok accepts a leading underscore"  hx_var_ok _x1
+t_false "hx_var_ok rejects a leading digit"       hx_var_ok 1x
+t_false "hx_var_ok rejects a dot"                 hx_var_ok a.b
+t_false "hx_var_ok rejects a dash"                hx_var_ok a-b
+t_false "hx_var_ok rejects an empty name"         hx_var_ok ""
+t_false "hx_var_ok rejects a substitution"        hx_var_ok 'x$(id)'
+
+t_head "core: diagnostics"
+HX_ERRORS=()
+hx_error_record "first"
+hx_error_record "second one"
+t_eq "2" "${#HX_ERRORS[@]}" "hx_error_record appends"
+t_eq "second one" "${HX_ERRORS[1]}" "and keeps each message whole"
+t_eq "" "$(HX_DEBUG=0 hx_debug hidden 2>&1)" "hx_debug is silent unless HX_DEBUG=1"
+t_has "shown" "$(HX_DEBUG=1 hx_debug shown 2>&1)" "hx_debug prints when HX_DEBUG=1"
+t_eq "" "$(HX_DEBUG=1 hx_debug shown 2>/dev/null)" "and prints to stderr only"
+case "$(hx_now_ms)" in
+    ''|*[!0-9]*) t_bad "hx_now_ms prints a number — got [$(hx_now_ms)]" ;;
+    *) t_ok "hx_now_ms prints a number" ;;
+esac
+HX_ERRORS=()
+
+t_head "core: hx_ver_ge"
+t_true  "2.10 >= 2.9 (numeric, not lexical)" hx_ver_ge 2.10 2.9
+t_false "2.9 >= 2.10 is false"               hx_ver_ge 2.9 2.10
+t_true  "equal versions compare >="          hx_ver_ge 3.1.3 3.1.3
+t_true  "2.10 >= 2.10.0 (a missing part is 0)" hx_ver_ge 2.10 2.10.0
+t_false "2.10 >= 2.10.1 is false"            hx_ver_ge 2.10 2.10.1
+t_true  "3 >= 2.99"                          hx_ver_ge 3 2.99
+t_true  "a non-numeric part counts as 0"     hx_ver_ge 2.x 2.0
+t_false "so it is below any number but 0"    hx_ver_ge 2.10-rc1 2.10
+t_true  "an empty version is >= an empty one" hx_ver_ge "" ""
+
+t_head "core: hx_shell_bin"
+_lc_bin="$T_DIR/bin/hellish-under-test"
+mkdir -p "$T_DIR/bin"
+printf '#!/bin/sh\n' > "$_lc_bin"; chmod +x "$_lc_bin"
+t_eq "$_lc_bin" "$(HELLISH_BIN="$_lc_bin" hx_shell_bin)" "HELLISH_BIN wins when it is executable"
+chmod -x "$_lc_bin"
+t_eq "$(command -v hellish)" "$(HELLISH_BIN="$_lc_bin" hx_shell_bin)" "a HELLISH_BIN that is not executable is ignored"
+t_eq "$(command -v hellish)" "$(HELLISH_BIN= hx_shell_bin)" "otherwise the hellish on PATH"
+
+t_head "core: capabilities"
+_lc_key="$(stat -c '%Y:%s' "$(hx_shell_bin)" 2>/dev/null || echo unknown)"
+# A cache with this binary's key is read, not re-probed: the fake verdicts
+# below are ones no probe would give.
+printf '#key %s\nversion=9.9.9\nprintf_q=0\nfake_cap=1\n' "$_lc_key" > "$HX_STATE/capabilities"
+hx_caps_load
+t_eq "9.9.9" "$(hx_cap_get version)" "a cache keyed on this binary is used as it is"
+t_true  "hx_cap is true for a 1"  hx_cap fake_cap
+t_false "hx_cap is false for a 0" hx_cap printf_q
+t_false "hx_cap is false for a capability never probed" hx_cap no_such_cap_xyz
+t_has "fake_cap=1" "$(hx_cap_all)" "hx_cap_all lists every verdict"
+t_eq "$(hx_cap_all | sort)" "$(hx_cap_all)" "hx_cap_all is sorted"
+# The same file under another binary's key is stale, and is probed again.
+printf '#key %s\nversion=9.9.9\nprintf_q=0\n' "0:0" > "$HX_STATE/capabilities"
+hx_caps_load
+t_eq "#key $_lc_key" "$(head -1 "$HX_STATE/capabilities")" "a cache for another binary is re-probed and re-keyed"
+t_true "and the probe's verdict replaces the cached one" hx_cap printf_q
+case "$(hx_cap_get version)" in
+    [0-9]*.[0-9]*) t_ok "the probe reads the running hellish's version" ;;
+    *) t_bad "the probe found no version — got [$(hx_cap_get version)]" ;;
+esac
+t_eq "" "$(ls -A "$HX_STATE" | grep -v '^capabilities$')" "the probe leaves no temporary file behind"
+t_has "re-probed" "$(hx_caps_refresh)" "hx_caps_refresh re-probes and says so"
+
+t_head "core: hooks"
+_lc_s1="$HX_PRECMD_FUNCS" _lc_s2="$HX_PREEXEC_FUNCS"
+_lc_s3="${HELLISH_PRECMD_FUNCS:-}" _lc_s4="${HELLISH_PREEXEC_FUNCS:-}"
+HX_PRECMD_FUNCS=""; HX_PREEXEC_FUNCS=""
+HELLISH_PRECMD_FUNCS=" _lc_theirs"; HELLISH_PREEXEC_FUNCS=""
+_lc_hook_a() { :; }
+_lc_hook_b() { :; }
+t_rc 1 "hx_hook_add with no function fails" hx_hook_add precmd ""
+hx_hook_add _lc_hook_a
+hx_hook_add precmd _lc_hook_a
+hx_hook_add precmd _lc_hook_b
+t_eq " _lc_hook_a _lc_hook_b" "$HX_PRECMD_FUNCS" "hx_hook_add defaults to precmd, in order, once each"
+hx_hook_add preexec _lc_hook_a
+t_eq " _lc_hook_a" "$HX_PREEXEC_FUNCS" "hx_hook_add preexec keeps its own list"
+if hx_cap hooks; then
+    t_eq " _lc_theirs _lc_hook_a _lc_hook_b" "$HELLISH_PRECMD_FUNCS" "on a hellish with native hooks, they reach HELLISH_PRECMD_FUNCS"
+    hx_hook_del precmd _lc_hook_a
+    t_eq " _lc_theirs _lc_hook_b" "$(printf '%s' "$HELLISH_PRECMD_FUNCS")" \
+        "hx_hook_del removes its hook and keeps one something else put there"
+else
+    t_skip "native hook lists — this hellish has none"
+    hx_hook_del precmd _lc_hook_a
+fi
+t_eq " _lc_hook_b" "$HX_PRECMD_FUNCS" "hx_hook_del removes the name from the list"
+hx_hook_del preexec _lc_hook_a
+t_eq "" "$HX_PREEXEC_FUNCS" "hx_hook_del preexec empties that list"
+t_has "_lc_hook_b" "$(hx_hooks_list)" "hx_hooks_list shows the registered hooks"
+t_eq " a c" "$(_hx_hook_strip " a b c" "b")" "_hx_hook_strip takes out a name"
+t_eq " ab c" "$(_hx_hook_strip " ab b c" "b")" "and only the exact name"
+HX_PRECMD_FUNCS="$_lc_s1" HX_PREEXEC_FUNCS="$_lc_s2"
+HELLISH_PRECMD_FUNCS="$_lc_s3" HELLISH_PREEXEC_FUNCS="$_lc_s4"
+
+# conf reload re-sources core.hsh. Every hook used to be appended to the
+# native list once per reload, so each prompt ran it once more each time.
+if hx_cap hooks; then
+    printf '. "%s"\n' "${HX_RC:-$T_REAL_HOME/.hellishrc}" > "$HOME/.hellishrc"
+    _lc_out=$( conf reload >/dev/null 2>&1; conf reload >/dev/null 2>&1
+               printf '%s\n' $HELLISH_PRECMD_FUNCS | grep -c '^hx_prompt_precmd$' )
+    t_eq "1" "$_lc_out" "two conf reloads leave each native hook listed once"
+    _lc_out=$( HELLISH_PRECMD_FUNCS="$HELLISH_PRECMD_FUNCS mine_xyz"
+               conf reload >/dev/null 2>&1
+               printf '%s\n' $HELLISH_PRECMD_FUNCS | grep -c '^mine_xyz$' )
+    t_eq "1" "$_lc_out" "a reload keeps a native hook the configuration did not add"
+else
+    t_skip "conf reload and the native hook lists — this hellish has none"
+fi
+
+t_head "core: features and items"
+HX_ERRORS=()
+hx_feature lc_feat on dev "a test feature"
+t_true "hx_feature makes the name known" hx_known lc_feat
+t_true "and applies its default"         hx_enabled lc_feat
+t_eq "dev" "${HX_FEAT_GROUP[lc_feat]}" "hx_feature records the group"
+t_eq "a test feature" "${HX_FEAT_DESC[lc_feat]}" "hx_feature records the description"
+hx_set_state lc_feat2 off
+hx_feature lc_feat2 on dev "saved state wins"
+t_false "a state already read from hellish.conf wins over the default" hx_enabled lc_feat2
+t_eq "on" "${HX_FEAT_DEFAULT[lc_feat2]}" "while the default is still recorded"
+t_rc 1 "hx_feature rejects a bad name" hx_feature 'bad name' on dev x
+hx_feature 'bad name' on dev x
+t_has "bad feature name" "${HX_ERRORS[*]}" "and records why"
+t_false "an unknown feature is not known" hx_known lc_nope
+t_false "an unknown feature is not enabled" hx_enabled lc_nope
+t_true  "hx_guard is hx_enabled" hx_guard lc_feat
+hx_set_state lc_feat off
+t_false "hx_set_state switches a feature off" hx_guard lc_feat
+hx_feature lc_feat on dev "a test feature"
+t_eq "1" "$(hx_feat_names_sorted | grep -c '^lc_feat$')" "a feature registered twice is listed once"
+
+HX_CURRENT_MODULE=lcmod
+hx_func_doc  lc_f "does f" "lc_f <x>"
+hx_alias_doc lc_a "an alias"
+hx_var_doc   LC_V "a variable"
+hx_opt_doc   lc_o "an option"
+hx_cmd_doc   lc_c "a command"
+t_eq "func"     "${HX_ITEM_KIND[func:lc_f]}"   "hx_func_doc registers a func"
+t_eq "does f"   "${HX_ITEM_DESC[func:lc_f]}"   "with its description"
+t_eq "lc_f <x>" "${HX_ITEM_USAGE[func:lc_f]}"  "and its usage"
+t_eq "lcmod"    "${HX_ITEM_OWNER[func:lc_f]}"  "owned by the module being loaded"
+t_eq "alias"    "${HX_ITEM_KIND[alias:lc_a]}"  "hx_alias_doc registers an alias"
+t_eq "var"      "${HX_ITEM_KIND[var:LC_V]}"    "hx_var_doc registers a var"
+t_eq "opt"      "${HX_ITEM_KIND[opt:lc_o]}"    "hx_opt_doc registers an opt"
+t_eq "cmd"      "${HX_ITEM_KIND[cmd:lc_c]}"    "hx_cmd_doc registers a cmd"
+t_rc 1 "hx_item rejects a key with a space" hx_item func "a b" lcmod "x"
+hx_func_doc lc_f "does f"
+t_eq "1" "$(hx_item_keys_sorted | grep -c '^func:lc_f$')" "an item registered twice is listed once"
+t_eq "$(hx_item_keys_sorted | sort -u)" "$(hx_item_keys_sorted)" "hx_item_keys_sorted is sorted and unique"
+HX_CURRENT_MODULE=core
+
+t_head "core: hellish.conf"
+cat > "$HX_CONF" <<'EOF'
+# a comment
+feature lc_c1 on
+
+feature lc_c2 off
+set LC_SETTING hello world
+bogus line here
+feature x$(>pwned-by-feature) on
+set y$(>pwned-by-set) 1
+set a.b 1
+EOF
+HX_ERRORS=()
+hx_conf_load
+t_eq "on"  "${HX_FEAT_STATE[lc_c1]}" "a feature line sets the state"
+t_eq "off" "${HX_FEAT_STATE[lc_c2]}" "for off as well"
+t_eq "hello world" "$LC_SETTING" "a set line assigns the rest of the line"
+t_has "unknown directive 'bogus'" "${HX_ERRORS[*]}" "an unknown directive is recorded"
+t_false "a feature name is never evaluated" test -e pwned-by-feature
+t_false "a variable name is never evaluated" test -e pwned-by-set
+t_has "bad feature name" "${HX_ERRORS[*]}" "a bad feature name is recorded"
+t_has "bad variable name 'a.b'" "${HX_ERRORS[*]}" "a name that is not a variable is recorded"
+t_eq "4" "${#HX_ERRORS[@]}" "and nothing else is"
+HX_ERRORS=()
+( HX_CONF="$T_DIR/none"; hx_conf_load; printf '%s %s' "$?" "${#HX_ERRORS[@]}" > "$T_DIR/lc_n" )
+t_eq "0 0" "$(cat "$T_DIR/lc_n")" "a missing hellish.conf is not an error, and records nothing"
+
+# conf save writes the features that are registered: lc_c1 is, from here.
+hx_feature lc_c1 off dev "registered after the conf was read"
+t_eq "on" "${HX_FEAT_STATE[lc_c1]}" "the state read from hellish.conf wins over the default"
+HX_THEME=lctheme
+LC_SETTING="hello world"
+hx_conf_save
+t_true "hx_conf_save writes the file" test -r "$HX_CONF"
+t_true "with a line per registered feature" grep -q '^feature lc_c1 *on$' "$HX_CONF"
+t_false "and none for a name that nothing registered" grep -q '^feature lc_c2 ' "$HX_CONF"
+t_true "the fixed settings"              grep -q '^set HX_THEME *lctheme$' "$HX_CONF"
+t_true "and every variable a set line named" grep -q '^set LC_SETTING *hello world$' "$HX_CONF"
+t_eq "" "$(ls "$T_DIR" | grep 'hellish.conf.tmp')" "hx_conf_save leaves no temporary file"
+unset LC_SETTING
+hx_set_state lc_c1 off
+hx_conf_load
+t_eq "hello world" "$LC_SETTING" "what hx_conf_save wrote, hx_conf_load reads back"
+t_eq "on" "${HX_FEAT_STATE[lc_c1]}" "feature states included"
+t_eq "1" "$(grep -c '^set HX_THEME ' "$HX_CONF")" "a fixed setting named by a set line is written once"
+
+t_head "core: loading"
+mkdir -p "$T_DIR/mods"
+printf 'LC_ORDER="${LC_ORDER}a"; LC_MOD_A="$HX_CURRENT_MODULE"\n' > "$T_DIR/mods/20-alpha.hsh"
+printf 'LC_ORDER="${LC_ORDER}b"\n' > "$T_DIR/mods/10-beta.hsh"
+printf 'LC_ORDER="${LC_ORDER}z"; LC_MOD_Z="$HX_CURRENT_MODULE"\n' > "$T_DIR/mods/30-zed.zsh"
+printf 'LC_ORDER="${LC_ORDER}X"\n' > "$T_DIR/mods/40-skip.txt"
+HX_LOADED=()
+LC_ORDER=""
+hx_load_dir "$T_DIR/mods"
+t_eq "baz" "$LC_ORDER" "hx_load_dir sources .hsh and .zsh files in lexical order, and nothing else"
+t_eq "alpha" "$LC_MOD_A" "each module loads as its own name, number and extension dropped"
+t_eq "zed" "$LC_MOD_Z" "a .zsh module too"
+t_eq "core" "$HX_CURRENT_MODULE" "and the current module is core again afterwards"
+t_eq "3" "${#HX_LOADED[@]}" "every file sourced is recorded"
+t_rc 0 "hx_load_dir of a missing directory is not an error" hx_load_dir "$T_DIR/nope"
+HX_ERRORS=()
+t_rc 1 "hx_source of a missing file fails" hx_source "$T_DIR/nope.hsh"
+hx_source "$T_DIR/nope.hsh"
+t_has "missing: $T_DIR/nope.hsh" "${HX_ERRORS[*]}" "and records the path"
+t_has "ms" "$(HX_PROFILE=1 hx_source "$T_DIR/mods/10-beta.hsh" 2>&1 >/dev/null)" "HX_PROFILE=1 times each file on stderr"
+t_eq "functions" "$(hx_module_name /x/rc.d/40-functions.hsh)" "hx_module_name drops the directory, number and extension"
+t_eq "prompt" "$(hx_module_name 50-prompt.zsh)" "hx_module_name handles .zsh"
+HX_ERRORS=()

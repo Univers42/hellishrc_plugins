@@ -103,16 +103,23 @@ _conf_toggle() {
     done
 }
 
+# Both take a variable NAME, which reaches an eval: hx_var_ok, not hx_key_ok,
+# since a registry key may hold '.' ':' '-' and `conf set a.b v` then ran a
+# command named `a.b=v` and still said ok.
 _conf_get() {
     [ -n "$1" ] || { hx_err "usage: conf get <VAR>"; return 2; }
-    hx_key_ok "$1" || { hx_err "bad variable name"; return 2; }
+    hx_var_ok "$1" || { hx_err "bad variable name: $1"; return 2; }
     eval "printf '%s\n' \"\${$1:-<unset>}\""
 }
 
 _conf_set() {
     [ -n "$1" ] || { hx_err "usage: conf set <VAR> <value>"; return 2; }
-    hx_key_ok "$1" || { hx_err "bad variable name"; return 2; }
+    hx_var_ok "$1" || { hx_err "bad variable name: $1"; return 2; }
+    # hellish.conf holds one directive per line.
+    case "$2" in *'
+'*) hx_err "a value cannot span lines"; return 2 ;; esac
     eval "$1=\"\$2\""
+    _hx_conf_var_add "$1"
     hx_conf_save
     hx_ok "$1 = $2"
 }
@@ -212,7 +219,9 @@ _conf_gaps() {
         "command substitution is never expanded in PS1 -- segments use \${VAR}"
     printf '    %s%-16s%s %s\n' "$HX_YEL" "PS2" "$HX_R" \
         "the continuation prompt is fixed at '> '; setting PS2 does nothing"
-    printf '    %s%-16s%s %s\n' "$HX_YEL" "COLUMNS" "$HX_R" \
+    # hellish keeps $COLUMNS up to date (see hx_cols); only a binary that
+    # does not has this gap, and saying so on every other one was wrong.
+    [ -n "${COLUMNS:-}" ] || printf '    %s%-16s%s %s\n' "$HX_YEL" "COLUMNS" "$HX_R" \
         "never set, so terminal width costs a \`tput cols\` fork (hx_cols caches it)"
     return 0
 }
