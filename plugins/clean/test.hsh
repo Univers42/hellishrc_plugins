@@ -1,0 +1,155 @@
+# plugins/clean/test.hsh — clean, hx-clean and the disk helpers.
+#
+# HOME is the scratch directory t_isolated made, so every cache below is one
+# this file planted. One rule is absolute here: every `clean -y` names its
+# groups, and never `tmp` -- that group sweeps the real /tmp, whatever HOME
+# says. fc-cache and docker are stubs.
+
+t_head "clean"
+
+# _ct_file <path> <kibibytes> — a file of that size, directories made
+_ct_file() {
+    mkdir -p "$(dirname "$1")"
+    head -c "$(($2 * 1024))" /dev/zero > "$1"
+}
+
+t_stub fc-cache
+t_stub docker 'case "$1" in
+    info) exit "${CT_DOCKER_RC:-0}" ;;
+    system) [ "$2" = df ] && echo "TYPE TOTAL ACTIVE SIZE RECLAIMABLE" ;;
+esac
+exit 0'
+export CT_DOCKER_RC=0
+
+# ── the plugin's entry point ────────────────────────────────────────────────
+t_true "clean's worker script ships with the plugin" test -r "$HX_CLEAN_BIN"
+( HX_CLEAN_BIN="$T_DIR/nope"; t_rc 1 "clean fails when its worker is missing" clean
+  printf '%s %s %s\n' "$HX_T_PASS" "$HX_T_FAIL" "$HX_T_SKIP" > "$T_DIR/c1" )
+read -r HX_T_PASS HX_T_FAIL HX_T_SKIP < "$T_DIR/c1"
+
+# ── options ─────────────────────────────────────────────────────────────────
+t_has "Dry-run by default" "$(clean -h 2>&1)" "clean -h prints the usage"
+t_rc 0 "clean -h succeeds" clean -h
+t_rc 2 "clean rejects an unknown option" clean --bogus
+t_has "unknown option '--bogus'" "$(clean --bogus 2>&1)" "and names it"
+t_rc 1 "hx-clean refuses to run with HOME=/" env HOME=/ bash "$HX_CLEAN_BIN" cache
+t_has "refusing to run" "$(HOME=/ bash "$HX_CLEAN_BIN" cache 2>&1)" "and says why"
+
+# ── what it finds ───────────────────────────────────────────────────────────
+_ct_file "$HOME/.cache/big-app/blob" 1200
+_ct_file "$HOME/.cache/tiny-app/x" 8
+_ct_file "$HOME/.cache/thumbnails/normal/t.png" 1100
+_ct_file "$HOME/.local/share/Trash/files/old.iso" 1100
+_ct_file "$HOME/.local/share/Trash/info/old.iso.trashinfo" 4
+_ct_file "$HOME/.npm/_cacache/index" 1100
+_ct_file "$HOME/core.4242" 1100
+_ct_file "$HOME/.config/dconf/user" 16
+_ct_file "$HOME/.config/dconf/user.AB12CD" 1100
+_ct_file "$HOME/.local/state/app/huge.log" 1100
+_ct_file "$HOME/.local/state/nvim/swap/f.swp" 1100
+_ct_file "$HOME/.ssh/id_test" 4
+_ct_file "$HOME/Documents/thesis.txt" 4
+
+_ct_out=$(clean trash cache thumbs pkg logs cores dconf nvim)
+t_has "dry run" "$_ct_out" "a run without -y announces a dry run"
+t_has "re-run with" "$_ct_out" "and says how to apply it"
+for _ct_want in "~/.cache/big-app" "~/.cache/thumbnails" "~/.local/share/Trash/files" \
+    "~/.npm/_cacache" "~/core.4242" "~/.config/dconf/user.AB12CD" \
+    "~/.local/state/app/huge.log" "~/.local/state/nvim/swap"; do
+    t_has "$_ct_want" "$_ct_out" "the dry run lists $_ct_want"
+done
+t_has "smaller items" "$_ct_out" "entries under 1M are collapsed into one line"
+t_hasnt ".ssh" "$_ct_out" "~/.ssh is never a candidate"
+t_hasnt "Documents" "$_ct_out" "~/Documents is never a candidate"
+t_hasnt "dconf/user " "$_ct_out " "the live dconf database is never a candidate"
+t_true "the dry run deletes nothing" test -f "$HOME/.cache/big-app/blob"
+t_has "<- your \$HOME lives here" "$_ct_out" "the total is reported for HOME's filesystem"
+
+_ct_out=$(clean pkg)
+t_has "~/.npm/_cacache" "$_ct_out" "a group name limits the run to that group"
+t_hasnt "big-app" "$_ct_out" "and leaves the other groups out"
+
+t_has "largest directories" "$(clean -t pkg)" "clean -t lists the largest directories"
+
+# ── -y ──────────────────────────────────────────────────────────────────────
+_ct_out=$(clean -y cache)
+t_has "APPLY" "$_ct_out" "-y announces that it deletes"
+t_false "clean -y cache empties ~/.cache's children" test -e "$HOME/.cache/big-app"
+t_true  "clean -y cache keeps ~/.cache itself" test -d "$HOME/.cache"
+t_true  "clean -y cache leaves thumbnails to their own group" test -e "$HOME/.cache/thumbnails"
+t_true  "clean -y cache leaves other groups alone" test -e "$HOME/.npm/_cacache"
+t_has "removed" "$_ct_out" "clean -y reports what it removed"
+
+clean -y trash thumbs pkg logs cores dconf nvim >/dev/null 2>&1
+for _ct_gone in .cache/thumbnails .local/share/Trash/files .npm/_cacache core.4242 \
+    .config/dconf/user.AB12CD .local/state/app/huge.log .local/state/nvim/swap; do
+    t_false "clean -y removes ~/$_ct_gone" test -e "$HOME/$_ct_gone"
+done
+t_true "clean -y never touches ~/.ssh"            test -f "$HOME/.ssh/id_test"
+t_true "clean -y never touches ~/Documents"       test -f "$HOME/Documents/thesis.txt"
+t_true "clean -y never touches the dconf database" test -f "$HOME/.config/dconf/user"
+t_has "nothing to reclaim" "$(clean trash cache)" "a clean home has nothing to reclaim"
+
+# Only the paths hx-clean names are candidates: a directory that merely has
+# a cache-like name somewhere else in HOME (a project's .cache) is not one.
+_ct_file "$HOME/project/.cache/keep" 1100
+clean -y cache >/dev/null 2>&1
+t_true "clean -y leaves a .cache that is not ~/.cache" test -f "$HOME/project/.cache/keep"
+
+# ── opt-in groups ───────────────────────────────────────────────────────────
+_ct_file "$HOME/.m2/repository/big.jar" 1100
+t_hasnt ".m2" "$(clean pkg)" "the heavy caches are left out by default"
+t_has "~/.m2/repository" "$(clean --heavy heavy)" "--heavy includes them"
+
+_ct_file "$HOME/.local/share/fonts/X/FooNerdFontMono-Regular.ttf" 4
+_ct_file "$HOME/.local/share/fonts/X/FooNerdFontMono-Bold.ttf" 4
+_ct_file "$HOME/.local/share/fonts/X/FooNerdFont-Light.ttf" 4
+_ct_file "$HOME/.local/share/fonts/X/FooNerdFontPropo-Thin.ttf" 4
+_ct_file "$HOME/.local/share/fonts/X/Other-Light.ttf" 4
+t_hasnt "unused weights" "$(clean pkg)" "fonts are left out by default"
+t_has "2 unused weights" "$(clean --fonts pkg)" "--fonts counts the Nerd Font weights a terminal never uses"
+t_calls_reset
+clean -y --fonts pkg >/dev/null 2>&1
+t_false "--fonts -y removes an unused weight" test -e "$HOME/.local/share/fonts/X/FooNerdFont-Light.ttf"
+t_false "--fonts -y removes every unused weight" test -e "$HOME/.local/share/fonts/X/FooNerdFontPropo-Thin.ttf"
+t_true  "--fonts -y keeps Mono Regular" test -e "$HOME/.local/share/fonts/X/FooNerdFontMono-Regular.ttf"
+t_true  "--fonts -y keeps Mono Bold"    test -e "$HOME/.local/share/fonts/X/FooNerdFontMono-Bold.ttf"
+t_true  "--fonts -y keeps a font that is not a Nerd Font" test -e "$HOME/.local/share/fonts/X/Other-Light.ttf"
+t_has "fc-cache|-f" "$(t_calls)" "--fonts -y rebuilds the font cache"
+
+t_calls_reset
+t_has "TYPE TOTAL" "$(clean --docker pkg)" "--docker shows docker's own usage"
+t_hasnt "prune" "$(t_calls)" "--docker without -y prunes nothing"
+clean -y --docker pkg >/dev/null 2>&1
+t_has "docker|system|prune|-af|--volumes" "$(t_calls)" "--docker -y prunes"
+CT_DOCKER_RC=1
+t_has "docker not running" "$(clean --docker pkg)" "--docker with no daemon says so and skips it"
+CT_DOCKER_RC=0
+
+# ── diskfree / bigdirs / bigfiles ───────────────────────────────────────────
+t_stub df 'cat <<"EOF"
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       100G   42G   58G  42% /
+none               0     0     0    - /proc/x
+EOF'
+_ct_out=$(diskfree)
+t_has "58G free of 100G" "$_ct_out" "diskfree shows each mount's free space"
+t_hasnt "/proc/x" "$_ct_out" "diskfree skips a zero-sized filesystem"
+t_has "clean" "$_ct_out" "diskfree points at clean"
+t_calls_reset; diskfree >/dev/null
+t_eq "df|-h|-x|tmpfs|-x|devtmpfs|-x|overlay|-x|squashfs" "$(t_calls)" \
+    "diskfree runs df exactly, whatever the user aliased it to"
+command rm -f "$T_DIR/stubs/df"; hash -r 2>/dev/null
+
+_ct_file "$T_DIR/tree/a/big" 300
+_ct_file "$T_DIR/tree/b/mid" 200
+_ct_file "$T_DIR/tree/c/small" 20
+_ct_file "$T_DIR/tree/.git/objects/pack" 900
+_ct_out=$(bigdirs "$T_DIR/tree" 3 | grep -v largest)
+t_eq "3" "$(printf '%s\n' "$_ct_out" | grep -c "$T_DIR/tree")" "bigdirs shows the requested number of rows"
+t_has "$T_DIR/tree" "$(printf '%s\n' "$_ct_out" | grep -m1 "$T_DIR")" "bigdirs puts the largest first"
+_ct_out=$(bigfiles "$T_DIR/tree" 2 | grep -v largest)
+t_has "$T_DIR/tree/a/big" "$(printf '%s\n' "$_ct_out" | grep -m1 "$T_DIR")" "bigfiles puts the largest file first"
+t_eq "2" "$(printf '%s\n' "$_ct_out" | grep -c "$T_DIR/tree")" "bigfiles shows the requested number of rows"
+t_hasnt ".git" "$_ct_out" "bigfiles leaves out a .git directory's contents"
+t_has "~/" "$(HOME="$T_DIR/tree"; bigfiles "$T_DIR/tree" 1)" "bigfiles writes paths under HOME with ~"

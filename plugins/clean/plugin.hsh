@@ -35,7 +35,9 @@ hx_func_doc clean "report and reclaim regenerable space in \$HOME (dry run unles
 diskfree() {
     local mount pct size avail
     hx_head "disk"
-    df -h -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null \
+    # `command`: the rc aliases df and du, and what is parsed here must not
+    # depend on what a user's alias adds (plugins/sentinel says more).
+    command df -h -x tmpfs -x devtmpfs -x overlay -x squashfs 2>/dev/null \
         | awk 'NR>1 && $2 != "0" { print $6, $5, $2, $4 }' \
         | while read -r mount pct size avail; do
             printf '  %-26s %s  %6s free of %s\n' "$mount" "$(hx_bar "$pct" 18)" "$avail" "$size"
@@ -51,7 +53,7 @@ hx_func_doc diskfree "disk usage per mount, with bars"
 bigdirs() {
     local base="${1:-$PWD}" n="${2:-20}"
     hx_head "largest directories under ${base/#$HOME/\~}"
-    du -xh --max-depth=3 "$base" 2>/dev/null | sort -rh | head -"$n" | sed 's/^/  /'
+    command du -xh --max-depth=3 "$base" 2>/dev/null | sort -rh | head -"$n" | sed 's/^/  /'
     printf '\n'
 }
 hx_func_doc bigdirs "largest directories below here, one filesystem only" "bigdirs [dir] [count]"
