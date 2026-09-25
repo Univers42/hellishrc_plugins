@@ -11,12 +11,15 @@ hx_guard aliases || return 0
 alias ls='ls --color=auto --group-directories-first'
 alias ll='ls -lh --color=auto --group-directories-first'
 alias la='ls -lha --color=auto --group-directories-first'
-alias lt='ls -lhtr --color=auto'
+# lt says `command ls`: a plain `ls` is expanded again through the ls alias,
+# and its --group-directories-first put every directory first whatever its
+# age. The help also said "oldest-modified last"; -tr puts the newest last.
+alias lt='command ls -lhtr --color=auto'
 alias l1='ls -1 --color=auto'
 hx_alias_doc ls "colourised ls, directories first"
 hx_alias_doc ll "long listing, human sizes"
 hx_alias_doc la "long listing including dot-files"
-hx_alias_doc lt "long listing, oldest-modified last"
+hx_alias_doc lt "long listing by time, newest last"
 hx_alias_doc l1 "one entry per line"
 
 # ── navigation ──────────────────────────────────────────────────────────────

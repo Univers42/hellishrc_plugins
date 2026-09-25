@@ -1,0 +1,210 @@
+# test/rc_aliases.hsh — rc.d/30-aliases.hsh: every alias the module defines
+# is defined as written and documented, runs the command it says, and the
+# safety nets (rm/mv/cp/ln -i) really ask before they destroy anything.
+#
+# An alias is run through eval, which expands it. What it runs is a recorder
+# stub in $T_DIR/rec, put alone on PATH inside a subshell, so no real ls,
+# git, df or ps is reached. The exceptions work only inside $T_DIR: the grep
+# family runs real grep on files planted there, lt runs real ls to check its
+# order, the navigation aliases cd inside a subshell, and the safety nets
+# run the real rm/mv/cp/ln on scratch files, always fed their answer.
+#
+# SAFETY: rm, mv and cp are only ever named here through a variable. Written
+# out in command position they would be caught by the leak guard in
+# test/run.hsh, and here they would also be run through the -i aliases.
+
+if ! hx_enabled aliases; then t_skip "rc.d/30-aliases.hsh — the aliases module is off"; return 0; fi
+
+# bash expands aliases in eval only with this; hellish always does, and says
+# "not supported"
+shopt -s expand_aliases 2>/dev/null
+
+_ra_mod="$HX_HOME/rc.d/30-aliases.hsh"
+_ra_rm=rm
+_ra_mv=mv
+_ra_cp=cp
+
+# _ra_def <name> — the alias as the shell prints it, without bash's "alias "
+_ra_def() { alias -- "$1" 2>/dev/null | sed 's/^alias //'; }
+
+# ── defined and documented ──────────────────────────────────────────────────
+t_head "aliases: defined as written, and documented"
+
+# Each `alias NAME='VALUE'` line of the module, as NAME='VALUE'
+_ra_lines=$(sed -n 's/^alias \(-- \)\{0,1\}//p' "$_ra_mod")
+_ra_names=$(printf '%s\n' "$_ra_lines" | sed 's/=.*//')
+t_true "the module defines aliases (parsed $(printf '%s\n' "$_ra_names" | wc -l | tr -d ' '))" \
+    test "$(printf '%s\n' "$_ra_names" | wc -l)" -ge 40
+while IFS= read -r _ra_l; do
+    t_eq "$_ra_l" "$(_ra_def "${_ra_l%%=*}")" "alias ${_ra_l%%=*} is defined as the module writes it"
+done <<EOF
+$_ra_lines
+EOF
+
+_ra_undoc=""
+for _ra_n in $_ra_names; do
+    [ "${HX_ITEM_KIND[alias:$_ra_n]:-}" = alias ] && [ "${HX_ITEM_OWNER[alias:$_ra_n]:-}" = aliases ] \
+        || _ra_undoc="$_ra_undoc $_ra_n"
+done
+t_eq "" "$_ra_undoc" "every alias the module defines is documented as the module's"
+_ra_extra=""
+for _ra_k in $(hx_item_keys_sorted); do
+    [ "${HX_ITEM_KIND[$_ra_k]}" = alias ] && [ "${HX_ITEM_OWNER[$_ra_k]}" = aliases ] || continue
+    printf '%s\n' "$_ra_names" | grep -qxF -- "${_ra_k#alias:}" || _ra_extra="$_ra_extra ${_ra_k#alias:}"
+done
+t_eq "" "$_ra_extra" "the module documents no alias it does not define"
+t_false "there is no ports alias: it would break the net plugin's ports() definition" alias ports
+
+# ── what each alias runs ────────────────────────────────────────────────────
+t_head "aliases: what each one runs"
+
+# _ra_rec <cmd...> — recorder stubs in $T_DIR/rec/stubs, which is NOT on PATH
+_ra_rec() { ( T_DIR="$T_DIR/rec"; mkdir -p "$T_DIR/stubs"; for _ra_c in "$@"; do t_stub "$_ra_c"; done ); }
+_ra_rec ls grep df du free ps git date
+# _ra_run <command line> — run it through eval with only the recorders on
+# PATH, and conf recorded too; prints the calls it made, sorted, joined by ;
+_ra_run() {
+    t_calls_reset
+    (
+        PATH="$T_DIR/rec/stubs"
+        hash -r 2>/dev/null
+        conf() { printf 'conf|%s\n' "$*" >> "$T_CALLS"; }
+        eval "$1"
+    ) >/dev/null 2>&1 </dev/null
+    t_calls | sort | tr '\n' ';' | sed 's/;$//'
+}
+
+# ls is an alias too, and the first word of an alias's value is expanded
+# again (bash does the same), so ll, la and l1 reach ls with ls's own flags
+# in front of theirs. The repeated flags are harmless.
+_ra_ls="ls|--color=auto|--group-directories-first"
+for _ra_t in \
+    "ls x => $_ra_ls|x" \
+    "ll x => $_ra_ls|-lh|--color=auto|--group-directories-first|x" \
+    "la x => $_ra_ls|-lha|--color=auto|--group-directories-first|x" \
+    "lt x => ls|-lhtr|--color=auto|x" \
+    "l1 x => $_ra_ls|-1|--color=auto|x" \
+    "df => df|-h" \
+    "du x => du|-h|x" \
+    "free => free|-h" \
+    "psg foo => grep|--color=auto|-i|foo;grep|--color=auto|-v|grep;ps|aux" \
+    "g st => git|st" \
+    "gs => git|status|--short|--branch" \
+    "ga f => git|add|f" \
+    "gc => git|commit" \
+    "gca => git|commit|--amend" \
+    "gd => git|diff" \
+    "gds => git|diff|--staged" \
+    "gl => git|log|--oneline|--graph|--decorate|-20" \
+    "gp => git|push" \
+    "gpl => git|pull|--ff-only" \
+    "gco main => git|checkout|main" \
+    "gb => git|branch" \
+    "hxr => conf|reload" \
+    "hxe => conf|edit" \
+    "hxl => conf|list" \
+    "hxd => conf|doctor" \
+    "reload => conf|reload" \
+    "now => date|+%Y-%m-%d %H:%M:%S" \
+    "week => date|+%V"; do
+    _ra_cmd="${_ra_t%% => *}"
+    _ra_exp="${_ra_t#* => }"
+    t_eq "$_ra_exp" "$(_ra_run "$_ra_cmd")" "$_ra_cmd runs: $(printf '%s' "$_ra_exp" | tr '|' ' ' | sed 's/;/; /g')"
+done
+t_eq "$(path_list)" "$(eval path)" "path prints path_list's listing"
+
+# lt is the one listing that is about time: the newest entry last, even when
+# it is a directory. ls's --group-directories-first reached lt through the
+# alias chain above and put every directory first, whatever its age.
+if ls --group-directories-first -d . >/dev/null 2>&1 && command -v touch >/dev/null 2>&1; then
+    mkdir -p "$T_DIR/lt/newest-dir"
+    : > "$T_DIR/lt/old.txt"
+    : > "$T_DIR/lt/mid.txt"
+    touch -t 202001010000 "$T_DIR/lt/old.txt"
+    touch -t 202301010000 "$T_DIR/lt/mid.txt"
+    touch -t 202501010000 "$T_DIR/lt/newest-dir"
+    t_eq "old.txt mid.txt newest-dir" \
+        "$( (cd "$T_DIR/lt" && eval lt </dev/null) | awk '$1 != "total" { print $NF }' | tr '\n' ' ' | sed 's/ $//')" \
+        "lt lists the most recently modified entry last, a directory included"
+else
+    t_skip "lt's order — needs GNU ls and touch"
+fi
+t_has "newest" "${HX_ITEM_DESC[alias:lt]}" "lt's help says the newest comes last"
+
+# ── navigation ──────────────────────────────────────────────────────────────
+t_head "aliases: navigation"
+
+mkdir -p "$T_DIR/nav/a/b/c/d"
+# _ra_in <dir> <command line> — where <command line> leaves you, from <dir>
+_ra_in() { ( cd "$1" && eval "$2" >/dev/null 2>&1 </dev/null; pwd ); }
+t_eq "$T_DIR/nav/a/b/c" "$(_ra_in "$T_DIR/nav/a/b/c/d" ..)" ".. goes up one directory"
+t_eq "$T_DIR/nav/a/b" "$(_ra_in "$T_DIR/nav/a/b/c/d" ...)" "... goes up two"
+t_eq "$T_DIR/nav/a" "$(_ra_in "$T_DIR/nav/a/b/c/d" ....)" ".... goes up three"
+t_eq "$T_DIR/nav/a" "$(_ra_in "$T_DIR/nav/a" 'cd b/c; -')" "- goes back to the previous directory"
+
+# ── the safety nets ─────────────────────────────────────────────────────────
+t_head "aliases: the safety nets ask first"
+
+mkdir -p "$T_DIR/net"
+# _ra_ask <answer> <command line> — run it in $T_DIR/net through eval (which
+# expands the alias), fed <answer>; prints what it asked
+_ra_ask() { ( cd "$T_DIR/net" && printf '%s\n' "$1" | eval "$2" ) 2>&1; }
+# _ra_cat <file> — its content, or <none>
+_ra_cat() { if [ -e "$T_DIR/net/$1" ]; then cat "$T_DIR/net/$1"; else printf '<none>'; fi; }
+
+printf 'keep' > "$T_DIR/net/victim"
+t_has "victim" "$(_ra_ask n "$_ra_rm victim")" "rm asks before it deletes, naming the file"
+t_eq "keep" "$(_ra_cat victim)" "and n keeps it"
+_ra_ask y "$_ra_rm victim" >/dev/null
+t_eq "<none>" "$(_ra_cat victim)" "and y deletes it"
+
+printf 'new' > "$T_DIR/net/src"; printf 'old' > "$T_DIR/net/dst"
+t_has "dst" "$(_ra_ask n "$_ra_mv src dst")" "mv asks before it overwrites, naming the file"
+t_eq "old|new" "$(_ra_cat dst)|$(_ra_cat src)" "and n leaves both files alone"
+_ra_ask y "$_ra_mv src dst" >/dev/null
+t_eq "new|<none>" "$(_ra_cat dst)|$(_ra_cat src)" "and y overwrites"
+t_eq "" "$(_ra_ask "" "$_ra_mv dst fresh")" "mv does not ask when nothing would be overwritten"
+t_eq "new" "$(_ra_cat fresh)" "and moves the file"
+
+printf 'new' > "$T_DIR/net/src"; printf 'old' > "$T_DIR/net/dst"
+t_has "dst" "$(_ra_ask n "$_ra_cp src dst")" "cp asks before it overwrites, naming the file"
+t_eq "old" "$(_ra_cat dst)" "and n keeps the old content"
+_ra_ask y "$_ra_cp src dst" >/dev/null
+t_eq "new" "$(_ra_cat dst)" "and y overwrites"
+
+printf 'old' > "$T_DIR/net/dst"
+t_has "dst" "$(_ra_ask n "ln -s src dst")" "ln asks before it replaces, naming the file"
+t_false "and n keeps the file" test -L "$T_DIR/net/dst"
+_ra_ask y "ln -s src dst" >/dev/null
+t_true "and y replaces it with the link" test -L "$T_DIR/net/dst"
+
+: > "$T_DIR/net/v1"; : > "$T_DIR/net/v2"
+t_eq "" "$(_ra_ask "" "\\$_ra_rm v1")" "\\rm bypasses the net, as its help says"
+t_eq "<none>" "$(_ra_cat v1)" "and deletes"
+t_eq "" "$(_ra_ask "" "command $_ra_rm v2")" "command rm bypasses it too"
+t_eq "<none>" "$(_ra_cat v2)" "and deletes"
+
+# The hazard the module header describes: a function parsed after it gets
+# the -i for a bare mv, so it waits on a prompt; command mv does not.
+printf 'new' > "$T_DIR/net/h-src"; printf 'old' > "$T_DIR/net/h-dst"
+eval "_ra_bare() { $_ra_mv \"\$1\" \"\$2\"; }"
+eval "_ra_safe() { command $_ra_mv \"\$1\" \"\$2\"; }"
+( cd "$T_DIR/net" && _ra_bare h-src h-dst ) >/dev/null 2>&1 </dev/null
+t_eq "old" "$(_ra_cat h-dst)" "a function parsed after the module has its bare mv turned into mv -i"
+( cd "$T_DIR/net" && _ra_safe h-src h-dst ) >/dev/null 2>&1 </dev/null
+t_eq "new" "$(_ra_cat h-dst)" "and command mv in the same place overwrites without asking"
+
+# ── the grep family ─────────────────────────────────────────────────────────
+t_head "aliases: the grep family"
+
+mkdir -p "$T_DIR/gr/sub"
+printf 'ab\naab\na+b\nb\n' > "$T_DIR/gr/re.txt"
+printf 'a.b\naxb\n' > "$T_DIR/gr/fix.txt"
+printf 'one\nneedle\n' > "$T_DIR/gr/sub/deep.txt"
+# _ra_gr <command line> — run it in $T_DIR/gr; its output joined by spaces
+_ra_gr() { ( cd "$T_DIR/gr" && eval "$1" </dev/null ) 2>&1 | tr '\n' ' ' | sed 's/ $//'; }
+t_eq "a+b" "$(_ra_gr "grep 'a+b' re.txt")" "grep matches a basic regular expression"
+t_eq "ab aab" "$(_ra_gr "egrep '^a+b\$' re.txt")" "egrep matches an extended one"
+t_eq "a.b" "$(_ra_gr "fgrep 'a.b' fix.txt")" "fgrep matches a fixed string"
+t_eq "sub/deep.txt:2:needle" "$(_ra_gr "rg- needle sub")" "rg- searches recursively, with line numbers"
+t_hasnt "$(printf '\033')" "$(_ra_gr "grep ab re.txt")" "grep adds no colour when its output is not a terminal"
