@@ -24,6 +24,27 @@ hx_var_doc HISTTIMEFORMAT "timestamp shown by \`history\`"
 # multi-line command back with its newlines and indentation intact, instead of
 # joining it onto one line the way bash does.
 
+# ── Up/Down: search by what is already typed ────────────────────────────────
+# Type the start of a command, then Up: only history lines that begin with it
+# come back -- `git<Up>` walks through git commands and nothing else (hellish
+# issue #136). Down walks forward again, and on an empty line both are the
+# plain previous/next. This is readline's history-search-backward/-forward,
+# the same thing zsh calls history-beginning-search.
+#
+# Each arrow is bound under both of its encodings: \e[A is what a terminal
+# sends normally, \eOA what it sends in keypad-transmit mode.
+#
+# Needs the `bind` builtin. A hellish without it keeps plain Up/Down, and
+# `conf doctor` lists the gap. `set HX_HIST_PREFIX_SEARCH off` in hellish.conf
+# keeps them plain anyway.
+if hx_cap builtin_bind && [ "${HX_HIST_PREFIX_SEARCH:-on}" != off ]; then
+    bind '"\e[A": history-search-backward' 2>/dev/null
+    bind '"\eOA": history-search-backward' 2>/dev/null
+    bind '"\e[B": history-search-forward' 2>/dev/null
+    bind '"\eOB": history-search-forward' 2>/dev/null
+fi
+hx_var_doc HX_HIST_PREFIX_SEARCH "on: Up/Down recall only lines starting with what is typed (off: plain)"
+
 # shopt -s histappend  -- ACCEPTED but a verified no-op in 2.7.6, like the other
 # shopt knobs (issue #71 §4). Left commented rather than deleted so it starts
 # working the moment a release wires it up.
