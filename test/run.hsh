@@ -132,11 +132,15 @@ t_eq "" "$_collisions" "no alias shares a name with a function"
 # once hung: `cp "$HX_CONF" "$(mktemp)"` prompts to overwrite, since mktemp has
 # already created the destination, and the prompt goes to a stdout nobody is
 # watching. The suite enforced the rule everywhere except on itself.
+#
+# The pattern is forge lint's: command position is the start of a line (it
+# used to be column 0 only, so an indented `rm` passed), after ; & | { ( ! or
+# a backquote, or after then/do/else.
 t_head "safety-alias leak (regression guard)"
-_leaky=$(grep -rn '\(^\|[;&|] *\|&& *\)\(rm\|mv\|cp\) ' \
+_leaky=$(grep -rnE '(^[[:space:]]*|[;&|{(!`][[:space:]]*|(^|[[:space:]])(then|do|else)[[:space:]]+)(rm|mv|cp)[[:space:]]' \
     "$HX_HOME/lib" "$HX_HOME/plugins" "$HX_HOME/rc.d" "$HX_HOME/themes" \
     "$HX_HOME/test" 2>/dev/null \
-    | grep -v 'command \(rm\|mv\|cp\)' | grep -v ':[0-9]*:#' | grep -v 'alias ' | grep -v 'hx_alias_doc')
+    | grep -v ':[0-9]*:[[:space:]]*#' | grep -v 'alias ' | grep -v 'hx_alias_doc')
 t_eq "" "$_leaky" "no unguarded rm/mv/cp inside functions"
 
 # ── shims ───────────────────────────────────────────────────────────────────

@@ -1,0 +1,170 @@
+# plugins/forge/test.hsh — scaffold, lint, doc, list, api.
+#
+# HX_PLUGIN_DIR points into the scratch directory, so `forge new` and
+# `forge doc` write there and never into the real plugin directory. The lint
+# rules are driven by small fixture plugins, each broken in one way.
+
+t_head "forge"
+
+_ft_real_dir="$HX_PLUGIN_DIR"
+HX_PLUGIN_DIR="$T_DIR/plugins"
+mkdir -p "$HX_PLUGIN_DIR"
+
+# _ft_plugin <name> <body...> — a fixture plugin, one line per argument
+_ft_plugin() {
+    local n="$1"
+    shift
+    mkdir -p "$HX_PLUGIN_DIR/$n"
+    printf '%s\n' "$@" > "$HX_PLUGIN_DIR/$n/plugin.hsh"
+    printf '# %s\n' "$n" > "$HX_PLUGIN_DIR/$n/README.md"
+}
+
+# ── the command ─────────────────────────────────────────────────────────────
+t_has "forge new <name>" "$(forge)" "forge with no command prints its help"
+t_has "forge lint" "$(forge help)" "forge help lists the commands"
+t_rc 2 "forge rejects an unknown command" forge frobnicate
+t_has "unknown command 'frobnicate'" "$(forge frobnicate 2>&1)" "and names it"
+
+# ── forge new ───────────────────────────────────────────────────────────────
+t_rc 2 "forge new without a name is a usage error" forge new
+t_rc 2 "forge new rejects an upper-case name" forge new BadName
+t_rc 2 "forge new rejects a name with a space" forge new "two words"
+t_rc 2 "forge new rejects a name with a slash" forge new "../escape"
+t_false "a rejected name creates nothing" test -e "$T_DIR/escape"
+
+forge new sample "a sample plugin" >/dev/null 2>&1
+t_true "forge new writes plugin.hsh" test -r "$HX_PLUGIN_DIR/sample/plugin.hsh"
+t_true "forge new writes README.md"  test -r "$HX_PLUGIN_DIR/sample/README.md"
+t_true "the scaffold passes forge lint" forge_lint sample
+t_true "the scaffold parses" "$(hx_shell_bin)" -n "$HX_PLUGIN_DIR/sample/plugin.hsh"
+t_has 'hx_plugin sample off dev "a sample plugin" || return 0' \
+    "$(cat "$HX_PLUGIN_DIR/sample/plugin.hsh")" "the scaffold declares itself, off by default, with the description"
+t_has "a sample plugin" "$(cat "$HX_PLUGIN_DIR/sample/README.md")" "the README carries the description"
+t_rc 1 "forge new refuses a plugin that already exists" forge new sample
+t_has "already exists" "$(forge new sample 2>&1)" "and says so"
+
+# The scaffold is a working plugin: switched on, it defines what it documents.
+hx_set_state sample on
+hx_source "$HX_PLUGIN_DIR/sample/plugin.hsh"
+t_eq "hello from the sample plugin" "$(sample_hello)" "the scaffold, switched on, works"
+t_has "sample_hello" "$(help_conf -s sample_hello 2>/dev/null)" "and registers its function for help_conf"
+t_true "hxp new is forge new" hxp new second
+t_true "hxp new wrote the plugin" test -r "$HX_PLUGIN_DIR/second/plugin.hsh"
+
+# ── forge lint: the contract ────────────────────────────────────────────────
+_ft_plugin good 'hx_plugin good off dev "fine" || return 0' \
+    'good_x() { command rm -f "$1"; }' 'hx_func_doc good_x "remove a file"'
+t_rc 0 "a plugin that keeps the contract passes" forge_lint good
+t_has "contract satisfied" "$(forge_lint good)" "and says so"
+
+_ft_plugin nodecl 'nodecl_x() { :; }' 'hx_func_doc nodecl_x "x"'
+t_rc 1 "a plugin without hx_plugin fails" forge_lint nodecl
+t_has "missing 'hx_plugin" "$(forge_lint nodecl)" "and the message names the declaration"
+
+_ft_plugin noret 'hx_plugin noret off dev "x"' 'hx_func_doc noret "x"'
+t_has "must end with '|| return 0'" "$(forge_lint noret)" "a declaration without || return 0 fails"
+
+_ft_plugin wrongname 'hx_plugin other off dev "x" || return 0' 'hx_func_doc x "x"'
+t_has "does not match the directory name" "$(forge_lint wrongname)" "a declaration naming another plugin fails"
+
+# The fixtures spell the command through a variable: written out, each one
+# is an unguarded call in this file, and run.hsh's repo-wide guard (rightly)
+# fails the suite on it.
+_ft_rm=rm _ft_mv=mv _ft_cp=cp
+_ft_plugin unguarded 'hx_plugin unguarded off dev "x" || return 0' \
+    "unguarded_x() { $_ft_rm -f \"\$1\"; }" 'hx_func_doc unguarded_x "x"'
+t_rc 1 "an unguarded rm after { fails" forge_lint unguarded
+t_has "calls rm/mv/cp unguarded" "$(forge_lint unguarded)" "and the message says why"
+
+# Each command position, alone in a plugin that is otherwise clean.
+_ft_n=0
+for _ft_code in "    $_ft_rm -f x" "x=1; $_ft_rm -f x" "true && $_ft_rm -f x" "false || $_ft_rm -f x" \
+    "( $_ft_rm -f x )" "y=\$($_ft_rm -f x)" "if true; then $_ft_rm -f x; fi" \
+    "for i in 1; do $_ft_rm -f x; done" "if false; then :; else $_ft_rm -f x; fi" \
+    "! $_ft_mv a b" "true | $_ft_cp a b" "echo \`$_ft_rm -f x\`"; do
+    _ft_n=$((_ft_n + 1))
+    _ft_plugin "pos$_ft_n" "hx_plugin pos$_ft_n off dev \"x\" || return 0" \
+        "pos${_ft_n}_x() { command rm -f y; $_ft_code; }" "hx_func_doc pos${_ft_n}_x \"x\""
+    t_rc 1 "forge lint catches an unguarded call in: $_ft_code" forge_lint "pos$_ft_n"
+done
+
+_ft_plugin guarded 'hx_plugin guarded off dev "x" || return 0' \
+    'guarded_x() { command rm -f "$1"; if true; then command mv a b; fi; }' \
+    'guarded_y() { echo "confirm before you rm it"; printf "%s\n" "rm -rf is not run here"; }' \
+    'hx_func_doc guarded_x "x"'
+t_rc 0 "command rm/mv/cp, and rm inside a string, pass" forge_lint guarded
+
+_ft_plugin commented 'hx_plugin commented off dev "x" || return 0' \
+    '# never write: rm -rf "$HOME"' 'hx_func_doc x "x"'
+t_rc 0 "a landmine quoted in a comment is documentation, not code" forge_lint commented
+
+_ft_plugin cmdsub 'hx_plugin cmdsub off dev "x" || return 0' \
+    'PS1='"'"'$(date) > '"'" 'hx_func_doc x "x"'
+t_has "command substitution is never expanded in a prompt" "$(forge_lint cmdsub)" \
+    "a prompt with \$( ) fails"
+
+_ft_plugin dquote 'hx_plugin dquote off dev "x" || return 0' \
+    'PS1="\u > "' 'PS2="... "' 'hx_func_doc x "x"'
+_ft_out=$(forge_lint dquote)
+t_rc 0 "a double-quoted prompt and a PS2 only warn" forge_lint dquote
+t_has "freezes" "$_ft_out" "a double-quoted prompt draws a warning"
+t_has "setting PS2 does nothing" "$_ft_out" "a PS2 assignment draws a warning"
+
+_ft_plugin undoc 'hx_plugin undoc off dev "x" || return 0' 'undoc_x() { :; }'
+command rm -f "$HX_PLUGIN_DIR/undoc/README.md"
+_ft_out=$(forge_lint undoc)
+t_rc 0 "a plugin with no docs and no README only warns" forge_lint undoc
+t_has "nothing is documented" "$_ft_out" "no hx_func_doc draws a warning"
+t_has "no README.md" "$_ft_out" "no README draws a warning"
+
+_ft_plugin broken 'hx_plugin broken off dev "x" || return 0' 'broken_x() { if true; then :; }' 'hx_func_doc x "x"'
+t_rc 1 "a plugin that does not parse fails" forge_lint broken
+t_has "does not parse" "$(forge_lint broken)" "and the message says so"
+
+t_rc 1 "forge lint of a plugin that does not exist fails" forge_lint nosuchplugin
+t_rc 1 "forge lint with no name fails if any plugin does" forge_lint
+
+# ── forge lint: the rules that depend on this hellish ───────────────────────
+# Each interpreter rule fires only where hx_cap says the gap is real. Two
+# fake verdicts make both outcomes testable on any hellish.
+_ft_plugin gaps 'hx_plugin gaps off dev "x" || return 0' \
+    'gaps_x() { local -n r="$1"; printf "%q" "$r"; }' 'hx_func_doc gaps_x "x"'
+( hx_cap() { return 0; }
+  t_rc 0 "on a hellish that has every capability, the gap rules stay quiet" forge_lint gaps
+  hx_cap() { return 1; }
+  t_rc 1 "on a hellish without namerefs, 'local -n' fails lint" forge_lint gaps
+  _ft_out=$(forge_lint gaps)
+  t_has "namerefs yield the NAME" "$_ft_out" "and the nameref message names the gap"
+  t_has "printf '%q' is unsupported" "$_ft_out" "a warning-level gap (printf %q) is reported too"
+  printf '%s %s %s\n' "$HX_T_PASS" "$HX_T_FAIL" "$HX_T_SKIP" > "$T_DIR/gapcounts" )
+read -r HX_T_PASS HX_T_FAIL HX_T_SKIP < "$T_DIR/gapcounts"
+
+# ── forge doc / list / api ──────────────────────────────────────────────────
+t_rc 2 "forge doc without a name is a usage error" forge doc
+t_rc 1 "forge doc of a plugin that is not loaded fails" forge doc nosuchplugin
+mkdir -p "$HX_PLUGIN_DIR/jump"
+if hx_known jump; then
+    forge doc jump >/dev/null 2>&1
+    _ft_out=$(cat "$HX_PLUGIN_DIR/jump/README.md" 2>/dev/null)
+    t_has "# jump" "$_ft_out" "forge doc writes a README headed with the plugin's name"
+    t_has '| func | `j` |' "$_ft_out" "forge doc lists each registered function"
+    t_has '`j <fragment>`' "$_ft_out" "forge doc includes the usage line"
+    t_has 'conf on jump' "$_ft_out" "forge doc says how to enable the plugin"
+    t_hasnt '| func | `ginfo` |' "$_ft_out" "forge doc lists only the plugin's own items"
+else
+    t_skip "forge doc — the jump plugin is not registered here"
+fi
+
+_ft_out=$(forge list)
+t_has "sample" "$_ft_out" "forge list names each plugin on disk"
+t_has "lines" "$_ft_out" "forge list shows each plugin's size"
+mkdir -p "$HX_PLUGIN_DIR/notaplugin"
+: > "$HX_PLUGIN_DIR/notaplugin/README.md"
+t_hasnt "notaplugin" "$(forge list)" "forge list leaves out a directory without plugin.hsh"
+
+_ft_out=$(forge api)
+t_has "the plugin API" "$_ft_out" "forge api prints the API"
+t_has "hx_plugin <name> <on|off> <group>" "$_ft_out" "forge api documents the declaration"
+t_has "hx_func_doc" "$_ft_out" "forge api documents registration"
+
+HX_PLUGIN_DIR="$_ft_real_dir"

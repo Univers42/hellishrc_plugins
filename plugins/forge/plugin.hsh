@@ -234,8 +234,11 @@ _forge_lint_one() {
     # 3. the safety-alias hazard: rc.d/30-aliases.hsh defines rm/mv/cp with -i,
     #    and those aliases are live when this file is PARSED, so an unguarded
     #    call inside a function blocks on a prompt the user never sees.
-    _forge_has '(^[[:space:]]*|[;&|][[:space:]]*|&&[[:space:]]*)(rm|mv|cp)[[:space:]]' && \
-        ! _forge_has 'command (rm|mv|cp)' && \
+    #    A call is unguarded wherever it is in command position: at the start
+    #    of a line, after ; & | { ( ! or a backquote, or after then/do/else.
+    #    `f() { rm -f x; }` used to pass, and so did every unguarded call in a
+    #    file that had one `command rm` somewhere else.
+    _forge_has '(^[[:space:]]*|[;&|{(!`][[:space:]]*|(^|[[:space:]])(then|do|else)[[:space:]]+)(rm|mv|cp)[[:space:]]' && \
         _forge_fail "calls rm/mv/cp unguarded; use 'command rm' etc (the -i aliases leak in)"
 
     # 4. hygiene
