@@ -1,0 +1,150 @@
+# test/rc_completion.hsh — rc.d/70-completion.hsh: hx_complete,
+# hx_complete_flush, hx_complete_show, hx_complete_dynamic, and the word
+# lists the module declares for this configuration's own commands.
+#
+# An installed spec is read back with `complete -p`. The path for a hellish
+# without `complete` is taken by forcing the capability off in a subshell;
+# the checks that need the real builtin are skipped where there is none.
+# guide's word list is checked with a stub PAGER, so no guide is opened.
+
+if ! hx_enabled completion; then t_skip "rc.d/70-completion.hsh — the completion module is off"; return 0; fi
+
+HX_COLOR=never
+hx_color_init
+
+# _cp_spec <cmd> — the word list of <cmd>'s installed spec; fails when none
+_cp_spec() {
+    local s
+    s=$(complete -p "$1" 2>/dev/null) || return 1
+    printf '%s\n' "$s" | sed -n "s/^complete -W '\(.*\)' [^ ]*\$/\1/p"
+}
+# _cp_has_all <words> <list> — true when every one of <words> is in <list>
+_cp_has_all() {
+    local w
+    for w in $1; do case " $2 " in *" $w "*) ;; *) return 1 ;; esac; done
+}
+_cp_cap=0
+hx_cap builtin_complete && _cp_cap=1
+
+# ── hx_complete ─────────────────────────────────────────────────────────────
+t_head "completion: hx_complete"
+
+t_rc 1 "hx_complete refuses a command name that is not safe as a key" hx_complete 'bad name' a
+t_eq "<none declared>" "$(hx_complete_show 'bad name')" "and records nothing for it"
+t_rc 0 "hx_complete succeeds" hx_complete _cp_tool alpha beta
+t_eq "alpha beta" "$(hx_complete_show _cp_tool)" "hx_complete records the word list"
+hx_complete _cp_tool gamma delta
+t_eq "gamma delta" "$(hx_complete_show _cp_tool)" "declaring again replaces the list"
+hx_complete _cp_empty
+hx_complete my-tool.x one
+if [ "$_cp_cap" = 1 ]; then
+    t_eq "gamma delta" "$(_cp_spec _cp_tool)" "hx_complete installs the list at once"
+    t_eq "one" "$(_cp_spec my-tool.x)" "hx_complete takes a name with a dash and a dot"
+    t_false "a command declared with no words gets no spec, and keeps file-name completion" \
+        complete -p _cp_empty
+else
+    t_skip "hx_complete installing a spec — this hellish has no complete"
+fi
+
+_cp_o=$(
+    hx_aset HX_CAP builtin_complete 0
+    hx_complete _cp_off x y
+    printf 'words=%s\n' "$(hx_complete_show _cp_off)"
+    complete -p _cp_off >/dev/null 2>&1 && printf 'spec:_cp_off\n'
+    complete -r _cp_tool 2>/dev/null
+    hx_complete_flush
+    printf 'flush=%s\n' "$?"
+    complete -p _cp_tool >/dev/null 2>&1 && printf 'spec:_cp_tool\n'
+)
+t_has "words=x y" "$_cp_o" "without complete, hx_complete still records the list"
+t_hasnt "spec:_cp_off" "$_cp_o" "but installs nothing"
+t_has "flush=0" "$_cp_o" "without complete, hx_complete_flush succeeds"
+t_hasnt "spec:_cp_tool" "$_cp_o" "and installs nothing"
+
+# ── hx_complete_flush ───────────────────────────────────────────────────────
+t_head "completion: hx_complete_flush"
+
+if [ "$_cp_cap" = 1 ]; then
+    complete -r _cp_tool
+    t_rc 0 "hx_complete_flush succeeds" hx_complete_flush
+    t_eq "gamma delta" "$(_cp_spec _cp_tool)" "hx_complete_flush reinstalls a declared list"
+    t_false "and installs nothing for a list with no words" complete -p _cp_empty
+    _cp_bad=""
+    for _cp_c in $(printf '%s\n' "${!HX_COMPL_WORDS[@]}" | sort); do
+        [ -n "${HX_COMPL_WORDS[$_cp_c]}" ] || continue
+        [ "$(_cp_spec "$_cp_c")" = "${HX_COMPL_WORDS[$_cp_c]}" ] || _cp_bad="$_cp_bad $_cp_c"
+    done
+    t_eq "" "$_cp_bad" "every declared word list is installed as declared"
+    t_true "progcomp is armed, so an installed spec reaches TAB" shopt -q progcomp
+else
+    t_skip "hx_complete_flush — this hellish has no complete"
+fi
+
+# ── hx_complete_show ────────────────────────────────────────────────────────
+t_head "completion: hx_complete_show"
+
+t_eq "gamma delta" "$(hx_complete_show _cp_tool)" "hx_complete_show <cmd> prints its words"
+t_eq "<none declared>" "$(hx_complete_show _cp_never)" "hx_complete_show says when nothing is declared"
+_cp_o=$(hx_complete_show)
+t_has "completions" "$(printf '%s\n' "$_cp_o" | sed -n 2p)" "hx_complete_show with no command prints a header"
+t_has "gamma delta" "$(printf '%s\n' "$_cp_o" | grep '^  _cp_tool ')" "and a row for each command with its words"
+t_eq "$(printf '%s\n' "${!HX_COMPL_WORDS[@]}" | sort | tr '\n' ' ')" \
+    "$(printf '%s\n' "$_cp_o" | sed -n '/^  installed /,$p' | sed 1d | awk 'NF { print $1 }' | tr '\n' ' ')" \
+    "every declared command gets a row, in sorted order"
+if [ "$_cp_cap" = 1 ]; then
+    t_has "yes" "$(printf '%s\n' "$_cp_o" | grep '^  installed ')" "hx_complete_show says the lists are installed"
+fi
+t_has "no — declared only" "$(hx_aset HX_CAP builtin_complete 0; hx_complete_show | grep '^  installed ')" \
+    "and says when they are only declared"
+
+# ── the word lists this module declares ─────────────────────────────────────
+t_head "completion: this configuration's own word lists"
+
+for _cp_c in conf hxp forge prompt theme help_conf cheat guide; do
+    t_true "$_cp_c has a word list" test -n "${HX_COMPL_WORDS[$_cp_c]:-}"
+done
+t_true "prompt and theme complete the same words" test "${HX_COMPL_WORDS[prompt]}" = "${HX_COMPL_WORDS[theme]}"
+for _cp_c in extract pack note; do
+    t_true "$_cp_c is declared with no words, keeping file-name completion" \
+        eval "[ -n \"\${HX_COMPL_WORDS[$_cp_c]+set}\" ] && [ -z \"\${HX_COMPL_WORDS[$_cp_c]}\" ]"
+done
+# A word TAB offers that the command then rejects is worse than no word.
+_cp_bad=""
+for _cp_w in ${HX_COMPL_WORDS[help_conf]}; do help_conf "$_cp_w" >/dev/null 2>&1 || _cp_bad="$_cp_bad $_cp_w"; done
+t_eq "" "$_cp_bad" "every word offered for help_conf is a section it accepts"
+_cp_bad=""
+for _cp_w in ${HX_COMPL_WORDS[cheat]}; do cheat "$_cp_w" >/dev/null 2>&1 || _cp_bad="$_cp_bad $_cp_w"; done
+t_eq "" "$_cp_bad" "every word offered for cheat is a section it accepts"
+t_stub pg
+_cp_bad=""
+for _cp_w in ${HX_COMPL_WORDS[guide]}; do
+    ( HX_DOCS="$HX_HOME/docs"; PAGER=pg; guide "$_cp_w" ) >/dev/null 2>&1 </dev/null || _cp_bad="$_cp_bad $_cp_w"
+done
+t_eq "" "$_cp_bad" "every word offered for guide opens a guide that ships"
+
+# ── hx_complete_dynamic ─────────────────────────────────────────────────────
+t_head "completion: hx_complete_dynamic"
+
+if [ "$_cp_cap" = 1 ]; then
+    _cp_o=$(
+        complete -r prompt theme conf 2>/dev/null
+        hx_complete_dynamic
+        printf 'rc=%s\n' "$?"
+        printf 'prompt=%s\n' "$(_cp_spec prompt)"
+        printf 'theme=%s\n' "$(_cp_spec theme)"
+        printf 'conf=%s\n' "$(_cp_spec conf)"
+    )
+    _cp_prompt=$(printf '%s\n' "$_cp_o" | sed -n 's/^prompt=//p')
+    _cp_conf=$(printf '%s\n' "$_cp_o" | sed -n 's/^conf=//p')
+    t_has "rc=0" "$_cp_o" "hx_complete_dynamic succeeds"
+    t_true "prompt completes every theme name" _cp_has_all "$(hx_theme_names | tr '\n' ' ')" "$_cp_prompt"
+    t_true "and still every prompt subcommand" _cp_has_all "${HX_COMPL_WORDS[prompt]}" "$_cp_prompt"
+    t_eq "$_cp_prompt" "$(printf '%s\n' "$_cp_o" | sed -n 's/^theme=//p')" "theme completes the same words as prompt"
+    t_true "conf completes every feature name" _cp_has_all "$(hx_feat_names_sorted | tr '\n' ' ')" "$_cp_conf"
+    t_true "and still every conf subcommand" _cp_has_all "${HX_COMPL_WORDS[conf]}" "$_cp_conf"
+else
+    t_skip "hx_complete_dynamic — this hellish has no complete"
+fi
+t_eq "rc=0 none" "$(hx_aset HX_CAP builtin_complete 0; complete -r prompt 2>/dev/null
+    hx_complete_dynamic; printf 'rc=%s ' "$?"; complete -p prompt >/dev/null 2>&1 && echo installed || echo none)" \
+    "without complete, hx_complete_dynamic succeeds and installs nothing"

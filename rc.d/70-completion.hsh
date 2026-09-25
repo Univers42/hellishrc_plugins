@@ -105,8 +105,10 @@ hx_complete_dynamic() {
         complete -W "$names list preview gallery next prev random save edit new export tokens palette colors width nerd doctor reload help" theme 2>/dev/null
     }
     names=$(hx_feat_names_sorted 2>/dev/null | tr '\n' ' ')
+    # conf's declared subcommands, then the features: "on off toggle $names"
+    # alone replaced the list, and `conf <TAB>` lost list, doctor, reload...
     [ -n "$names" ] && {
-        complete -W "on off toggle $names" conf 2>/dev/null
+        complete -W "${HX_COMPL_WORDS[conf]:-on off toggle} $names" conf 2>/dev/null
     }
     return 0
 }
