@@ -1,0 +1,79 @@
+# test/rc_options.hsh — rc.d/20-options.hsh and rc.d/80-ai.hsh: the options
+# the module turns on, the ones it deliberately leaves off and what that
+# means for a glob or a pipeline, and the one variable the AI block exports.
+#
+# Each module is sourced again in a subshell, after switching what it sets
+# the other way, so a check shows the module doing it, not hellish's
+# default. Globs run only on files planted in $T_DIR.
+
+t_head "options: what 20-options turns on"
+
+if hx_enabled options; then
+    # _ro_load — source 20-options.hsh in a subshell after switching every
+    # option it sets the other way; prints `set -o` and `shopt` as it leaves them
+    _ro_load() {
+        (
+            set -o vi
+            shopt -u globstar histappend checkwinsize lithist cdspell
+            . "$HX_HOME/rc.d/20-options.hsh"
+            set -o
+            shopt
+        ) 2>/dev/null
+    }
+    # _ro_state <name> <listing> — on or off, as `set -o` / `shopt` print it
+    _ro_state() { printf '%s\n' "$2" | awk -v n="$1" '$1 == n { print $2; exit }'; }
+    _ro_o=$(_ro_load)
+    t_eq "on" "$(_ro_state emacs "$_ro_o")" "the module switches line editing to emacs"
+    t_eq "off" "$(_ro_state vi "$_ro_o")" "and so vi mode off"
+    t_eq "on" "$(_ro_state globstar "$_ro_o")" "globstar is turned on"
+    t_eq "on" "$(_ro_state histappend "$_ro_o")" "histappend is turned on"
+    t_eq "on" "$(_ro_state checkwinsize "$_ro_o")" "pretty resize-aware turns on checkwinsize"
+    t_eq "on" "$(_ro_state lithist "$_ro_o")" "pretty multiline-history turns on lithist"
+    t_eq "on" "$(_ro_state cdspell "$_ro_o")" "pretty cd-spell turns on cdspell"
+    t_eq "" "$( (. "$HX_HOME/rc.d/20-options.hsh") 2>&1)" "the module loads without printing anything"
+
+    t_head "options: what 20-options leaves off"
+
+    _ro_o=$(set -o; shopt)
+    for _ro_n in pipefail errexit nounset noclobber nullglob dotglob nocaseglob extglob autocd; do
+        t_eq "off" "$(_ro_state "$_ro_n" "$_ro_o")" "$_ro_n is left off"
+    done
+    t_rc 0 "so a pipeline takes its status from its last command" eval 'false | true'
+
+    mkdir -p "$T_DIR/g/sub/deep"
+    for _ro_f in a.c sub/b.c sub/deep/c.c .hidden.c UP.C; do : > "$T_DIR/g/$_ro_f"; done
+    # _ro_glob <pattern> — what it expands to in $T_DIR/g, space-separated
+    _ro_glob() { ( cd "$T_DIR/g" && set -- $1; printf '%s\n' "$@" ) | tr '\n' ' ' | sed 's/ $//'; }
+    if hx_cap globstar; then
+        t_eq "a.c sub/b.c sub/deep/c.c" "$(_ro_glob '**/*.c')" "** matches across directory levels"
+    else
+        t_skip "** across directory levels — this hellish has no working globstar"
+    fi
+    t_eq "*.nope" "$(_ro_glob '*.nope')" "a glob that matches nothing stays as written (no nullglob)"
+    t_eq "UP.C a.c sub" "$(_ro_glob '*')" "* does not match dot-files (no dotglob)"
+    t_eq "UP.C" "$(_ro_glob '*.C')" "a glob matches case exactly (no nocaseglob)"
+else
+    t_skip "rc.d/20-options.hsh — the options module is off"
+fi
+
+# ── 80-ai ───────────────────────────────────────────────────────────────────
+t_head "options: the AI block"
+
+# _ro_ai <on|off> — source 80-ai.hsh with the ai feature <on|off> and the AI
+# variables unset; prints what it left set (values are never printed)
+_ro_ai() {
+    (
+        unset HELLISH_AI_SUGGEST HELLISH_AI_URL HELLISH_AI_KEY HELLISH_AI_MODEL
+        hx_set_state ai "$1"
+        . "$HX_HOME/rc.d/80-ai.hsh"
+        printf 'suggest=%s\n' "${HELLISH_AI_SUGGEST-<unset>}"
+        printf 'backend=%s%s%s\n' "${HELLISH_AI_URL+url}" "${HELLISH_AI_KEY+key}" "${HELLISH_AI_MODEL+model}"
+        sh -c 'printf "child=%s\n" "${HELLISH_AI_SUGGEST-<unset>}"'
+    ) 2>&1
+}
+_ro_o=$(_ro_ai on)
+t_has "suggest=1" "$_ro_o" "with ai on, HELLISH_AI_SUGGEST is 1"
+t_has "child=1" "$_ro_o" "and exported to child processes"
+t_eq "backend=" "$(printf '%s\n' "$_ro_o" | grep '^backend=')" "and no backend URL, key or model is set"
+_ro_o=$(_ro_ai off)
+t_has "suggest=<unset>" "$_ro_o" "with ai off, HELLISH_AI_SUGGEST is not set"

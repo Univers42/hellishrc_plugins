@@ -1,0 +1,170 @@
+# test/rc_env.hsh — rc.d/10-env.hsh: the PATH helpers and what the module
+# exports at load.
+#
+# Every PATH edit starts from the PATH this file was given and puts it back at
+# the end; the directories added are all under $T_DIR. The load-time defaults
+# are checked by sourcing the module again in a subshell with its variables
+# unset, because the values in this shell came from whatever environment
+# started the suite.
+
+if ! hx_enabled env; then t_skip "rc.d/10-env.hsh — the env module is off"; return 0; fi
+
+t_head "env: PATH helpers"
+
+_re_path0="$PATH"
+_re_a="$T_DIR/pa"
+_re_b="$T_DIR/pb"
+_re_c="$T_DIR/pc"
+_re_s="$T_DIR/with space"
+mkdir -p "$_re_a" "$_re_b" "$_re_c" "$_re_s"
+
+# _re_n <dir> — how many times <dir> appears in PATH
+_re_n() { path_list | grep -cxF -- "$1"; }
+# _re_first / _re_last — the first and the last PATH entry
+_re_first() { path_list | sed -n 1p; }
+_re_last()  { path_list | sed -n '$p'; }
+
+# ── path_list ───────────────────────────────────────────────────────────────
+PATH="$_re_a:$_re_path0"
+t_eq "$_re_a" "$(_re_first)" "path_list prints the first entry on the first line"
+t_eq "$(( $(printf '%s' "$PATH" | tr -cd : | wc -c) + 1 ))" "$(path_list | wc -l | tr -d ' ')" \
+    "path_list prints one line per entry"
+
+# ── path_prepend ────────────────────────────────────────────────────────────
+PATH="$_re_path0"
+path_prepend "$_re_a"
+t_eq "$_re_a" "$(_re_first)" "path_prepend puts a directory at the front"
+path_prepend "$_re_a"
+t_eq "1" "$(_re_n "$_re_a")" "path_prepend does not add a directory twice"
+PATH="$_re_path0:$_re_b"
+path_prepend "$_re_b"
+t_eq "$_re_b" "$(_re_first)" "path_prepend moves an entry that is already there to the front"
+t_eq "1" "$(_re_n "$_re_b")" "and leaves no copy behind at its old place"
+PATH="$_re_path0"
+path_prepend "$T_DIR/no-such-dir"
+t_eq "$_re_path0" "$PATH" "path_prepend ignores a directory that does not exist"
+path_prepend "$_re_a" "$_re_c"
+t_eq "$_re_a $_re_c" "$(path_list | sed -n 1,2p | sort | tr '\n' ' ' | sed 's/ $//')" \
+    "path_prepend takes several directories and puts each in front"
+t_eq "$_re_path0" "$(path_list | sed 1,2d | tr '\n' ':' | sed 's/:$//')" \
+    "path_prepend keeps the rest of PATH in its order"
+PATH="$_re_path0"
+path_prepend "$_re_s"
+t_eq "$_re_s" "$(_re_first)" "path_prepend keeps a directory with a space in it whole"
+t_eq "$PATH" "$(sh -c 'printf %s "$PATH"')" "path_prepend exports the new PATH"
+
+# ── path_append ─────────────────────────────────────────────────────────────
+PATH="$_re_path0"
+path_append "$_re_a"
+t_eq "$_re_a" "$(_re_last)" "path_append puts a directory at the end"
+path_append "$_re_a"
+t_eq "1" "$(_re_n "$_re_a")" "path_append does not add a directory twice"
+PATH="$_re_b:$_re_path0"
+path_append "$_re_b"
+t_eq "$_re_b" "$(_re_last)" "path_append moves an entry that is already there to the end"
+t_eq "1" "$(_re_n "$_re_b")" "and leaves no copy behind at its old place"
+PATH="$_re_path0"
+path_append "$T_DIR/no-such-dir"
+t_eq "$_re_path0" "$PATH" "path_append ignores a directory that does not exist"
+path_append "$_re_s"
+t_eq "$_re_s" "$(_re_last)" "path_append keeps a directory with a space in it whole"
+
+# ── path_remove ─────────────────────────────────────────────────────────────
+PATH="$_re_a:$_re_path0:$_re_a"
+path_remove "$_re_a"
+t_eq "0" "$(_re_n "$_re_a")" "path_remove drops every copy of the directory"
+t_eq "$_re_path0" "$PATH" "path_remove leaves every other entry, in order"
+path_remove "$T_DIR/never-there"
+t_eq "$_re_path0" "$PATH" "path_remove of a directory that is not there changes nothing"
+PATH="$_re_a::$_re_path0:"
+path_remove "$_re_b"
+t_eq "$_re_a:$_re_path0" "$PATH" "path_remove also drops empty entries, which would mean the current directory"
+PATH="$_re_a:$_re_path0"
+path_remove "$_re_a"
+t_eq "$PATH" "$(sh -c 'printf %s "$PATH"')" "a child process sees the PATH path_remove left"
+
+# ── path_dedupe ─────────────────────────────────────────────────────────────
+PATH="$_re_a:$_re_b:$_re_a:$_re_path0:$_re_b"
+path_dedupe
+t_eq "1" "$(_re_n "$_re_a")" "path_dedupe collapses a duplicate entry"
+t_eq "$_re_a:$_re_b:$_re_path0" "$PATH" "path_dedupe keeps the first occurrence, in order"
+PATH="$_re_a::$_re_path0"
+path_dedupe
+t_eq "$_re_a:$_re_path0" "$PATH" "path_dedupe drops empty entries"
+PATH="$_re_s:$_re_path0:$_re_s"
+path_dedupe
+t_eq "$_re_s:$_re_path0" "$PATH" "path_dedupe compares a directory with a space in it whole"
+
+PATH="$_re_path0"
+hash -r 2>/dev/null
+
+# ── what the module sets at load ────────────────────────────────────────────
+t_head "env: defaults exported at load"
+
+# A PATH holding nothing but fake editors, so the detection sees exactly what
+# this file planted: vi and nano, not nvim or vim.
+mkdir -p "$T_DIR/ed"
+for _re_e in vi nano; do
+    printf '#!/bin/sh\n' > "$T_DIR/ed/$_re_e"
+    chmod +x "$T_DIR/ed/$_re_e"
+done
+_re_sh=$(command -v sh)
+_re_vars="EDITOR VISUAL PAGER LESS LESSHISTFILE LANG LC_COLLATE CLICOLOR PIP_DISABLE_PIP_VERSION_CHECK DOTNET_CLI_TELEMETRY_OPTOUT NEXT_TELEMETRY_DISABLED DO_NOT_TRACK XDG_CONFIG_HOME XDG_CACHE_HOME XDG_DATA_HOME XDG_STATE_HOME"
+_RE_PATH=""
+
+# _re_load [NAME=value...] — source 10-env.hsh again in a subshell, with every
+# variable it defaults unset (then the given ones exported) and PATH set to
+# $_RE_PATH, or $T_DIR/ed. Prints NAME=value for each, then PATH, then what a
+# child process inherited.
+_re_load() {
+    (
+        for _re_v in $_re_vars; do unset "$_re_v"; done
+        PATH="${_RE_PATH:-$T_DIR/ed}"
+        for _re_v in "$@"; do export "$_re_v"; done
+        . "$HX_HOME/rc.d/10-env.hsh"
+        for _re_v in $_re_vars PATH; do eval "printf '%s=%s\n' \"\$_re_v\" \"\${$_re_v-<unset>}\""; done
+        "$_re_sh" -c 'printf "child:LESS=%s\n" "$LESS"; printf "child:XDG_CONFIG_HOME=%s\n" "$XDG_CONFIG_HOME"'
+    ) 2>&1
+}
+# _re_get <NAME> <output> — the value _re_load printed for NAME
+_re_get() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | head -1; }
+
+_re_out=$(_re_load)
+t_eq "vi" "$(_re_get EDITOR "$_re_out")" "EDITOR falls back to the first of nvim, vim, vi, nano that is installed"
+t_eq "vi" "$(_re_get VISUAL "$_re_out")" "VISUAL defaults to EDITOR"
+t_eq "less" "$(_re_get PAGER "$_re_out")" "PAGER defaults to less"
+t_eq "-RFXi" "$(_re_get LESS "$_re_out")" "LESS defaults to -RFXi"
+t_eq "$HX_STATE/lesshst" "$(_re_get LESSHISTFILE "$_re_out")" "less keeps its history in the state directory"
+t_eq "en_US.UTF-8" "$(_re_get LANG "$_re_out")" "LANG defaults to en_US.UTF-8"
+t_eq "C" "$(_re_get LC_COLLATE "$_re_out")" "LC_COLLATE defaults to C for a stable sort order"
+t_eq "1" "$(_re_get CLICOLOR "$_re_out")" "CLICOLOR is set"
+for _re_v in PIP_DISABLE_PIP_VERSION_CHECK DOTNET_CLI_TELEMETRY_OPTOUT NEXT_TELEMETRY_DISABLED DO_NOT_TRACK; do
+    t_eq "1" "$(_re_get "$_re_v" "$_re_out")" "$_re_v is set to 1"
+done
+t_eq "$HOME/.config"      "$(_re_get XDG_CONFIG_HOME "$_re_out")" "XDG_CONFIG_HOME defaults to ~/.config"
+t_eq "$HOME/.cache"       "$(_re_get XDG_CACHE_HOME "$_re_out")"  "XDG_CACHE_HOME defaults to ~/.cache"
+t_eq "$HOME/.local/share" "$(_re_get XDG_DATA_HOME "$_re_out")"   "XDG_DATA_HOME defaults to ~/.local/share"
+t_eq "$HOME/.local/state" "$(_re_get XDG_STATE_HOME "$_re_out")"  "XDG_STATE_HOME defaults to ~/.local/state"
+t_eq "-RFXi" "$(_re_get child:LESS "$_re_out")" "the defaults are exported to child processes"
+t_eq "$HOME/.config" "$(_re_get child:XDG_CONFIG_HOME "$_re_out")" "the XDG directories are exported too"
+t_eq "$T_DIR/ed" "$(_re_get PATH "$_re_out")" "without ~/bin or ~/.local/bin, PATH is left as it was"
+
+_re_out=$(_re_load EDITOR=emacs VISUAL=code PAGER=most LESS=-R LANG=fr_FR.UTF-8 XDG_CONFIG_HOME=/cfg)
+t_eq "emacs" "$(_re_get EDITOR "$_re_out")" "an EDITOR already set is kept"
+t_eq "code" "$(_re_get VISUAL "$_re_out")" "a VISUAL already set is kept"
+t_eq "most" "$(_re_get PAGER "$_re_out")" "a PAGER already set is kept"
+t_eq "-R" "$(_re_get LESS "$_re_out")" "a LESS already set is kept"
+t_eq "fr_FR.UTF-8" "$(_re_get LANG "$_re_out")" "a LANG already set is kept"
+t_eq "/cfg" "$(_re_get XDG_CONFIG_HOME "$_re_out")" "an XDG directory already set is kept"
+t_eq "emacs" "$(_re_get VISUAL "$(_re_load EDITOR=emacs)")" "VISUAL follows an EDITOR that was already set"
+
+command rm -f "$T_DIR/ed/vi" "$T_DIR/ed/nano"
+t_eq "<unset>" "$(_re_get EDITOR "$(_re_load)")" "EDITOR is left unset when no known editor is installed"
+
+mkdir -p "$HOME/bin" "$HOME/.local/bin"
+t_eq "$HOME/bin:$HOME/.local/bin:$T_DIR/ed" "$(_re_get PATH "$(_re_load)")" \
+    "~/bin and ~/.local/bin go in front of PATH when they exist"
+_RE_PATH="$T_DIR/ed:$HOME/bin:$T_DIR/ed:$HOME/.local/bin"
+t_eq "$HOME/bin:$HOME/.local/bin:$T_DIR/ed" "$(_re_get PATH "$(_re_load)")" \
+    "the module de-duplicates PATH at load, moving ~/bin to the front"
+_RE_PATH=""

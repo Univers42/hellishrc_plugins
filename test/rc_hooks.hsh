@@ -1,0 +1,73 @@
+# test/rc_hooks.hsh — rc.d/50-prompt.hsh: hx_precmd_add, hx_preexec_add and
+# the _hx_precmd_run fallback dispatcher.
+#
+# Registration is checked against the live lists. The dispatcher runs in
+# subshells with HX_PRECMD_FUNCS holding only this file's probes: the real
+# list includes hooks (jump's, for one) that write to the real state
+# directory. Whether hellish itself fires the native hooks before a prompt
+# needs an interactive terminal, and is not tested here.
+
+if ! hx_enabled prompt; then t_skip "rc.d/50-prompt.hsh — the prompt module is off"; return 0; fi
+
+t_head "hooks: registration"
+
+# _rh_in <word> <list> — true when <word> is one of the words of <list>
+_rh_in() { case " $2 " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+# _rh_count <word> <list> — how many times <word> is in <list>
+_rh_count() { printf '%s\n' $2 | grep -cxF -- "$1"; }
+
+_rh_ran="$T_DIR/ran"
+_rh_a() { printf 'a' >> "$_rh_ran"; }
+_rh_b() { printf 'b' >> "$_rh_ran"; }
+_rh_fail() { printf 'f' >> "$_rh_ran"; return 1; }
+
+hx_precmd_add _rh_a
+t_true "hx_precmd_add registers a function to run before each prompt" _rh_in _rh_a "$HX_PRECMD_FUNCS"
+hx_precmd_add _rh_a
+t_eq "1" "$(_rh_count _rh_a "$HX_PRECMD_FUNCS")" "hx_precmd_add does not register a function twice"
+hx_precmd_add _rh_b
+t_eq "_rh_a _rh_b" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep '^_rh_' | tr '\n' ' ' | sed 's/ $//')" \
+    "hx_precmd_add keeps the order functions were added in"
+_rh_before="$HX_PRECMD_FUNCS"
+t_rc 1 "hx_precmd_add without a function name fails" hx_precmd_add
+t_eq "$_rh_before" "$HX_PRECMD_FUNCS" "and registers nothing"
+
+hx_preexec_add _rh_b
+t_true "hx_preexec_add registers a function to run before each command" _rh_in _rh_b "$HX_PREEXEC_FUNCS"
+hx_preexec_add _rh_b
+t_eq "1" "$(_rh_count _rh_b "$HX_PREEXEC_FUNCS")" "hx_preexec_add does not register a function twice"
+hx_preexec_add _rh_x
+t_false "a preexec function is not also a precmd one" _rh_in _rh_x "$HX_PRECMD_FUNCS"
+t_rc 1 "hx_preexec_add without a function name fails" hx_preexec_add
+
+if hx_cap hooks; then
+    t_true "hx_precmd_add reaches hellish's native HELLISH_PRECMD_FUNCS" _rh_in _rh_a "${HELLISH_PRECMD_FUNCS:-}"
+    t_eq "1" "$(_rh_count _rh_a "${HELLISH_PRECMD_FUNCS:-}")" "and only once"
+    t_true "hx_preexec_add reaches hellish's native HELLISH_PREEXEC_FUNCS" _rh_in _rh_b "${HELLISH_PREEXEC_FUNCS:-}"
+    t_eq "1" "$(_rh_count _rh_b "${HELLISH_PREEXEC_FUNCS:-}")" "and only once"
+    t_hasnt "_hx_precmd_run" "${PROMPT_COMMAND:-}" "PROMPT_COMMAND is not wired when the native hooks exist"
+else
+    t_eq "_hx_precmd_run" "${PROMPT_COMMAND:-}" "PROMPT_COMMAND runs the dispatcher when hellish has no native hooks"
+fi
+
+# ── _hx_precmd_run ──────────────────────────────────────────────────────────
+t_head "hooks: the PROMPT_COMMAND dispatcher"
+
+# _rh_dispatch <hooks 0|1> — run the dispatcher over this file's probes only,
+# with the capability forced; prints what ran, then the status
+_rh_dispatch() {
+    (
+        hx_aset HX_CAP hooks "$1"
+        HX_PRECMD_FUNCS=" _rh_a _rh_not_defined _rh_fail _rh_b"
+        : > "$_rh_ran"
+        _hx_precmd_run
+        _rh_rc=$?
+        printf '%s rc=%s' "$(cat "$_rh_ran")" "$_rh_rc"
+    )
+}
+_rh_o=$(_rh_dispatch 0)
+t_eq "afb" "${_rh_o% rc=*}" "without native hooks, the dispatcher runs every registered function in order"
+t_eq "rc=0" "${_rh_o##* }" "the dispatcher returns 0 even when a hook fails"
+t_eq "afb rc=0" "$(_rh_dispatch 0 2>&1)" "a registered name that is not defined is skipped without an error"
+_rh_o=$(_rh_dispatch 1)
+t_eq " rc=0" "$_rh_o" "with native hooks, the dispatcher runs nothing, since hellish already did"
