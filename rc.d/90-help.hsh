@@ -169,7 +169,7 @@ _cheat_conf() {
 # guide [topic] — the written documentation. Opens in $PAGER, because these
 # are long enough to need scrolling and short enough not to need a browser.
 guide() {
-    local t="${1:-}" f
+    local t="${1:-}" f pager="${PAGER:-less}"
     case "$t" in
         ''|index|help)
             hx_head "the written guides"
@@ -192,7 +192,11 @@ guide() {
         *) hx_err "no such guide: $t"; guide index; return 2 ;;
     esac
     if [ -r "$HX_DOCS/$f" ]; then
-        "${PAGER:-less}" "$HX_DOCS/$f"
+        # PAGER may carry options, as git and man allow: "${PAGER:-less}"
+        # quoted looked PAGER="less -R" up as one command and failed. A plain
+        # $pager splits on every hellish; an unquoted ${PAGER:-less} did not
+        # until the shell learned to field-split an operator's result.
+        $pager "$HX_DOCS/$f"
     else
         hx_err "missing: $HX_DOCS/$f"
         hx_info "re-run the installer to get the guides, or read them in the repository"

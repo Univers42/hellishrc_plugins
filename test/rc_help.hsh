@@ -1,0 +1,113 @@
+# test/rc_help.hsh — rc.d/90-help.hsh: cheat, each of its sections, and
+# guide.
+#
+# guide is pointed at guides planted in $T_DIR/docs and opens them with a stub
+# pager, so nothing is ever paged; one check reads the shipped docs directory
+# to see that every guide guide can name is actually there.
+
+if ! hx_enabled help; then t_skip "rc.d/90-help.hsh — the help module is off"; return 0; fi
+
+HX_COLOR=never
+hx_color_init
+
+# _hp_calls <command...> — the stub calls it made, one per line
+_hp_calls() {
+    t_calls_reset
+    "$@" >/dev/null 2>&1 </dev/null
+    t_calls
+}
+
+# ── cheat ───────────────────────────────────────────────────────────────────
+t_head "help: cheat"
+
+_hp_main=$(cheat 2>&1)
+t_has "the twenty commands worth knowing" "$_hp_main" "cheat with no section prints the main screen"
+t_rc 0 "cheat succeeds" cheat
+t_eq "$_hp_main" "$(cheat -h 2>&1)" "cheat -h is the main screen"
+t_eq "$_hp_main" "$(cheat --help 2>&1)" "cheat --help is the main screen"
+for _hp_s in "nav:moving around" "find:finding things" "git:git" "dev:building and running" \
+             "disk:disk" "prompt:the prompt" "conf:the configuration itself"; do
+    t_eq "${_hp_s#*:}" "$(cheat "${_hp_s%%:*}" 2>&1 | sed -n 2p)" "cheat ${_hp_s%%:*} opens with its own heading"
+    t_rc 0 "cheat ${_hp_s%%:*} succeeds" cheat "${_hp_s%%:*}"
+done
+t_eq "$(cheat nav)" "$(cheat go)" "cheat go is cheat nav"
+t_eq "$(cheat nav; cheat find; cheat git; cheat dev; cheat disk; cheat prompt; cheat conf)" "$(cheat all)" \
+    "cheat all is every section, in order"
+t_rc 2 "cheat rejects a section it does not have" cheat bogus
+t_has "no such section: bogus" "$(cheat bogus 2>&1 >/dev/null)" "and names it on stderr"
+t_has "sections: nav find git dev disk prompt conf all" "$(cheat bogus 2>/dev/null)" "and lists the ones it has"
+
+# Every command the cheat sheet names must exist, or belong to a plugin that
+# is switched off. The rows are collected by swapping _c, the row printer,
+# for one that prints only the command column.
+_hp_rows=$( _c() { printf 'ROW %s\n' "$1"; }; cheat; cheat all )
+_hp_names=$(printf '%s\n' "$_hp_rows" | sed -n 's/^ROW //p' | awk -F ' / ' '
+    { split($1, w, " ")
+      if (w[2] == "") { for (i = 1; i <= NF; i++) { split($i, p, " "); print p[1] } }
+      else print w[1] }' | sort -u)
+_hp_missing=""
+for _hp_n in $_hp_names; do
+    command -v "$_hp_n" >/dev/null 2>&1 && continue
+    _hp_plug=$(grep -l "^$_hp_n()" "$HX_PLUGIN_DIR"/*/plugin.hsh 2>/dev/null | head -1)
+    if [ -n "$_hp_plug" ]; then
+        _hp_plug="${_hp_plug%/plugin.hsh}"
+        hx_enabled "${_hp_plug##*/}" || continue
+    fi
+    _hp_missing="$_hp_missing $_hp_n"
+done
+t_true "the cheat sheet names commands (parsed $(printf '%s\n' $_hp_names | wc -l | tr -d ' '))" \
+    test "$(printf '%s\n' $_hp_names | wc -l)" -ge 40
+t_eq "" "$_hp_missing" "every command the cheat sheet names exists"
+
+# ── guide ───────────────────────────────────────────────────────────────────
+t_head "help: guide"
+
+_hp_docs0="$HX_DOCS"
+HX_DOCS="$T_DIR/docs"
+mkdir -p "$HX_DOCS"
+for _hp_f in tour prompt plugins architecture troubleshooting reference; do
+    printf '# %s\n' "$_hp_f" > "$HX_DOCS/$_hp_f.md"
+done
+t_stub pg
+PAGER=pg
+
+for _hp_t in tour:tour prompt:prompt plugins:plugins arch:architecture architecture:architecture \
+             trouble:troubleshooting troubleshooting:troubleshooting reference:reference ref:reference; do
+    t_eq "pg|$HX_DOCS/${_hp_t#*:}.md" "$(_hp_calls guide "${_hp_t%%:*}")" \
+        "guide ${_hp_t%%:*} opens ${_hp_t#*:}.md in \$PAGER"
+done
+t_stub pg 'exit 5'
+t_rc 5 "guide returns the pager's exit status" guide tour
+t_stub pg
+t_eq "pg|-R|$HX_DOCS/tour.md" "$(PAGER="pg -R"; _hp_calls guide tour)" "guide runs a PAGER that carries its own options"
+t_stub less
+t_eq "less|$HX_DOCS/tour.md" "$(unset PAGER; _hp_calls guide tour)" "guide falls back to less when PAGER is unset"
+
+for _hp_t in "" index help; do
+    _hp_o=$(guide $_hp_t 2>&1)
+    t_has "the written guides" "$_hp_o" "guide ${_hp_t:-with no topic} lists the guides"
+done
+t_eq "" "$(_hp_calls guide)" "and opens nothing"
+t_rc 0 "guide with no topic succeeds" guide
+_hp_o=$(guide)
+for _hp_t in tour prompt plugins arch trouble reference; do
+    t_has "guide $_hp_t" "$_hp_o" "the list offers guide $_hp_t"
+done
+t_has "all $(hx_item_keys_sorted | grep -c .) items" "$_hp_o" "the reference entry counts the live registry"
+t_has "files live in $HX_DOCS" "$_hp_o" "the list says where the guides are"
+t_has "files live in ~/docs" "$(HX_DOCS="$HOME/docs"; guide)" "and shows a directory under HOME as ~"
+
+t_rc 2 "guide rejects a topic it does not have" guide bogus
+t_has "no such guide: bogus" "$(guide bogus 2>&1 >/dev/null)" "and names it on stderr"
+t_has "the written guides" "$(guide bogus 2>/dev/null)" "and lists the ones it has"
+command rm -f "$HX_DOCS/tour.md"
+t_rc 1 "guide fails when the guide file is missing" guide tour
+t_has "missing: $HX_DOCS/tour.md" "$(guide tour 2>&1)" "and names the file"
+t_eq "" "$(_hp_calls guide tour)" "and opens no pager"
+
+HX_DOCS="$_hp_docs0"
+_hp_miss=""
+for _hp_f in tour prompt plugins architecture troubleshooting reference; do
+    [ -r "$HX_DOCS/$_hp_f.md" ] || _hp_miss="$_hp_miss $_hp_f.md"
+done
+t_eq "" "$_hp_miss" "every guide that guide can open ships in \$HX_DOCS"
