@@ -114,16 +114,20 @@ hx_func_doc hx_complete_dynamic "rebuild the completions that depend on the live
 
 hx_complete_flush
 
-# ── KEYBINDINGS — still unavailable ─────────────────────────────────────────
-# `bind` does not exist on any hellish released so far, so none of this can be
-# set from an rc. Kept verbatim so it can be uncommented the day it lands; the
-# capability probe already reports it as builtin_bind.
+# ── KEYBINDINGS ─────────────────────────────────────────────────────────────
+# `bind` is bash's: key bindings and readline settings from an rc. Where the
+# running hellish has it (the capability probe reports builtin_bind), Up/Down
+# already search by prefix (60-history.hsh), and these are yours to add in
+# rc.d/99-local.hsh:
 #
-#   bind '"\e[A": history-search-backward'   # Up  = prefix search
-#   bind '"\e[B": history-search-forward'    # Down= prefix search
 #   bind 'set completion-ignore-case on'
 #   bind '"\C-w": backward-kill-word'
+#   bind -x '"\C-xg": git status -sb'         # a key that runs a command
 #
-# `set -o emacs` / `set -o vi` DO work (20-options.hsh) and are the only line
-# editing control an rc currently has.
-hx_opt_doc "bind" "NOT available: no \`bind\` builtin, so key bindings cannot be set from an rc"
+# On an older hellish there is no `bind`; `set -o emacs` / `set -o vi`
+# (20-options.hsh) are then the only line-editing control an rc has.
+if hx_cap builtin_bind; then
+    hx_opt_doc "bind" "available: key bindings and readline settings can be set from an rc"
+else
+    hx_opt_doc "bind" "NOT available: no \`bind\` builtin, so key bindings cannot be set from an rc"
+fi

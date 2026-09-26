@@ -257,6 +257,44 @@ hx_hook_del precmd _hook_probe
 t_eq "0" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep -c '^_hook_probe$')" "hx_hook_del removes it again"
 t_defined hx_precmd_add "hx_precmd_add still exists for plugins written against it"
 
+# ── history: Up/Down search by what is typed (hellish#136) ──────────────────
+# Which keys run a function is readline's to answer: `bind -q FUNCTION` lists
+# them, so this asks the shell instead of trusting the rc file. Both encodings
+# of each arrow must reach the prefix search, and `off` must leave them alone.
+# Pressing the keys at a real prompt is hellish's own
+# history_prefix_search_test.py; this checks the wiring.
+#
+# readline spells the ESC prefix `\e` from 8.3 on, and `\M-` before that when
+# convert-meta is on (bash 5.2 prints the same), so either spelling counts.
+t_head "history: Up/Down search by what is typed"
+_has_key() {   # _has_key <`bind -q` output> <what follows ESC, e.g. [A>
+    printf '%s\n' "$1" | grep -qF -e "\"\\e$2\"" -e "\"\\M-$2\""
+}
+_bound() {     # _bound <function> <what follows ESC> — is that key one of its keys?
+    _has_key "$(bind -q "$1" 2>/dev/null)" "$2"
+}
+if hx_cap builtin_bind; then
+    t_true "Up (\\e[A) searches history backward by prefix"    _bound history-search-backward '[A'
+    t_true "keypad Up (\\eOA) searches backward too"           _bound history-search-backward 'OA'
+    t_true "Down (\\e[B) searches history forward by prefix"   _bound history-search-forward '[B'
+    t_true "keypad Down (\\eOB) searches forward too"          _bound history-search-forward 'OB'
+    # readline binds Page Up to history-search-backward on its own, so the
+    # query always answers; what `off` must change is only the arrows.
+    _q=$(HX_HIST_PREFIX_SEARCH=off "$(hx_shell_bin)" -c \
+        ". ${HX_RC:-$HOME/.hellishrc} >/dev/null 2>&1; bind -q history-search-backward 2>/dev/null")
+    case "$_q" in
+        *"can be invoked via"*|*"not bound"*) t_ok "with HX_HIST_PREFIX_SEARCH=off the query still answers" ;;
+        *) t_bad "with HX_HIST_PREFIX_SEARCH=off the query still answers — got [$_q]" ;;
+    esac
+    if _has_key "$_q" '[A' || _has_key "$_q" 'OA'; then
+        t_bad "HX_HIST_PREFIX_SEARCH=off leaves Up alone — got [$_q]"
+    else
+        t_ok "HX_HIST_PREFIX_SEARCH=off leaves Up alone"
+    fi
+else
+    t_skip "Up/Down prefix search — this hellish has no \`bind\`"
+fi
+
 # ── documentation commands ──────────────────────────────────────────────────
 t_head "documentation commands"
 [ -n "$(_help_conf_render)" ] && t_ok "help_conf renders" || t_bad "help_conf renders"
