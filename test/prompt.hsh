@@ -1,9 +1,10 @@
-# ~/.hellish/test/prompt.hsh — the theme engine.
+#!/usr/bin/env polish
+# test/prompt.hsh — the theme engine.
 #
 # Sourced by test/run.hsh, which provides t_ok / t_bad / t_eq / t_skip.
 # Runnable on its own too:
 #
-#   hellish ~/.hellish/test/prompt.hsh
+#   polish ~/.polish/test/prompt.hsh
 #
 # ── WHAT THIS IS ACTUALLY GUARDING ──────────────────────────────────────────
 # Three properties of hellish's prompt renderer decide the whole design of
@@ -28,7 +29,11 @@ if ! command -v t_ok >/dev/null 2>&1; then
     t_bad()  { HX_T_FAIL=$((HX_T_FAIL + 1)); printf '  \033[31mFAIL\033[0m %s\n' "$*"; return 0; }
     t_skip() { HX_T_SKIP=$((HX_T_SKIP + 1)); printf '  \033[90mskip\033[0m %s\n' "$*"; return 0; }
     t_eq()   { if [ "$1" = "$2" ]; then t_ok "$3"; else t_bad "$3 — expected [$1], got [$2]"; fi; }
-    . "${HX_RC:-$HOME/.hellishrc}"
+    if [ -z "${HX_RC:-}" ]; then
+        if [ -e "$HOME/.polishrc" ] || [ ! -e "$HOME/.hellishrc" ]; then HX_RC="$HOME/.polishrc"
+        else HX_RC="$HOME/.hellishrc"; fi
+    fi
+    . "$HX_RC"
     _hx_prompt_standalone=1
 fi
 
@@ -75,7 +80,7 @@ if hx_cap print_p; then
     t_eq "50%off" "$(_r '${_probe_pct}')" "doubling a variable's percent makes print -rP render it right"
     unset _probe_var _probe_esc _probe_pct
 else
-    t_skip "renderer contract — this hellish has no \`print -rP\`"
+    t_skip "renderer contract — this shell has no \`print -rP\`"
 fi
 
 # ── registration ────────────────────────────────────────────────────────────
@@ -137,7 +142,7 @@ case "$HX_RET" in
 esac
 
 hx_prompt_expand '{git}{fail}{took}'
-t_eq '\g\S\p' "$HX_RET" "badge tokens become hellish's self-spacing escapes"
+t_eq '\g\S\p' "$HX_RET" "badge tokens become the shell's self-spacing escapes"
 
 hx_prompt_expand 'literal'
 t_eq 'literal' "$HX_RET" "text with no tokens passes through untouched"
@@ -224,7 +229,7 @@ if hx_cap print_p; then
     t_eq "" "$_blank"  "every theme renders something"
     t_eq "" "$_leaked" "no theme leaks an unrendered escape sequence"
 else
-    t_skip "theme rendering — this hellish has no \`print -rP\`"
+    t_skip "theme rendering — this shell has no \`print -rP\`"
 fi
 
 # ── switching ───────────────────────────────────────────────────────────────

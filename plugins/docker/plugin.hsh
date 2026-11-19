@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # plugins/docker/plugin.hsh — container ergonomics.
 hx_plugin docker on dev "docker: container/image overview, shell-in, prune, compose" || return 0
 hx_needs docker

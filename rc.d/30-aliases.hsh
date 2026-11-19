@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # 30-aliases.hsh — aliases.
 #
 # INTERPRETER NOTE: an alias can never be used in the file that DEFINES it —
@@ -103,7 +104,7 @@ alias hxe='conf edit'
 alias hxl='conf list'
 alias hxd='conf doctor'
 hx_alias_doc hxr "reload the whole configuration"
-hx_alias_doc hxe "edit hellish.conf in \$EDITOR"
+hx_alias_doc hxe "edit ${HX_CONF##*/} in \$EDITOR"
 hx_alias_doc hxl "list features and their state"
 hx_alias_doc hxd "configuration health check"
 

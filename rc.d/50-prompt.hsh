@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # 50-prompt.hsh — load the themes and put one on.
 #
 # The engine is lib/prompt.hsh. This module is the part that belongs to a
@@ -8,23 +9,23 @@ hx_feature prompt on ui "prompt: 30 themes, a token language, and the switcher"
 hx_guard prompt || return 0
 
 # The upstream \A animation escape repaints the prompt while the shell is
-# idle, and hellish's own documentation warns it can corrupt some terminals.
+# idle, and the shell's own documentation warns it can corrupt some terminals.
 # Nothing here uses \A; this makes the decision explicit rather than default.
-HELLISH_ANIM=off
-hx_var_doc HELLISH_ANIM "prompt animation: off, and deliberately so (upstream warns it can corrupt terminals)"
+eval "${HX_VARPFX:-POLISH_}ANIM=off"
+hx_var_doc "${HX_VARPFX:-POLISH_}ANIM" "prompt animation: off, and deliberately so (upstream warns it can corrupt terminals)"
 
 # ── themes ──────────────────────────────────────────────────────────────────
 # One file per family, lexical order, 90-local.hsh last so a theme of yours
 # with a shipped name wins.
 HX_THEME_DIR="${HX_THEME_DIR:-$HX_HOME/themes}"
-hx_var_doc HX_THEME_DIR "where prompt themes live (~/.hellish/themes)"
+hx_var_doc HX_THEME_DIR "where prompt themes live ($HX_HOME_SHOWN/themes)"
 hx_load_dir "$HX_THEME_DIR"
 
 # ── compatibility: hx_precmd_add ────────────────────────────────────────────
 #
 # This configuration has always exposed hx_precmd_add, and plugins call it.
-# It is now a front-end to hx_hook_add, which uses hellish's own
-# HELLISH_PRECMD_FUNCS array when the binary has one (2.9+) and falls back to
+# It is now a front-end to hx_hook_add, which uses the shell's own
+# PRECMD_FUNCS array when the binary has one (2.9+) and falls back to
 # the PROMPT_COMMAND dispatch list when it does not.
 #
 # Both paths stay wired at once, and _hx_precmd_run is what keeps that from
@@ -51,22 +52,22 @@ _hx_precmd_run() {
 # HELLISH_PRECMD_FUNCS bought a wasted pipeline round-trip on every prompt to
 # call a function whose first line is `return 0`.
 hx_cap hooks || PROMPT_COMMAND='_hx_precmd_run'
-hx_var_doc PROMPT_COMMAND "the fallback prompt hook; unset when hellish has native HELLISH_PRECMD_FUNCS"
+hx_var_doc PROMPT_COMMAND "the fallback prompt hook; unset when the shell has native ${HX_VARPFX}PRECMD_FUNCS"
 
 # ── apply ───────────────────────────────────────────────────────────────────
-# hellish.conf may name a theme that no longer exists -- an upgrade removed it,
+# The conf file may name a theme that no longer exists -- an upgrade removed it,
 # or it lived in a themes file that got deleted. Falling back to a known-good
 # theme is better than a shell whose PS1 is empty.
 HX_THEME="${HX_THEME:-vault}"
 if ! hx_theme_known "$HX_THEME"; then
-    hx_error_record "unknown theme '$HX_THEME' in hellish.conf; using 'vault'"
+    hx_error_record "unknown theme '$HX_THEME' in ${HX_CONF##*/}; using 'vault'"
     HX_THEME=vault
 fi
 hx_prompt_apply "$HX_THEME" >/dev/null 2>&1
 
 # A prompt the user wrote themselves wins over the theme, and is loaded
 # after it for exactly that reason (`prompt ps1 '<string>'` writes it).
-# Its own file rather than hellish.conf: conf is read with `read -r`,
+# Its own file rather than the conf file: conf is read with `read -r`,
 # which eats the trailing space nearly every PS1 ends with.
 HX_PROMPT_LOCAL="${HX_PROMPT_LOCAL:-$HX_HOME/prompt.local.hsh}"
 [ -r "$HX_PROMPT_LOCAL" ] && . "$HX_PROMPT_LOCAL"

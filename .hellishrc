@@ -1,19 +1,23 @@
-# ~/.hellishrc — loader.
+# ~/.polishrc — loader.
 #
-# This file stays deliberately small. Everything real lives in ~/.hellish/ :
+# This file stays deliberately small. Everything real lives in ~/.polish/ :
 #
 #   lib/          ui core plugin conf prompt                 the framework
 #   rc.d/         10-env … 99-local                          core modules, in order
 #   themes/       30 prompt themes, six families             (prompt list)
 #   plugins/      git devkit jump docker net sentinel forge clean
-#   hellish.conf  which of the above are switched on          (managed by `conf`)
+#   polish.conf   which of the above are switched on          (managed by `conf`)
+#
+# The shell was called hellish before 3.4. An install made then keeps its
+# names -- ~/.hellishrc, ~/.hellish/, hellish.conf -- and this loader finds
+# them: each new name is used when it exists or the old one does not.
 #
 #   help_conf     every alias, function, variable and option, documented
 #   conf list     what is on and off        conf on|off <name> to change it
 #   hxp list      plugins                   forge api        how to write one
 #   prompt list   30 prompt themes          prompt tokens    how to write one
 #
-# hellish sources this file for INTERACTIVE shells only, never for scripts,
+# The shell sources this file for INTERACTIVE shells only, never for scripts,
 # `-c`, or piped input — so nothing here needs an interactivity guard.
 
 # HX_HOME is honoured from the environment rather than hard-coded, which is
@@ -23,29 +27,39 @@
 # HX_CONF and HX_STATE are DERIVED from it, never defaulted with :- , and that
 # is not a style choice. All three are exported, so every child process
 # inherits them -- including a shell started with HX_HOME pointing somewhere
-# else. With `${HX_CONF:-$HX_HOME/hellish.conf}` the inherited value wins, and
+# else. With `${HX_CONF:-$HX_HOME/polish.conf}` the inherited value wins, and
 # a run against a throwaway tree quietly reads and WRITES the real
-# ~/.hellish/state instead. Deriving them makes HX_HOME the single knob it
-# looks like it is.
-HX_HOME="${HX_HOME:-$HOME/.hellish}"
-HX_CONF="$HX_HOME/hellish.conf"
+# ~/.polish/state instead. Deriving them makes HX_HOME the single knob it
+# looks like it is. lib/core.hsh derives them again, with the same rule.
+if [ -z "${HX_HOME:-}" ]; then
+    if [ -d "$HOME/.polish" ] || [ ! -d "$HOME/.hellish" ]; then
+        HX_HOME="$HOME/.polish"
+    else
+        HX_HOME="$HOME/.hellish"
+    fi
+fi
+if [ -e "$HX_HOME/polish.conf" ] || [ ! -e "$HX_HOME/hellish.conf" ]; then
+    HX_CONF="$HX_HOME/polish.conf"
+else
+    HX_CONF="$HX_HOME/hellish.conf"
+fi
 HX_STATE="$HX_HOME/state"
 export HX_HOME HX_CONF HX_STATE
 
-# NOTE: no top-level `return` anywhere in this file. hellish does not treat the
-# interactive rc as a sourced script, so `return` here fails with
-#   hellish: return: can only `return' from a function or sourced script
+# NOTE: no top-level `return` anywhere in this file. The shell does not treat
+# the interactive rc as a sourced script, so `return` here fails with
+#   return: can only `return' from a function or sourced script
 # and leaves $? = 2 on the very first prompt. The whole body is therefore an
 # if/else rather than an early return.
 if [ ! -d "$HX_HOME/lib" ]; then
     # Degrade to a bare but usable shell instead of erroring at every prompt.
-    # Say what to do about it: someone who just deleted ~/.hellish and still
-    # gets hellish wants to know that the shell is the BINARY and the hook
-    # in their login rc, and where the off switch is (hellish issue: "I
-    # deleted every hellish directory and it still comes up").
-    printf 'hellishrc: %s is missing; running unconfigured\n' "$HX_HOME" >&2
-    printf '           restore: curl -fsSL https://raw.githubusercontent.com/Univers42/hellish/main/install.sh | sh\n' >&2
-    printf '           remove hellish for good: sh install.sh --uninstall   (or: touch ~/.hellish-disable)\n' >&2
+    # Say what to do about it: someone who just deleted ~/.polish and still
+    # gets the shell wants to know that the shell is the BINARY and the hook
+    # in their login rc, and where the off switch is (issue: "I deleted
+    # every directory and it still comes up").
+    printf 'polishrc: %s is missing; running unconfigured\n' "$HX_HOME" >&2
+    printf '          restore: curl -fsSL https://raw.githubusercontent.com/Univers42/polish/main/install.sh | sh\n' >&2
+    printf '          remove it for good: sh install.sh --uninstall   (or: touch ~/.polish-disable)\n' >&2
 else
 
     # Reset the per-load registries so `conf reload` is idempotent.
@@ -58,7 +72,7 @@ else
     . "$HX_HOME/lib/plugin.hsh"
     . "$HX_HOME/lib/conf.hsh"
 
-    # 2. what this hellish can actually do.
+    # 2. what this shell can actually do.
     #    Cached against the binary's identity, so this costs one file read
     #    per shell and re-probes only after `update --now` replaces the
     #    binary. Everything downstream asks hx_cap instead of assuming a
@@ -70,7 +84,7 @@ else
     # 3. saved on/off state — BEFORE any module, so hx_guard sees it
     hx_conf_load
 
-    # 4. hellish.conf may set HX_COLOR / HX_NERD / HX_UNICODE, and the
+    # 4. the conf file may set HX_COLOR / HX_NERD / HX_UNICODE, and the
     #    palette and glyph tables were built before it was read.
     hx_color_init
     hx_glyph_init
@@ -89,7 +103,7 @@ else
 
     # 9. report anything that went wrong, once, quietly
     if [ "${#HX_ERRORS[@]}" -gt 0 ]; then
-        printf '%shellishrc: %s problem(s) during load — run: conf doctor%s\n' \
+        printf '%spolishrc: %s problem(s) during load — run: conf doctor%s\n' \
             "${HX_YEL}" "${#HX_ERRORS[@]}" "${HX_R}" >&2
     fi
 

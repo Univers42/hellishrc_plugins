@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # plugins/net/plugin.hsh — networking answers without remembering flag soup.
 hx_plugin net on net "net: ports, local/public IP, DNS, HTTP probing, port waiting" || return 0
 hx_needs ss curl dig

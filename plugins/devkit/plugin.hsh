@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # plugins/devkit/plugin.hsh — one set of verbs for every project type.
 #
 # The idea: you should not have to remember whether this repo wants `npm test`,

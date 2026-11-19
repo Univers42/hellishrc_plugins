@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # 20-options.hsh — shell options (set -o) and behaviour knobs (shopt / pretty).
 #
 # Every line below was checked against the running binary, not against the
@@ -96,4 +97,4 @@ hx_opt_doc "cd-spell"          "cd tolerates a one-character typo"
 # are shell variables, not exported ones, exactly as in bash: a child measures
 # its own terminal. So anything here that needs the width reads $COLUMNS and
 # only falls back to forking `tput cols` when it is unset (see hx_cols).
-hx_var_doc COLUMNS "maintained by hellish in interactive shells; hx_cols reads it, tput only as fallback"
+hx_var_doc COLUMNS "maintained by the shell in interactive shells; hx_cols reads it, tput only as fallback"

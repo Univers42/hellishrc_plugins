@@ -84,6 +84,7 @@ protected() {
         "$H"/Pictures|"$H"/Pictures/*|"$H"/Videos/*)     return 0 ;;
         "$H"/.local/share/keyrings*)                     return 0 ;;
         "$H"/.config/dconf/user)                         return 0 ;;
+        "$H"/.polish|"$H"/.polish/*)                     return 0 ;;
         "$H"/.hellish|"$H"/.hellish/*)                   return 0 ;;
         "$H"|"$H"/|"$H"/.config|"$H"/.local|"$H"/.cache) return 0 ;;
     esac

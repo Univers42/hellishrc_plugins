@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # 10-env.hsh — environment, PATH hygiene, editor/pager defaults.
 hx_feature env on core "environment variables, PATH hygiene, editor and pager defaults"
 hx_guard env || return 0
@@ -96,4 +97,4 @@ export XDG_STATE_HOME="${XDG_STATE_HOME:-$HOME/.local/state}"
 # was removed two releases ago.
 hx_var_doc HX_COLOR     "colour policy: auto | always | never"
 hx_var_doc HX_HIST_SIZE "history size kept in memory and on disk"
-hx_var_doc HX_HOME      "root of this configuration (~/.hellish)"
+hx_var_doc HX_HOME      "root of this configuration ($HX_HOME_SHOWN)"

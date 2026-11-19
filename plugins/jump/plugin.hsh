@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # plugins/jump/plugin.hsh — frecency directory jumping (the `z` idea).
 #
 # Every directory you cd into is scored. `j <fragment>` jumps to the best match.
@@ -5,7 +6,7 @@
 # multiplies by a recency factor so somewhere you used 40 times last year loses
 # to somewhere you used 5 times today.
 #
-# State: ~/.hellish/state/jump.db, one record per line:  score|last_epoch|path
+# State: $HX_HOME/state/jump.db, one record per line:  score|last_epoch|path
 hx_plugin jump on nav "jump: frecency directory jumping, bookmarks, back-stack" || return 0
 
 HX_JUMP_DB="${HX_JUMP_DB:-$HX_STATE/jump.db}"

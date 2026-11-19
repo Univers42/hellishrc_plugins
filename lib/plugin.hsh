@@ -1,7 +1,10 @@
-# ~/.hellish/lib/plugin.hsh — plugin contract + manager.
+#!/usr/bin/env polish
+# lib/plugin.hsh — plugin contract + manager.
 #
 # ── THE PLUGIN CONTRACT ─────────────────────────────────────────────────────
-# A plugin is a directory ~/.hellish/plugins/<name>/ containing plugin.hsh.
+# A plugin is a directory $HX_HOME/plugins/<name>/ holding its entry file:
+# plugin.hsh, plugin.sh, plugin.zsh, or a dot-less `plugin` whose shebang
+# names the shell (the same rule as rc.d modules: hx_is_module, lib/core.hsh).
 # Its first executable line MUST be:
 #
 #     hx_plugin <name> <on|off default> <group> "<one-line description>" || return 0
@@ -15,11 +18,23 @@
 #   * document every alias/function it defines with hx_alias_doc / hx_func_doc
 #   * prefix private helpers with _<name>_ to avoid collisions
 #
-# `return` from a sourced file is supported by hellish (verified).
+# `return` from a sourced file is supported by the shell (verified).
 
 HX_PLUGIN_DIR="${HX_PLUGIN_DIR:-$HX_HOME/plugins}"
 declare -A HX_PLUG_DESC HX_PLUG_GROUP HX_PLUG_NEEDS HX_PLUG_MISSING
 HX_PLUG_ORDER=()
+
+# hx_plugin_entry <dir>  -> 0 and HX_ENTRY=<file> when <dir> holds an entry
+# file; first match wins, so a plugin.hsh beats a stray plugin.sh beside it.
+hx_plugin_entry() {
+    local e
+    for e in plugin.hsh plugin.sh plugin.zsh plugin; do
+        hx_is_module "${1%/}/$e" || continue
+        HX_ENTRY="${1%/}/$e"
+        return 0
+    done
+    return 1
+}
 
 # hx_plugin <name> <default> <group> <desc>  -> 0 if enabled, 1 if disabled
 hx_plugin() {
@@ -60,9 +75,9 @@ hx_load_plugins() {
     [ -d "$HX_PLUGIN_DIR" ] || return 0
     for d in "$HX_PLUGIN_DIR"/*/; do
         [ -d "$d" ] || continue               # no nullglob: guard by hand
-        [ -r "$d/plugin.hsh" ] || continue
+        hx_plugin_entry "$d" || continue
         name="${d%/}"; name="${name##*/}"
-        hx_source "$d/plugin.hsh"
+        hx_source "$HX_ENTRY"
     done
     HX_CURRENT_MODULE=core
     return 0

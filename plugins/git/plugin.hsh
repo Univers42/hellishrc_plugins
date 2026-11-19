@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # plugins/git/plugin.hsh — git ergonomics beyond the short aliases.
 hx_plugin git on vcs "git: repo status, safe undo, wip commits, branch cleanup" || return 0
 hx_needs git

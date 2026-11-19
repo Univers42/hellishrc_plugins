@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # themes/30-frames.hsh — drawn prompts.
 #
 # These spend vertical space to buy horizontal space. The information goes on
@@ -9,9 +10,9 @@
 # Every box character has an ASCII twin (see hx_glyph_init in lib/ui.hsh), so
 # these degrade to +--+ rather than to a row of question marks.
 
-# box — hellish's own built-in theme, reached by the \B escape. One character
+# box — the shell's own built-in theme, reached by the \B escape. One character
 # of PS1 produces the whole thing: frame, git, timing, jobs, clock, in C.
-hx_theme box frames '' "hellish's built-in two-row theme, from the \\B escape" \
+hx_theme box frames '' "the shell's built-in two-row theme, from the \\B escape" \
     '{builtin}'
 
 # vault — a rounded frame. The path is repository-relative (see {path}), and
