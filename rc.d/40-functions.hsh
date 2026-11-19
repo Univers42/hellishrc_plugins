@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # 40-functions.hsh — general-purpose functions, plus shims for interpreter gaps.
 #
 # Everything here is documented with hx_func_doc, which is what puts it in
@@ -400,7 +401,7 @@ sysinfo() {
     hx_head "$(hostname 2>/dev/null)"
     hx_kv "os"      "$(sed -n 's/^PRETTY_NAME="\(.*\)"/\1/p' /etc/os-release 2>/dev/null || uname -s)"
     hx_kv "kernel"  "$(uname -r)"
-    hx_kv "shell"   "hellish $(hx_cap_get version)  at $(hx_shell_bin)"
+    hx_kv "shell"   "$(hx_shell_name) $(hx_cap_get version)  at $(hx_shell_bin)"
     hx_kv "uptime"  "$(uptime -p 2>/dev/null || echo '?')"
     hx_kv "cpu"     "$(nproc 2>/dev/null || echo '?') cores"
     hx_kv "memory"  "$(free -h 2>/dev/null | awk '/^Mem:/ { print $3 " used of " $2 }')"
@@ -412,7 +413,7 @@ hx_func_doc sysinfo "this machine, in ten lines"
 
 # ═══ CONFIG SELF-SERVICE ════════════════════════════════════════════════════
 hxcd() { cd "$HX_HOME" && pwd; }
-hx_func_doc hxcd "cd to the configuration directory (~/.hellish)"
+hx_func_doc hxcd "cd to the configuration directory ($HX_HOME_SHOWN)"
 
 hxnew() {
     hx_have forge_new && { forge_new "$@"; return $?; }

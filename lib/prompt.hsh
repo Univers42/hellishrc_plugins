@@ -1,4 +1,5 @@
-# ~/.hellish/lib/prompt.hsh — the prompt theme engine.
+#!/usr/bin/env polish
+# lib/prompt.hsh — the prompt theme engine.
 #
 # ── WHY THEMES ARE DATA, NOT CODE ───────────────────────────────────────────
 #
@@ -691,7 +692,7 @@ _prompt_help() {
     hx_kv "prompt palette [k v]" "read or restyle the five palette colours"
     hx_kv "prompt colors"       "the 256-colour ramp, for picking numbers"
     hx_kv "prompt nerd on|off"  "powerline glyphs (needs a patched font)"
-    hx_kv "prompt doctor"       "what this terminal and this hellish support"
+    hx_kv "prompt doctor"       "what this terminal and this shell support"
     hx_note "themes live in $(printf '%s' "${HX_HOME/#$HOME/\~}/themes")  —  'theme' is the same command"
 }
 
@@ -887,11 +888,11 @@ _prompt_edit() {
     hx_info "reload with: prompt reload"
 }
 
-# _prompt_file <name> — which themes/*.hsh defines this theme.
+# _prompt_file <name> — which theme file (any hx_is_module name) defines it.
 _prompt_file() {
     local n="$1" f
-    for f in "$HX_HOME/themes"/*.hsh; do
-        [ -r "$f" ] || continue
+    for f in "$HX_HOME/themes"/*; do
+        hx_is_module "$f" || continue
         if grep -q "^hx_theme $n " "$f" 2>/dev/null; then printf '%s' "$f"; return 0; fi
     done
     return 1
@@ -926,7 +927,8 @@ _prompt_new() {
     [ -n "$n" ] || { hx_err "usage: prompt new <name> [description]"; return 2; }
     case "$n" in *[!a-z0-9_-]*) hx_err "theme names: lowercase, digits, _ and -"; return 2 ;; esac
     hx_theme_known "$n" && { hx_err "a theme called '$n' already exists"; return 1; }
-    [ -f "$f" ] || printf '# themes/90-local.hsh — yours. Never overwritten by an upgrade.\n' > "$f"
+    [ -f "$f" ] || printf '#!/usr/bin/env %s\n# themes/90-local.hsh — yours. Never overwritten by an upgrade.\n' \
+        "$(hx_shell_name)" > "$f"
     {
         printf '\n# %s\n' "$desc"
         printf "hx_theme %s local '' '%s' \\\\\n" "$n" "$desc"
@@ -954,11 +956,11 @@ _prompt_tokens() {
     hx_kv "{cwdt:40}"        "truncated to 40 columns, elided at the front"
     hx_kv "{path}"           "smart: repository-relative inside a repo  (needs: path)"
     hx_sub "badges — each renders nothing when it has nothing to say"
-    hx_kv "{git}"            "branch, + '*' when dirty. Free: hellish renders it"
+    hx_kv "{git}"            "branch, + '*' when dirty. Free: the shell renders it"
     hx_kv "{fail}"           "$HX_G_BAD and the exit code, after a failure"
     hx_kv "{took}"           "how long the last command ran, once it passes 2s"
     hx_kv "{jobsb}"          "background job count, while there are any"
-    hx_kv "{upd}"            "a pending hellish release"
+    hx_kv "{upd}"            "a pending shell release"
     hx_sub "facts"
     hx_kv "{user} {host}"    "and {jobs} {time} {secs} {date} {day} {nl} {sp}"
     hx_sub "computed segments — list them in the theme's 'needs' field"
@@ -1027,7 +1029,7 @@ _prompt_nerd() {
 
 _prompt_doctor() {
     hx_head "prompt doctor"
-    hx_kv "hellish"        "$(hx_cap_get version)  at $(hx_shell_bin)"
+    hx_kv "shell"          "$(hx_cap_get version)  at $(hx_shell_bin)"
     hx_kv "themes"         "$(hx_theme_names | grep -c .) registered, active: ${HX_THEME:-<none>}"
     hx_kv "colour depth"   "$(hx_color_depth)   (TERM=$TERM COLORTERM=${COLORTERM:-unset})"
     hx_kv "unicode"        "${HX_UNICODE:-0}   (LANG=${LANG:-unset})"
@@ -1038,12 +1040,12 @@ _prompt_doctor() {
         "$( [ "$2" = 1 ] && printf '%s%s%s' "$HX_GRN" "$HX_G_OK" "$HX_R" || printf '%s%s%s' "$HX_YEL" "$HX_G_BAD" "$HX_R")" \
         "$HX_B" "$1" "$HX_R" "$3"; }
     _pd "percent language"  1 "%F{n} %K{n} %B %~ %(?..) — verified"
-    _pd "hellish badges"    1 "\\g \\S \\p \\J \\U \\B — self-spacing"
+    _pd "shell badges"      1 "\\g \\S \\p \\J \\U \\B — self-spacing"
     _pd "right prompt"      "$(hx_cap rprompt && echo 1 || echo 0)" "RPROMPT, right-aligned by the shell"
     _pd "print -rP preview" "$(hx_cap print_p && echo 1 || echo 0)" "renders previews — but re-scans variables, so segments are escaped first"
-    _pd "precmd hooks"      "$(hx_cap hooks && echo 1 || echo 0)" "HELLISH_PRECMD_FUNCS drives the segments"
+    _pd "precmd hooks"      "$(hx_cap hooks && echo 1 || echo 0)" "${HX_VARPFX}PRECMD_FUNCS drives the segments"
     _pd "\$( ) in a prompt"  0 "not expanded — segments use \${VAR} instead"
-    _pd "PS2 continuation"  0 "hellish always shows '> ' — themes do not set it"
+    _pd "PS2 continuation"  0 "the shell always shows '> ' — themes do not set it"
     printf '\n%s  per-prompt cost of the active theme%s\n' "$HX_ORA" "$HX_R"
     if [ -z "${HX_PS_NEEDS// /}" ]; then
         printf '    %snothing: the renderer does all of it%s\n' "$HX_GRN" "$HX_R"

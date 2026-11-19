@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # plugins/clean/plugin.hsh — reclaim regenerable space in $HOME.
 #
 # The work is done by bin/hx-clean, which is a bash script rather than a

@@ -4,8 +4,8 @@ Four commands answer most of it. Run them in this order.
 
 ```sh
 conf doctor      load errors, missing dependencies, known interpreter gaps
-conf caps        what your hellish can actually do
-prompt doctor    what your terminal and hellish support for prompts
+conf caps        what your shell can actually do
+prompt doctor    what your terminal and polish support for prompts
 hxp doctor       plugins missing their external commands
 ```
 
@@ -14,15 +14,15 @@ hxp doctor       plugins missing their external commands
 ## My shell prints an error at every prompt
 
 ```
-hellishrc: 2 problem(s) during load — run: conf doctor
+polishrc: 2 problem(s) during load — run: conf doctor
 ```
 
 `conf doctor` lists them under **load errors**. The usual causes:
 
-- a file in `rc.d/` or a plugin has a syntax error — `hellish -n <file>` tells
+- a file in `rc.d/` or a plugin has a syntax error — `polish -n <file>` tells
   you the line
-- `hellish.conf` names a feature that no longer exists
-- a theme named in `hellish.conf` was deleted; the loader falls back to
+- `polish.conf` names a feature that no longer exists
+- a theme named in `polish.conf` was deleted; the loader falls back to
   `vault` and records it
 
 ## My prompt is broken or empty
@@ -52,7 +52,7 @@ codepoints that only exist in a patched font. Turn them off:
 prompt nerd off
 ```
 
-**My prompt shows `$(something)` literally.** hellish never expands command
+**My prompt shows `$(something)` literally.** polish never expands command
 substitution in a prompt. Use a computed segment instead — see
 [the prompt guide](prompt.md#rules-that-will-bite-you).
 
@@ -97,7 +97,7 @@ check.
 conf caps | grep complete
 ```
 
-If `builtin_complete` is `✘`, your hellish predates the `complete` builtin and
+If `builtin_complete` is `✘`, your shell predates the `complete` builtin and
 the wordlists are recorded but not installed. They will install themselves the
 day you upgrade — nothing to change.
 
@@ -110,21 +110,21 @@ conf on completion && conf reload
 
 ## `@(a|b)` is a syntax error even though `shopt` says extglob is on
 
-That is a real hellish bug, not your code. `shopt -s extglob` is accepted and
+That is a real polish bug, not your code. `shopt -s extglob` is accepted and
 `shopt extglob` then reports `on`, but the pattern operators are a **lexer**
 error — so the file containing them never parses, and you cannot guard against
 it with `shopt -q` from inside that same file.
 
 Use a `case` with ordinary patterns, or `grep -E`. Filed upstream as
-[hellish#134](https://github.com/Univers42/hellish/issues/134).
+[polish#134](https://github.com/Univers42/polish/issues/134).
 
-## My `~/.hellish` edits keep disappearing
+## My `~/.polish` edits keep disappearing
 
 Only two files are yours and are never overwritten by an upgrade:
 
 ```
-~/.hellish/rc.d/99-local.hsh      your aliases, functions, overrides
-~/.hellish/themes/90-local.hsh    your prompt themes
+~/.polish/rc.d/99-local.hsh       your aliases, functions, overrides
+~/.polish/themes/90-local.hsh     your prompt themes
 ```
 
 Anything else in `lib/`, `rc.d/`, `themes/` or `plugins/` is framework and
@@ -132,7 +132,7 @@ Anything else in `lib/`, `rc.d/`, `themes/` or `plugins/` is framework and
 above — `99-local.hsh` loads last, so it wins over everything.
 
 For secrets or work-only settings that should not be in version control,
-`99-local.hsh` already sources `~/.hellish/private.hsh` when it exists.
+`99-local.hsh` already sources `~/.polish/private.hsh` when it exists.
 
 ## I want to check something without touching my real config
 
@@ -140,25 +140,25 @@ For secrets or work-only settings that should not be in version control,
 
 ```sh
 sh install.sh --home /tmp/sbox --plugins all
-HX_HOME=/tmp/sbox/.hellish HX_RC=/tmp/sbox/.hellishrc \
-    hellish /tmp/sbox/.hellish/test/run.hsh
+HX_HOME=/tmp/sbox/.polish HX_RC=/tmp/sbox/.polishrc \
+    polish /tmp/sbox/.polish/test/run.hsh
 ```
 
 ## My whole shell is broken and I cannot fix it from inside it
 
-hellish is your login shell, so a broken `lib/*.hsh` means every new terminal
+polish is your login shell, so a broken `lib/*.hsh` means every new terminal
 is broken. The escape hatches, in increasing order of permanence:
 
 ```sh
-HELLISH_NO_EXEC=1 <terminal>     one session in your previous shell
-touch ~/.hellish-disable         every new session, until you delete it
+POLISH_NO_EXEC=1 <terminal>      one session in your previous shell
+touch ~/.polish-disable          every new session, until you delete it
 ```
 
-Both are checked by the block in `~/.zshrc`, before it execs hellish. From
+Both are checked by the block in `~/.zshrc`, before it execs polish. From
 another machine, since your passwd shell is untouched:
 
 ```sh
-ssh you@host 'touch ~/.hellish-disable'
+ssh you@host 'touch ~/.polish-disable'
 ```
 
 To reinstall the framework over a broken tree:
@@ -175,10 +175,10 @@ That keeps `99-local.hsh` and `90-local.hsh` and replaces everything else.
 conf doctor          load errors and gaps
 conf modules         what actually loaded, in order
 conf profile         reload with per-module timings — finds the slow one
-HX_DEBUG=1 hellish   verbose load
-hellish -n <file>    syntax-check one file without running it
+HX_DEBUG=1 polish    verbose load
+polish -n <file>     syntax-check one file without running it
 ```
 
-`hellish ~/.hellish/test/run.hsh` runs 169 assertions against your live
+`polish ~/.polish/test/run.hsh` runs 169 assertions against your live
 configuration and is the fastest way to find out whether the problem is yours
 or the framework's.

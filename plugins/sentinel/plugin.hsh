@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # plugins/sentinel/plugin.hsh — the "what is this machine doing" dashboard.
 hx_plugin sentinel on sys "sentinel: system dashboard, disk/load/memory watch, repo scan" || return 0
 

@@ -1,4 +1,5 @@
-# ~/.hellish/lib/core.hsh — registry, capabilities, toggle engine, module loader.
+#!/usr/bin/env polish
+# lib/core.hsh — registry, capabilities, toggle engine, module loader.
 #
 # ── WHY A REGISTRY EXISTS ───────────────────────────────────────────────────
 # Every module *declares* what it provides via hx_feature/hx_item, and that
@@ -19,12 +20,27 @@
 # subscripted writes is why hx_key_ok can guarantee no key is ever re-parsed.
 
 HX_VERSION="2.0.0"
-# Derived, not defaulted: see the note in ~/.hellishrc. These three are
+# Derived, not defaulted: see the note in the loader. These three are
 # exported, so an inherited HX_CONF would otherwise outrank a fresh HX_HOME
 # and point a sandboxed load back at the real configuration.
-HX_HOME="${HX_HOME:-$HOME/.hellish}"
-HX_CONF="$HX_HOME/hellish.conf"
+#
+# The shell was renamed hellish -> polish in 3.4.0. Each name below is picked
+# the way the shell picks ~/.polishrc over ~/.hellishrc: the new name when it
+# exists or the legacy one does not, so a fresh install sees only "polish"
+# and an existing ~/.hellish (with its hellish.conf) keeps working untouched.
+#   hx_brand_pick <var> <new> <legacy>   (assigns, so startup forks nothing)
+hx_brand_pick() {
+    if [ -e "$2" ] || [ ! -e "$3" ]; then eval "$1=\$2"; else eval "$1=\$3"; fi
+}
+[ -n "${HX_HOME:-}" ] || hx_brand_pick HX_HOME "$HOME/.polish" "$HOME/.hellish"
+hx_brand_pick HX_CONF "$HX_HOME/polish.conf" "$HX_HOME/hellish.conf"
+[ -n "${HX_RC:-}" ] || hx_brand_pick HX_RC "$HOME/.polishrc" "$HOME/.hellishrc"
 HX_STATE="$HX_HOME/state"
+# ~/.polish rather than /home/you/.polish, for help text and messages.
+case "$HX_HOME" in
+    "$HOME"/*) HX_HOME_SHOWN="~/${HX_HOME#"$HOME"/}" ;;
+    *)         HX_HOME_SHOWN="$HX_HOME" ;;
+esac
 [ -d "$HX_STATE" ] || mkdir -p "$HX_STATE" 2>/dev/null
 
 # --- registries -------------------------------------------------------------
@@ -65,29 +81,48 @@ hx_now_ms() {
 # linting plugins against rules that no longer applied.
 #
 # So capability is now DETECTED, once, and cached. The probe costs a few
-# hundred milliseconds and runs again only when the hellish binary changes,
+# hundred milliseconds and runs again only when the shell binary changes,
 # which is what `update --now` does. Everything downstream -- forge lint,
 # conf doctor, the completion module, the prompt engine -- asks hx_cap instead
 # of assuming a version.
 #
-#   hx_cap <name>          true when the running hellish has the capability
+#   hx_cap <name>          true when the running shell has the capability
 #   hx_cap_all             print every probed capability and its verdict
 #   hx_caps_refresh        force a re-probe (after `update --now`)
 
-# hx_shell_bin — the hellish this configuration runs in. Never assumed to be
-# /usr/bin/hellish: a user-mode install (every 42 machine) lives in
+# hx_shell_bin — the shell binary this configuration runs in. Never assumed
+# to be in /usr/bin: a user-mode install (every 42 machine) lives in
 # ~/.local/bin, and code that hard-coded /usr/bin reported the version as
 # blank and failed every `forge lint` there.
+#
+# The RUNNING binary comes first: a machine can hold an old hellish beside a
+# new polish, and capabilities probed on the wrong one would arm hooks the
+# running shell never calls.
+# Caveat: /proc/$$/exe is Linux-only; elsewhere the PATH lookup answers,
+# and it can name a different build than the one running.
 hx_shell_bin() {
-    if [ -n "${HELLISH_BIN:-}" ] && [ -x "$HELLISH_BIN" ]; then
-        printf '%s' "$HELLISH_BIN"
-    elif command -v hellish >/dev/null 2>&1; then
-        command -v hellish
-    elif [ -n "${SHELL:-}" ] && [ -x "$SHELL" ]; then
+    local b
+    for b in "${POLISH_BIN:-}" "${HELLISH_BIN:-}"; do
+        [ -n "$b" ] && [ -x "$b" ] && { printf '%s' "$b"; return 0; }
+    done
+    b="$(readlink /proc/$$/exe 2>/dev/null)"
+    case "${b##*/}" in polish|hellish) printf '%s' "$b"; return 0 ;; esac
+    for b in polish hellish; do
+        command -v "$b" >/dev/null 2>&1 && { command -v "$b"; return 0; }
+    done
+    if [ -n "${SHELL:-}" ] && [ -x "$SHELL" ]; then
         printf '%s' "$SHELL"
     else
-        printf '%s' /usr/bin/hellish
+        printf '%s' /usr/bin/polish
     fi
+}
+
+# hx_shell_name — the name to print for the running shell: polish, or
+# hellish on a binary from before the rename; never a $SHELL fallback's name.
+hx_shell_name() {
+    local b; b="$(hx_shell_bin)"; b="${b##*/}"
+    case "$b" in polish|hellish) ;; *) b=polish ;; esac
+    printf '%s' "$b"
 }
 
 # hx_ver_ge <have> <want> — dotted-version comparison, no sort -V dependency.
@@ -173,8 +208,11 @@ _hx_caps_probe() {
     # Prompt engine features. These cannot be exercised without a terminal,
     # so they are read off the binary itself: the symbol is present exactly
     # when the feature is compiled in.
-    if strings "$bin" 2>/dev/null | grep -qx 'HELLISH_PRECMD_FUNCS'; then
-        printf 'hooks=1\n'; else printf 'hooks=0\n'; fi
+    # 3.4 (polish) resolves its knobs as POLISH_<x>, then HELLISH_<x>, so
+    # the hook list is stored as a bare PRECMD_FUNCS beside the two prefixes.
+    tmp="$(strings "$bin" 2>/dev/null | grep -xE 'HELLISH_PRECMD_FUNCS|PRECMD_FUNCS|POLISH_')"
+    case "$tmp" in *PRECMD_FUNCS*) printf 'hooks=1\n' ;; *) printf 'hooks=0\n' ;; esac
+    case "$tmp" in *POLISH_*) printf 'var_prefix=POLISH_\n' ;; *) printf 'var_prefix=HELLISH_\n' ;; esac
     if strings "$bin" 2>/dev/null | grep -qx 'RPROMPT'; then
         printf 'rprompt=1\n'; else printf 'rprompt=0\n'; fi
 
@@ -194,12 +232,14 @@ _hx_caps_probe() {
 # hx_caps_load — read the cache, or probe and write it.
 #
 # The cache is keyed on the binary's identity, not on a version string: a
-# locally built hellish reports the same version as the release it came from
-# and would otherwise serve a stale verdict.
+# locally built shell reports the same version as the release it came from
+# and would otherwise serve a stale verdict. The leading probe version makes
+# a cache written by an older probe (no var_prefix, the 3.3 hooks test) stale
+# even when the binary did not change.
 hx_caps_load() {
     local cache="$HX_STATE/capabilities" bin key have line k v
     bin="$(hx_shell_bin)"
-    key="$(stat -c '%Y:%s' "$bin" 2>/dev/null || echo unknown)"
+    key="p2:$(stat -c '%Y:%s' "$bin" 2>/dev/null || echo unknown)"
     if [ "${1:-}" != "-f" ] && [ -r "$cache" ]; then
         read -r have < "$cache" 2>/dev/null
         if [ "$have" = "#key $key" ]; then
@@ -207,6 +247,7 @@ hx_caps_load() {
                 case "$k" in ''|'#'*) continue ;; esac
                 hx_key_ok "$k" && hx_aset HX_CAP "$k" "$v"
             done < "$cache"
+            HX_VARPFX="${HX_CAP[var_prefix]:-HELLISH_}"
             return 0
         fi
     fi
@@ -218,6 +259,7 @@ hx_caps_load() {
         case "$k" in ''|'#'*) continue ;; esac
         hx_key_ok "$k" && hx_aset HX_CAP "$k" "$v"
     done < "$cache" 2>/dev/null
+    HX_VARPFX="${HX_CAP[var_prefix]:-HELLISH_}"
     return 0
 }
 
@@ -238,8 +280,9 @@ hx_cap_all() {
 
 # ── HOOKS ───────────────────────────────────────────────────────────────────
 #
-# hellish 2.9 grew two hook arrays of its own -- HELLISH_PRECMD_FUNCS before
-# each prompt, HELLISH_PREEXEC_FUNCS before each typed line, with the line as
+# hellish 2.9 grew two hook arrays of its own -- PRECMD_FUNCS before each
+# prompt, PREEXEC_FUNCS before each typed line (POLISH_ or HELLISH_ prefixed,
+# see _hx_hook_append), with the line as
 # $1 -- and they are the right mechanism: arrays of function names compose,
 # where PROMPT_COMMAND (one string) and `trap ... DEBUG` (one handler) do not.
 #
@@ -249,6 +292,15 @@ hx_cap_all() {
 # hx_hook_add and never has to know which.
 HX_PRECMD_FUNCS=""
 HX_PREEXEC_FUNCS=""
+
+# The shell's own list is POLISH_<x> on 3.4+ and HELLISH_<x> before it
+# (HX_VARPFX, probed); these two write whichever this binary reads.
+#   _hx_hook_append <PRECMD_FUNCS|PREEXEC_FUNCS> <function>
+#   _hx_hook_set    <PRECMD_FUNCS|PREEXEC_FUNCS> <names>
+_hx_hook_append() {
+    eval "${HX_VARPFX:-HELLISH_}$1=\"\${${HX_VARPFX:-HELLISH_}$1:-} \$2\""
+}
+_hx_hook_set() { eval "${HX_VARPFX:-HELLISH_}$1=\$2"; }
 
 # hx_hook_add [precmd|preexec] <function>
 hx_hook_add() {
@@ -260,12 +312,12 @@ hx_hook_add() {
         precmd)
             case " $HX_PRECMD_FUNCS " in *" $fn "*) return 0 ;; esac
             HX_PRECMD_FUNCS="$HX_PRECMD_FUNCS $fn"
-            hx_cap hooks && HELLISH_PRECMD_FUNCS="${HELLISH_PRECMD_FUNCS:-} $fn"
+            hx_cap hooks && _hx_hook_append PRECMD_FUNCS "$fn"
             ;;
         preexec)
             case " $HX_PREEXEC_FUNCS " in *" $fn "*) return 0 ;; esac
             HX_PREEXEC_FUNCS="$HX_PREEXEC_FUNCS $fn"
-            hx_cap hooks && HELLISH_PREEXEC_FUNCS="${HELLISH_PREEXEC_FUNCS:-} $fn"
+            hx_cap hooks && _hx_hook_append PREEXEC_FUNCS "$fn"
             ;;
     esac
     return 0
@@ -280,11 +332,11 @@ hx_hook_del() {
     if [ "$when" = precmd ]; then
         for f in $HX_PRECMD_FUNCS; do [ "$f" = "$fn" ] || out="$out $f"; done
         HX_PRECMD_FUNCS="$out"
-        hx_cap hooks && HELLISH_PRECMD_FUNCS="$out"
+        hx_cap hooks && _hx_hook_set PRECMD_FUNCS "$out"
     else
         for f in $HX_PREEXEC_FUNCS; do [ "$f" = "$fn" ] || out="$out $f"; done
         HX_PREEXEC_FUNCS="$out"
-        hx_cap hooks && HELLISH_PREEXEC_FUNCS="$out"
+        hx_cap hooks && _hx_hook_set PREEXEC_FUNCS "$out"
     fi
     return 0
 }
@@ -293,7 +345,7 @@ hx_hooks_list() {
     hx_head "hooks"
     hx_kv "before each prompt"  "${HX_PRECMD_FUNCS:-(none)}"
     hx_kv "before each command" "${HX_PREEXEC_FUNCS:-(none)}"
-    hx_kv "mechanism" "$(hx_cap hooks && echo 'native HELLISH_*_FUNCS arrays' || echo 'PROMPT_COMMAND dispatch (no native hooks)')"
+    hx_kv "mechanism" "$(hx_cap hooks && echo "native ${HX_VARPFX}*_FUNCS arrays" || echo 'PROMPT_COMMAND dispatch (no native hooks)')"
     printf '\n'
 }
 
@@ -306,7 +358,7 @@ hx_feature() {
     hx_aset HX_FEAT_DEFAULT "$name" "$def"
     hx_aset HX_FEAT_GROUP   "$name" "$group"
     hx_aset HX_FEAT_DESC    "$name" "$*"
-    # A value already parsed out of hellish.conf always wins over the default.
+    # A value already parsed out of the conf file always wins over the default.
     if [ -z "${HX_FEAT_STATE[$name]+set}" ]; then
         hx_aset HX_FEAT_STATE "$name" "$def"
     fi
@@ -351,7 +403,7 @@ hx_conf_load() {
             ''|'#'*) continue ;;
             feature) [ -n "$a" ] && hx_aset HX_FEAT_STATE "$a" "$b" ;;
             set)     [ -n "$a" ] && hx_key_ok "$a" && eval "$a=\"\$b\"" ;;
-            *)       hx_error_record "hellish.conf: unknown directive '$kind'" ;;
+            *)       hx_error_record "${HX_CONF##*/}: unknown directive '$kind'" ;;
         esac
     done < "$HX_CONF"
     return 0
@@ -360,7 +412,7 @@ hx_conf_load() {
 hx_conf_save() {
     local tmp="$HX_CONF.tmp.$$" name
     {
-        printf '# ~/.hellish/hellish.conf\n'
+        printf '# %s/%s\n' "$HX_HOME_SHOWN" "${HX_CONF##*/}"
         printf '# Written by `conf save`. Hand-editing is fine: one directive per line.\n'
         printf '#   feature <name> <on|off>   toggle a module or plugin\n'
         printf '#   set     <VAR> <value>     set a configuration variable\n'
@@ -403,22 +455,72 @@ hx_source() {
     return 0
 }
 
-# hx_load_dir <dir> — source *.hsh and *.zsh in lexical order (00-, 10-, ...).
-# A .zsh module is read by hellish in its zsh dialect (the same rule `source`
-# applies), which is how a zsh-flavoured file -- `precmd() { vcs_info }`,
-# zstyle, PROMPT -- lives next to the .hsh ones without a marker (issue #112).
+# ── WHAT COUNTS AS A MODULE ─────────────────────────────────────────────────
+# One rule for rc.d, themes, plugin entries, forge and hx-fetch-plugin:
+#
+#   name.hsh  name.sh  name.zsh   by extension
+#   name                          a dot-less file whose shebang names polish
+#                                 or hellish (#!/usr/bin/env polish,
+#                                 #!/usr/local/bin/hellish, env -S polish ...)
+#
+# Anything else -- README, README.md, foo.bak, 99-local.hsh~ -- is skipped,
+# so notes and editor backups can sit beside the modules. A .zsh module is
+# read in the zsh dialect (the same rule `source` applies), which is how a
+# zsh-flavoured file -- `precmd() { vcs_info }`, zstyle, PROMPT -- lives next
+# to the .hsh ones without a marker (issue #112).
+
+# _hx_shebang_ours <first-line> — true when the line is a shebang whose
+# interpreter (or the program after `env`, past its -options and VAR=value
+# words) is named polish or hellish. Parameter expansion only: it runs once
+# per dot-less file at startup and must not fork.
+_hx_shebang_ours() {
+    local w f=
+    case "$1" in '#!'*) ;; *) return 1 ;; esac
+    case "$-" in *f*) f=1 ;; esac
+    set -f
+    set -- ${1#??}
+    [ -n "$f" ] || set +f
+    w="${1:-}"
+    if [ "${w##*/}" = env ]; then
+        shift
+        while [ $# -gt 0 ]; do
+            case "$1" in -*|*=*) shift ;; *) break ;; esac
+        done
+        w="${1:-}"
+    fi
+    case "${w##*/}" in polish|hellish) return 0 ;; esac
+    return 1
+}
+
+# hx_is_module <path> — the rule above. Only a dot-less file is opened.
+hx_is_module() {
+    local l=
+    case "${1##*/}" in
+        *.hsh|*.sh|*.zsh) [ -r "$1" ]; return ;;
+        *.*) return 1 ;;
+    esac
+    [ -f "$1" ] && [ -r "$1" ] || return 1
+    IFS= read -r l < "$1"
+    _hx_shebang_ours "$l"
+}
+
+# hx_strip_ext <name> -> HX_STRIPPED, the name without the extension that
+# made it a module. Assigns rather than prints: callers loop over files.
+hx_strip_ext() {
+    HX_STRIPPED="${1%.hsh}"
+    [ "$HX_STRIPPED" = "$1" ] && HX_STRIPPED="${1%.sh}"
+    [ "$HX_STRIPPED" = "$1" ] && HX_STRIPPED="${1%.zsh}"
+    return 0
+}
+
+# hx_load_dir <dir> — source every module (see above) in lexical order.
 hx_load_dir() {
     local d="$1" f
     [ -d "$d" ] || return 0
     for f in "$d"/*; do
-        case "$f" in *.hsh|*.zsh) ;; *) continue ;; esac
-        [ -r "$f" ] || continue      # no nullglob on old binaries: guard by hand
-        # hx_module_name, inlined: through $(...) it cost a fork per file,
-        # thirty subshells at startup for four parameter expansions.
-        HX_CURRENT_MODULE="${f##*/}"
-        HX_CURRENT_MODULE="${HX_CURRENT_MODULE%.hsh}"
-        HX_CURRENT_MODULE="${HX_CURRENT_MODULE%.zsh}"
-        HX_CURRENT_MODULE="${HX_CURRENT_MODULE#*-}"
+        hx_is_module "$f" || continue   # also the no-nullglob guard
+        hx_strip_ext "${f##*/}"
+        HX_CURRENT_MODULE="${HX_STRIPPED#*-}"
         hx_source "$f"
     done
     HX_CURRENT_MODULE=core
@@ -427,10 +529,8 @@ hx_load_dir() {
 
 # hx_module_name <path>  "40-functions.hsh" -> "functions"
 hx_module_name() {
-    local b="${1##*/}"
-    b="${b%.hsh}"
-    b="${b%.zsh}"
-    printf '%s' "${b#*-}"
+    hx_strip_ext "${1##*/}"
+    printf '%s' "${HX_STRIPPED#*-}"
 }
 
 HX_CURRENT_MODULE=core

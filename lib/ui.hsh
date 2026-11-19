@@ -1,4 +1,5 @@
-# ~/.hellish/lib/ui.hsh — colour, glyphs and output primitives.
+#!/usr/bin/env polish
+# lib/ui.hsh — colour, glyphs and output primitives.
 #
 # Loaded first; everything else may rely on the HX_* colour variables, the
 # HX_G_* glyphs, and hx_say/hx_warn/hx_die.
@@ -83,7 +84,7 @@ hx_color_init() {
             HX_ORA=$'\033[33m'; HX_VIO=$'\033[35m'; HX_TEAL=$'\033[36m'
             HX_LIME=$'\033[32m'; HX_SKY=$'\033[36m'; HX_ROSE=$'\033[31m'
         else
-            HX_ORA=$'\033[38;5;209m'   # hellish's own accent (matches `help`)
+            HX_ORA=$'\033[38;5;209m'   # the shell's own accent (matches `help`)
             HX_VIO=$'\033[38;5;141m';  HX_TEAL=$'\033[38;5;44m'
             HX_LIME=$'\033[38;5;149m'; HX_SKY=$'\033[38;5;117m'
             HX_ROSE=$'\033[38;5;211m'

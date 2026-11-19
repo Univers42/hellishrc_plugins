@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # themes/40-blocks.hsh — prompts built from filled colour, not from text.
 #
 # Reverse-video segments read as objects rather than as words, which is what

@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # themes/90-local.hsh — yours.
 #
 # This is the one theme file an upgrade never overwrites, and `prompt new

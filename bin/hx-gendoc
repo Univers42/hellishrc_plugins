@@ -1,7 +1,7 @@
-#!/usr/bin/env hellish
+#!/usr/bin/env polish
 # bin/hx-gendoc — generate docs/reference.md from the LIVE registry.
 #
-#   hellish ~/.hellish/bin/hx-gendoc > docs/reference.md
+#   polish ~/.polish/bin/hx-gendoc > docs/reference.md
 #
 # ── WHY THIS IS GENERATED ───────────────────────────────────────────────────
 #
@@ -20,7 +20,16 @@
 # generated. They carry judgement, ordering and worked examples, which no
 # registry can hold.
 
-. "${HX_RC:-$HOME/.hellishrc}" >/dev/null 2>&1
+# The loader the shell itself reads: ~/.polishrc, or ~/.hellishrc when only
+# that one exists (installs from before the rename).
+if [ -z "${HX_RC:-}" ]; then
+    if [ -e "$HOME/.polishrc" ] || [ ! -e "$HOME/.hellishrc" ]; then
+        HX_RC="$HOME/.polishrc"
+    else
+        HX_RC="$HOME/.hellishrc"
+    fi
+fi
+. "$HX_RC" >/dev/null 2>&1
 
 # Owners, in the order a reader should meet them, rather than alphabetically:
 # the shell's own furniture first, then the tools, then the framework's
@@ -60,7 +69,7 @@ _blurb() {
         env)        echo "PATH helpers and the variables this configuration sets for you." ;;
         history)    echo "What is remembered, what is deliberately forgotten, and how to search it." ;;
         options)    echo "Every \`set -o\` and \`shopt\` decision, with the reason. Several of these are deliberately OFF and say why." ;;
-        completion) echo "TAB completion. On hellish 2.10 these install for real; on an older binary they are recorded and install themselves the day you upgrade." ;;
+        completion) echo "TAB completion. On a 2.10+ shell these install for real; on an older binary they are recorded and install themselves the day you upgrade." ;;
         prompt)     echo "The theme engine's own entry points. See [the prompt guide](prompt.md) for the token language." ;;
         core)       echo "The registry, the capability probe and the hook system. You need these only when writing a plugin -- see [writing a plugin](plugins.md)." ;;
         *)          echo "" ;;
@@ -128,8 +137,8 @@ hxp info <plugin>         one plugin, in detail
 
 HEADER
 
-printf 'Generated %s from hellish %s, %s items.\n' \
-    "$(date '+%Y-%m-%d')" "$(hx_cap_get version)" "$(hx_item_keys_sorted | grep -c .)"
+printf 'Generated %s from %s %s, %s items.\n' \
+    "$(date '+%Y-%m-%d')" "$(hx_shell_name)" "$(hx_cap_get version)" "$(hx_item_keys_sorted | grep -c .)"
 
 # Contents
 printf '\n## Contents\n\n'

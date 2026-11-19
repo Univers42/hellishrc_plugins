@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # themes/60-focus.hsh — prompts that answer a question.
 #
 # Each of these is built around ONE question you are asking all day, and

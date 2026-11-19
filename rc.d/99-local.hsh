@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # 99-local.hsh — your machine-specific overrides.
 #
 # This file is loaded LAST, so anything here wins over every module and plugin.

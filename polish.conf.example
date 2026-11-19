@@ -1,4 +1,4 @@
-# ~/.hellish/hellish.conf
+# ~/.polish/polish.conf
 # Written by `conf save`. Hand-editing is fine: one directive per line.
 #   feature <name> <on|off>   toggle a module or plugin
 #   set     <VAR> <value>     set a configuration variable

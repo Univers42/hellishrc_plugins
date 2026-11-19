@@ -1,4 +1,4 @@
-#!/usr/bin/env hellish
+#!/usr/bin/env polish
 # test/examples_prompt.hsh — assertions for examples/hellishrc.
 #
 # Named apart from test/prompt.hsh, which is a different suite: that one

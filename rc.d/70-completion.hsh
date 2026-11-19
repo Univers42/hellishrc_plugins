@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # 70-completion.hsh — programmable completion.
 #
 # ── WHAT CHANGED ────────────────────────────────────────────────────────────
@@ -60,7 +61,7 @@ hx_complete_show() {
         return 0
     fi
     hx_head "completions"
-    hx_kv "installed" "$(hx_cap builtin_complete && echo "yes — this hellish has \`complete\`" || echo "no — declared only, this hellish has no \`complete\`")"
+    hx_kv "installed" "$(hx_cap builtin_complete && echo "yes — this shell has \`complete\`" || echo "no — declared only, this shell has no \`complete\`")"
     printf '\n'
     for c in $(printf '%s\n' "${!HX_COMPL_WORDS[@]}" | sort); do
         hx_kv "$c" "${HX_COMPL_WORDS[$c]}"

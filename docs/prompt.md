@@ -1,7 +1,7 @@
 # The prompt
 
 Thirty themes, a token language to write more, and an engine that does almost
-nothing per prompt because hellish does the work in C.
+nothing per prompt because polish does the work in C.
 
 ```sh
 prompt                which theme is on, what it shows, what it costs
@@ -77,7 +77,7 @@ prompt new mine
 prompt edit mine
 ```
 
-That appends a starting point to `~/.hellish/themes/90-local.hsh`, which is
+That appends a starting point to `~/.polish/themes/90-local.hsh`, which is
 yours and is never overwritten by an upgrade. The full form:
 
 ```sh
@@ -133,11 +133,11 @@ prompt stays quiet in a clean tree:
 
 | token | meaning |
 |---|---|
-| `{git}` | branch, `*` when dirty. Free: hellish renders it in C |
+| `{git}` | branch, `*` when dirty. Free: polish renders it in C |
 | `{fail}` | `✘` and the exit code, after a failure |
 | `{took}` | how long the last command ran, once it passes 2s |
 | `{jobsb}` | background job count, while there are any |
-| `{upd}` | a pending hellish release |
+| `{upd}` | a pending polish release |
 
 **Computed segments** — these cost real work, so you must list them in
 `needs`:
@@ -149,7 +149,7 @@ prompt stays quiet in a clean tree:
 | `{rule}` | `rule` | one `tput cols` per prompt |
 | `{load}` | `load` | none — reads `/proc/loadavg` |
 
-`{git}` and `{vcs}` are not the same thing. `{git}` is hellish's own `\g`
+`{git}` and `{vcs}` are not the same thing. `{git}` is polish's own `\g`
 escape: the branch name and a dirty marker, rendered in C, free. `{vcs}` is
 the full summary — `main +2 ~1 ?3 ↑1` — branch, staged, dirty, untracked,
 conflicts, ahead and behind, for one git process per prompt.
@@ -172,7 +172,7 @@ and throws it away.
 
 **A literal percent is `%%`.** A single `%` starts a prompt escape.
 
-**Do not use `$(...)`.** hellish never expands command substitution in a
+**Do not use `$(...)`.** polish never expands command substitution in a
 prompt — it renders `$(date)` literally, forever. This is the single most
 common way to write a broken theme. Anything dynamic goes through a computed
 segment instead, which is what `needs` is for.
@@ -183,8 +183,8 @@ segment instead, which is what `needs` is for.
 
 Worth knowing if you are extending it, and skippable otherwise.
 
-hellish renders prompts itself, in C, and its renderer speaks two languages at
-once: zsh's percent escapes (`%F{117}`, `%~`, `%(?.ok.bad)`) and hellish's own
+polish renders prompts itself, in C, and its renderer speaks two languages at
+once: zsh's percent escapes (`%F{117}`, `%~`, `%(?.ok.bad)`) and polish's own
 self-spacing badges (`\g`, `\S`, `\p`, `\J`, `\U`). Between them, most themes
 here need no shell code whatsoever and cannot be slow. `%(?...)` alone removes
 the "recolour the arrow by exit status" function that every dotfiles repo
@@ -203,14 +203,14 @@ the suite fails and names the assumption that died:
    every render. Hence computed segments.
 2. **Text arriving out of a variable is inert** — escapes, `%F{n}`, `\g` and a
    bare `%` all render as themselves. So segments hold plain text and the
-   theme supplies the colour, which is also what keeps hellish's width
+   theme supplies the colour, which is also what keeps polish's width
    arithmetic exact.
 3. **`print -rP` disagrees with the renderer** on rule 2: it re-scans. A
    directory called `50%off` previews as `50ff`. The preview path escapes
    segments and restores them afterwards, so what you preview is what you get.
-   Reported upstream as [hellish#134](https://github.com/Univers42/hellish/issues/134).
+   Reported upstream as [polish#134](https://github.com/Univers42/polish/issues/134).
 
-`prompt doctor` reports what your terminal and your hellish support, and what
+`prompt doctor` reports what your terminal and your shell support, and what
 the active theme costs per prompt:
 
 ```

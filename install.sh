@@ -1,5 +1,5 @@
 #!/bin/sh
-# hellishrc_plugins installer — set up ~/.hellish and wire ~/.hellishrc.
+# polish plugin framework installer — set up ~/.polish and wire ~/.polishrc.
 #
 #   sh install.sh                          interactive
 #   sh install.sh --plugins all            everything the catalog defaults on
@@ -8,36 +8,54 @@
 #   sh install.sh --plugins "git jump z"   exactly these
 #   sh install.sh --home DIR               install under DIR (tests)
 #
-# hellish's own `curl | sh` installer calls this with the user's answers, but
-# it stands alone: clone the repo and run it, and you get the same result.
+# The shell's own `curl | sh` installer calls this with the user's answers,
+# but it stands alone: clone the repo and run it, and you get the same result.
 #
-# What it will NEVER do is eat your configuration. An existing ~/.hellishrc
-# that is not already our loader is copied verbatim into
-# ~/.hellish/rc.d/95-previous-rc.hsh -- so it keeps loading, after the
-# framework, exactly as before -- and the original is also kept beside itself
-# as ~/.hellishrc.pre-hellish-<date> for good measure.
+# Names follow the shell's rule (it was called hellish before 3.4): the rc is
+# ~/.polishrc unless only a ~/.hellishrc exists, the home is ~/.polish unless
+# only a ~/.hellish exists, the conf is polish.conf unless only a hellish.conf
+# exists. A new user gets polish names only; an old install keeps its own.
+#
+# What it will NEVER do is eat your configuration. An existing rc that is not
+# already our loader is copied verbatim into <home>/rc.d/95-previous-rc.hsh
+# -- so it keeps loading, after the framework, exactly as before -- and the
+# original is also kept beside itself as <rc>.pre-polish-<date>.
 set -eu
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 TARGET_HOME="$HOME"
 PLUGINS="ask"
 
-say() { printf '\033[1;36mhellish-plugins:\033[0m %s\n' "$*"; }
-die() { printf '\033[1;31mhellish-plugins:\033[0m %s\n' "$*" >&2; exit 1; }
+say() { printf '\033[1;36mpolish-plugins:\033[0m %s\n' "$*"; }
+die() { printf '\033[1;31mpolish-plugins:\033[0m %s\n' "$*" >&2; exit 1; }
+
+# pick <new> <legacy> -- the new name when it exists or the legacy one does
+# not; the same rule the shell uses for ~/.polishrc vs ~/.hellishrc.
+pick() { if [ -e "$1" ] || [ ! -e "$2" ]; then printf '%s' "$1"; else printf '%s' "$2"; fi; }
 
 while [ $# -gt 0 ]; do
 	case "$1" in
 	--home)    shift; [ $# -gt 0 ] || die "--home needs a directory"; TARGET_HOME="$1" ;;
 	--plugins) shift; [ $# -gt 0 ] || die "--plugins needs a value"; PLUGINS="$1" ;;
 	--plugins=*) PLUGINS="${1#--plugins=}" ;;
-	-h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-h|--help) sed -n '2,18p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	*) die "unknown argument '$1'" ;;
 	esac
 	shift
 done
 
-HX="$TARGET_HOME/.hellish"
-RC="$TARGET_HOME/.hellishrc"
+HX="$(pick "$TARGET_HOME/.polish" "$TARGET_HOME/.hellish")"
+RC="$(pick "$TARGET_HOME/.polishrc" "$TARGET_HOME/.hellishrc")"
+# ~/.polish rather than /home/you/.polish, in messages.
+shown() { case "$1" in "$TARGET_HOME"/*) printf '%s/%s' '~' "${1#"$TARGET_HOME"/}" ;; *) printf '%s' "$1" ;; esac; }
+HX_SHOWN="$(shown "$HX")"
+RC_SHOWN="$(shown "$RC")"
+
+# The interpreter named on line 1 of every module: the shell this machine
+# can actually run, so `./x.hsh` works. Repo files say polish.
+if command -v polish >/dev/null 2>&1; then SHEBANG_SHELL=polish
+elif command -v hellish >/dev/null 2>&1; then SHEBANG_SHELL=hellish
+else SHEBANG_SHELL=polish; fi
 CATALOG="$HERE/plugins/catalog.tsv"
 [ -f "$CATALOG" ] || die "no plugins/catalog.tsv next to this script"
 
@@ -75,7 +93,7 @@ mkdir -p "$HX/plugins" "$HX/state"
 cp "$CATALOG" "$HX/plugins/catalog.tsv"
 
 # ── 2. plugin selection ─────────────────────────────────────────────────────
-# Builtin plugins are copied and toggled in hellish.conf; externals are
+# Builtin plugins are copied and toggled in the conf file; externals are
 # fetched by bin/hx-fetch-plugin. One catalog drives both.
 chosen=""
 case "$PLUGINS" in
@@ -102,16 +120,16 @@ esac
 
 has() { case " $chosen " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
 
-conf="$HX/hellish.conf"
+conf="$(pick "$HX/polish.conf" "$HX/hellish.conf")"
 if [ ! -f "$conf" ]; then
 	{
-		printf '# ~/.hellish/hellish.conf -- written by the installer.\n'
+		printf '# %s/%s -- written by the installer.\n' "$HX_SHOWN" "${conf##*/}"
 		printf '# One directive per line: feature <name> <on|off>, set <VAR> <value>.\n'
 	} > "$conf"
 fi
 
 installed=""; skipped=""
-while IFS='	' read -r name kind url def desc; do
+while IFS='	' read -r name kind _url def desc; do
 	case "$name" in ''|'#'*) continue ;; esac
 	if [ "$kind" = "builtin" ]; then
 		mkdir -p "$HX/plugins/$name"
@@ -131,21 +149,42 @@ while IFS='	' read -r name kind url def desc; do
 	fi
 done < "$CATALOG"
 
-# ── 3. wire ~/.hellishrc, without eating anything ───────────────────────────
+# ── 3. shebangs ─────────────────────────────────────────────────────────────
+# Every shipped module names `#!/usr/bin/env polish`; where only hellish is
+# installed that is a dead interpreter, so line 1 is rewritten to the one
+# that exists -- both ways, so a kept 99-local.hsh follows a later switch.
+# Only a line that is exactly one of the two spellings is touched; `cat >`
+# rather than `mv` keeps the file's mode.
+{
+	find "$HX/lib" "$HX/rc.d" "$HX/themes" "$HX/test" "$HX/plugins" \
+		-type f -name '*.hsh' 2>/dev/null
+	find "$HX/bin" -type f 2>/dev/null
+} |
+while IFS= read -r f; do
+	case "$(sed -n 1p "$f")" in
+	"#!/usr/bin/env $SHEBANG_SHELL") continue ;;
+	'#!/usr/bin/env polish'|'#!/usr/bin/env hellish') ;;
+	*) continue ;;
+	esac
+	sed "1s|.*|#!/usr/bin/env $SHEBANG_SHELL|" "$f" > "$f.tmp" &&
+		cat "$f.tmp" > "$f" && rm -f "$f.tmp"
+done
+
+# ── 4. wire the rc, without eating anything ─────────────────────────────────
 if [ -f "$RC" ] && ! grep -q 'HX_HOME=' "$RC" 2>/dev/null; then
 	_stamp="$(date +%Y%m%d-%H%M%S)"
-	cp "$RC" "$RC.pre-hellish-$_stamp"
+	cp "$RC" "$RC.pre-polish-$_stamp"
 	{
-		printf '# rc.d/95-previous-rc.hsh -- your pre-framework ~/.hellishrc,\n'
+		printf '# rc.d/95-previous-rc.hsh -- your pre-framework %s,\n' "$RC_SHOWN"
 		printf '# preserved by the installer on %s. Still loads, after the\n' "$_stamp"
 		printf '# framework, exactly as before. Delete when absorbed.\n'
 		cat "$RC"
 	} > "$HX/rc.d/95-previous-rc.hsh"
-	say "kept your old ~/.hellishrc (as rc.d/95-previous-rc.hsh + a backup)"
+	say "kept your old $RC_SHOWN (as rc.d/95-previous-rc.hsh + a backup)"
 fi
 cp "$HERE/.hellishrc" "$RC"
 
-say "installed -> $HX"
+say "installed -> $HX_SHOWN (loader: $RC_SHOWN)"
 [ -n "$installed" ] && say "plugins on:$installed"
 [ -n "$skipped" ] && say "could not fetch (offline?):$skipped -- retry later with: hxp install <name>"
 say "open a new shell, then: conf list · hxp list · help_conf"

@@ -1,10 +1,10 @@
-#!/usr/bin/env hellish
-# ~/.hellish/test/run.hsh — the configuration's own test suite.
+#!/usr/bin/env polish
+# test/run.hsh — the configuration's own test suite.
 #
-#   hellish ~/.hellish/test/run.hsh          run everything
-#   hellish ~/.hellish/test/run.hsh -v       show every passing assertion
+#   polish ~/.polish/test/run.hsh           run everything
+#   polish ~/.polish/test/run.hsh  -v       show every passing assertion
 #
-# It loads the real ~/.hellishrc and then asserts against the live registry, so
+# It loads the real ~/.polishrc and then asserts against the live registry, so
 # it tests what you actually run, not a copy.
 #
 # The shebang is `/usr/bin/env hellish` rather than `/usr/bin/hellish`: a
@@ -39,7 +39,13 @@ t_defined() { if command -v "$1" >/dev/null 2>&1; then t_ok "$2"; else t_bad "$2
 
 # ── load the real configuration ─────────────────────────────────────────────
 t_head "load"
-. "${HX_RC:-$HOME/.hellishrc}"
+# The loader the shell reads: ~/.polishrc, or ~/.hellishrc on an install
+# from before the rename.
+if [ -z "${HX_RC:-}" ]; then
+    if [ -e "$HOME/.polishrc" ] || [ ! -e "$HOME/.hellishrc" ]; then HX_RC="$HOME/.polishrc"
+    else HX_RC="$HOME/.hellishrc"; fi
+fi
+. "$HX_RC"
 t_eq "0" "${#HX_ERRORS[@]}" "configuration loads with no recorded errors"
 [ "${#HX_ERRORS[@]}" -gt 0 ] && printf '    %s\n' "${HX_ERRORS[@]}"
 if [ "${#HX_LOADED[@]}" -ge 10 ]; then t_ok "loaded ${#HX_LOADED[@]} files"
@@ -51,7 +57,7 @@ else t_bad "only ${#HX_LOADED[@]} files loaded"; fi
 # checks the cache agrees with it.
 t_head "capability probe agrees with reality"
 [ -n "$(hx_cap_get version)" ] && t_ok "probe found a version: $(hx_cap_get version)" \
-    || t_bad "probe found no hellish version"
+    || t_bad "probe found no shell version"
 
 _cap_matches() {   # _cap_matches <cap> <label> ... command that should succeed
     local cap="$1" label="$2"; shift 2
@@ -93,11 +99,14 @@ t_false "hx_key_ok rejects an empty key"      hx_key_ok ""
 # read and write the real configuration. Deriving them is what makes HX_HOME
 # the single knob it appears to be, and this is the regression guard.
 t_head "sandboxing: HX_HOME alone decides where state lives"
-t_eq "$HX_HOME/hellish.conf" "$HX_CONF"  "HX_CONF is derived from HX_HOME"
+case "$HX_CONF" in
+    "$HX_HOME/polish.conf"|"$HX_HOME/hellish.conf") t_ok "HX_CONF is derived from HX_HOME" ;;
+    *) t_bad "HX_CONF is derived from HX_HOME — got [$HX_CONF]" ;;
+esac
 t_eq "$HX_HOME/state"        "$HX_STATE" "HX_STATE is derived from HX_HOME"
 _sbox=$(mktemp -d)
 _out=$(HX_HOME="$_sbox" "$(hx_shell_bin)" -c \
-    ". ${HX_RC:-$HOME/.hellishrc} >/dev/null 2>&1; printf '%s' \"\$HX_STATE\"" 2>/dev/null)
+    ". $HX_RC >/dev/null 2>&1; printf '%s' \"\$HX_STATE\"" 2>/dev/null)
 t_eq "$_sbox/state" "$_out" "a child with a fresh HX_HOME does not inherit the old HX_STATE"
 command rm -rf "$_sbox"
 
@@ -246,12 +255,13 @@ hx_hook_add precmd _hook_probe
 hx_hook_add precmd _hook_probe
 t_eq "1" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep -c '^_hook_probe$')" "hx_hook_add de-duplicates"
 if hx_cap hooks; then
-    case " ${HELLISH_PRECMD_FUNCS:-} " in
-        *" _hook_probe "*) t_ok "the hook reaches hellish's native HELLISH_PRECMD_FUNCS" ;;
-        *) t_bad "the hook never reached HELLISH_PRECMD_FUNCS" ;;
+    eval "_hooks=\"\${${HX_VARPFX}PRECMD_FUNCS:-}\""
+    case " $_hooks " in
+        *" _hook_probe "*) t_ok "the hook reaches the shell's native ${HX_VARPFX}PRECMD_FUNCS" ;;
+        *) t_bad "the hook never reached ${HX_VARPFX}PRECMD_FUNCS" ;;
     esac
 else
-    t_skip "native hook arrays — this hellish has none"
+    t_skip "native hook arrays — this shell has none"
 fi
 hx_hook_del precmd _hook_probe
 t_eq "0" "$(printf '%s\n' $HX_PRECMD_FUNCS | grep -c '^_hook_probe$')" "hx_hook_del removes it again"
@@ -277,7 +287,7 @@ t_false "help_conf rejects an unknown section" help_conf no_such_section
 # conf doctor must not report the version as blank, which is what the old
 # hard-coded /usr/bin/hellish did on every user-mode install.
 case "$(conf doctor 2>/dev/null)" in
-    *"$(hx_cap_get version)"*) t_ok "conf doctor reports the running hellish's version" ;;
+    *"$(hx_cap_get version)"*) t_ok "conf doctor reports the running shell's version" ;;
     *) t_bad "conf doctor does not show a version" ;;
 esac
 

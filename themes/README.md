@@ -11,16 +11,16 @@ prompt gallery      the same, grouped and described
 prompt next|prev|random
 prompt new <name>   scaffold your own into 90-local.hsh
 prompt tokens       the token language
-prompt doctor       what this terminal and this hellish can actually do
+prompt doctor       what this terminal and this shell can actually do
 ```
 
 `theme` is the same command.
 
 ## Why themes are data
 
-A theme is one string, not a function. hellish renders the prompt in C and its
+A theme is one string, not a function. polish renders the prompt in C and its
 renderer speaks two languages at once — zsh's percent escapes (`%F{117}`,
-`%~`, `%(?.ok.bad)`) and hellish's own self-spacing badges (`\g` branch, `\S`
+`%~`, `%(?.ok.bad)`) and polish's own self-spacing badges (`\g` branch, `\S`
 failure, `\p` duration, `\J` jobs, `\U` update). Between them, most of these
 themes need no shell code at all and cannot be slow.
 

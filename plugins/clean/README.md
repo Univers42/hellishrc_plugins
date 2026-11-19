@@ -24,7 +24,7 @@ moment.
 A path is only ever a candidate when all of these hold: it lives under your home
 directory or `/tmp`, it is not on the protected list, and it is something the
 system rebuilds on demand. The protected list covers your credential
-directories, Documents, Desktop, Downloads, Pictures, and the hellish
+directories, Documents, Desktop, Downloads, Pictures, and the polish
 configuration itself.
 
 Totals are reported **per filesystem**, because `/tmp` is frequently a separate
@@ -49,7 +49,7 @@ clean -a -y        # everything, docker included
 
 ## Why the work is a bash script
 
-`bin/hx-clean` is bash, not a hellish function. It needs arrays of paths,
+`bin/hx-clean` is bash, not a polish function. It needs arrays of paths,
 `find -print0`, and a map keyed by filesystem device number. Carrying those
 through the shims in `rc.d/40-functions.hsh` would buy nothing: it deletes
 files, it does not change your shell's environment, so it has no reason to run

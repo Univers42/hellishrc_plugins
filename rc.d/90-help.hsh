@@ -1,3 +1,4 @@
+#!/usr/bin/env polish
 # 90-help.hsh — the way in.
 #
 # `help_conf` is exhaustive, which makes it the wrong thing to meet first: 199
@@ -8,7 +9,7 @@ hx_feature help on core "cheat sheet and guides: the way into everything else"
 hx_guard help || return 0
 
 HX_DOCS="${HX_DOCS:-$HX_HOME/docs}"
-hx_var_doc HX_DOCS "where the written guides live (~/.hellish/docs)"
+hx_var_doc HX_DOCS "where the written guides live ($HX_HOME_SHOWN/docs)"
 
 # cheat [section] — one screen. Deliberately NOT generated from the registry:
 # the registry knows every name, and the whole value of this is that it knows
@@ -156,14 +157,14 @@ _cheat_conf() {
     _c "conf list"       "every feature and whether it is on"
     _c "conf on|off <n>" "toggle, persisted        conf reload   apply now"
     _c "conf doctor"     "load errors, missing dependencies, known gaps"
-    _c "conf caps"       "what this hellish can actually do"
+    _c "conf caps"       "what this shell can actually do"
     _c "conf modules"    "what loaded, in order    conf profile   with timings"
     _c "hxp list"        "plugins                  hxp info <name>"
     _c "hxp catalog"     "everything installable   hxp install <name>"
     _c "forge api"       "how to write a plugin    hxp new <name>   scaffold one"
     _c "help_conf"       "the full reference, paged"
-    printf '\n  %syour own overrides: ~/.hellish/rc.d/99-local.hsh (loads last, never overwritten)%s\n\n' \
-        "$HX_GRY" "$HX_R"
+    printf '\n  %syour own overrides: %s/rc.d/99-local.hsh (loads last, never overwritten)%s\n\n' \
+        "$HX_GRY" "$HX_HOME_SHOWN" "$HX_R"
 }
 
 # guide [topic] — the written documentation. Opens in $PAGER, because these
