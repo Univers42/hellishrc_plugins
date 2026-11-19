@@ -43,7 +43,7 @@ project without configuring anything.
 Then there is **jump**, which learns where you go:
 
 ```sh
-j hellish             jump to the best-matching directory you have visited
+j polish              jump to the best-matching directory you have visited
 jl                    show the candidates and their scores
 mark api              bookmark here, by name
 to api                go to that bookmark
@@ -183,7 +183,7 @@ conf on docker        and back
 conf reload           apply, without opening a new shell
 ```
 
-Your own overrides go in `~/.hellish/rc.d/99-local.hsh`. It loads last, so
+Your own overrides go in `~/.polish/rc.d/99-local.hsh`. It loads last, so
 anything you put there wins, and no upgrade will ever overwrite it.
 
 ---
@@ -192,8 +192,8 @@ anything you put there wins, and no upgrade will ever overwrite it.
 
 ```sh
 conf doctor           load errors, missing dependencies, known gaps
-conf caps             what your hellish can actually do
-prompt doctor         what your terminal and hellish support for prompts
+conf caps             what your shell can actually do
+prompt doctor         what your terminal and polish support for prompts
 hxp doctor            plugins missing their external commands
 ```
 

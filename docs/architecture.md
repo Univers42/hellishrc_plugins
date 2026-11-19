@@ -8,32 +8,32 @@ safely.
 ## The tree
 
 ```
-~/.hellishrc          the loader — deliberately tiny
-~/.hellish/
+~/.polishrc           the loader — deliberately tiny
+~/.polish/
   lib/                the framework      ui · core · plugin · conf · prompt
   rc.d/               config modules     10-env … 99-local, in lexical order
   themes/             30 prompt themes   six families + 90-local.hsh
   plugins/            one directory each + catalog.tsv
   bin/                hx-fetch-plugin · hx-clean · hx-gendoc
-  hellish.conf        which features are on
+  polish.conf         which features are on
   state/              jump db, marks, capability cache — never committed
   test/               run.hsh · prompt.hsh
 ```
 
 ## Load order, and why it is what it is
 
-`~/.hellishrc` does ten things, in this order, and each step depends on the
+`~/.polishrc` does ten things, in this order, and each step depends on the
 one before it:
 
 1. **`lib/ui.hsh`** — colours and glyphs. First because everything prints.
 2. **`lib/core.hsh`** — the registry and the capability probe.
 3. **`lib/plugin.hsh`**, **`lib/conf.hsh`** — the plugin contract and the
    `conf` command.
-4. **`hx_caps_load`** — what this hellish can do. Before any module, because
+4. **`hx_caps_load`** — what this shell can do. Before any module, because
    modules branch on it.
 5. **`hx_conf_load`** — your saved on/off state. Before any module, so
    `hx_guard` can see it and a disabled module can skip its own body.
-6. **`hx_color_init` / `hx_glyph_init` again** — `hellish.conf` may have set
+6. **`hx_color_init` / `hx_glyph_init` again** — `polish.conf` may have set
    `HX_COLOR` or `HX_NERD`, and the tables were built before it was read.
 7. **`lib/prompt.hsh`** — after `conf`, so the palette variables are in place.
 8. **`rc.d/*`** — lexical order: `10-env`, `20-options`, `30-aliases`,
@@ -69,7 +69,7 @@ That declaration is the single source of truth for `help_conf`, `conf list`,
 `hxp info`, the completion wordlists, the generated [reference](reference.md)
 and the test suite. Nothing is discovered; everything is declared.
 
-This began as a workaround. hellish 2.7.6 returned nothing from `declare -F`
+This began as a workaround. polish 2.7.6 returned nothing from `declare -F`
 and `alias -p`, so no code could find out what the configuration had defined.
 Introspection works now — but the registry stayed, because it carries what
 introspection never could: a description, a usage line, and which module owns
@@ -87,7 +87,7 @@ Every subscripted array write goes through one function:
 hx_aset HX_FEAT_STATE "$name" on
 ```
 
-On hellish 2.7.6 a subscripted write from a function *defined in a sourced
+On polish 2.7.6 a subscripted write from a function *defined in a sourced
 file* was parsed as a command, not an assignment, which would have killed the
 whole registry. That is fixed (`hx_cap assoc_sourced`), and `hx_aset` remains
 for two reasons: it still works on an old binary, and having exactly one choke
@@ -110,7 +110,7 @@ conf caps                    every probe and its verdict
 conf caps -r                 re-probe (after `update --now`)
 ```
 
-This exists because the configuration was written against hellish 2.7.6 and
+This exists because the configuration was written against polish 2.7.6 and
 aged badly. By 2.10 most of those gaps had closed, and the config was still
 routing around them — refusing to install completions that worked, and failing
 `forge lint` on plugins for using `local -n` and `printf %q`, both fixed two
@@ -119,7 +119,7 @@ learn to ignore.
 
 The probe runs once and is cached in `state/capabilities`, keyed on the
 binary's **identity** (`mtime:size`) rather than its version string — a
-locally built hellish reports the same version as the release it came from and
+locally built polish reports the same version as the release it came from and
 would otherwise be served a stale verdict.
 
 Some probes must run out of process. `shopt -s extglob` is accepted and then
@@ -145,8 +145,8 @@ hx_hook_add preexec <function>     before each typed line; "$1" is the line
 hx_hook_del precmd  <function>     unregister
 ```
 
-hellish 2.9+ has native hook arrays — `HELLISH_PRECMD_FUNCS` and
-`HELLISH_PREEXEC_FUNCS` — and they are the right mechanism, because arrays of
+polish 2.9+ has native hook arrays — `POLISH_PRECMD_FUNCS` and
+`POLISH_PREEXEC_FUNCS` — and they are the right mechanism, because arrays of
 function names **compose**. `PROMPT_COMMAND` is one string and appending to it
 is string surgery on something another plugin may also be appending to;
 `trap ... DEBUG` holds exactly one handler, so the second plugin to install
@@ -157,7 +157,7 @@ one silently removes the first.
 has to know which. `_hx_precmd_run` returns immediately when the native arrays
 are in use, so nothing runs twice.
 
-hellish preserves `$?` across the hooks, so a prompt with a status badge still
+polish preserves `$?` across the hooks, so a prompt with a status badge still
 shows *your* command's result rather than the hook's.
 
 ---
@@ -168,7 +168,7 @@ shows *your* command's result rather than the hook's.
 place the configuration is deliberately not minimal: an interactive shell
 should ask before it destroys something.
 
-The hazard is that **hellish expands aliases when it parses a file**, and
+The hazard is that **polish expands aliases when it parses a file**, and
 every module and plugin sourced afterwards is parsed with those aliases live.
 So a function containing `mv "$a" "$b"` silently becomes `mv -i "$a" "$b"` and
 blocks on a prompt nobody sees.
@@ -196,20 +196,20 @@ suite checks for collisions.
 it, never defaulted with `:-`:
 
 ```sh
-HX_HOME="${HX_HOME:-$HOME/.hellish}"
-HX_CONF="$HX_HOME/hellish.conf"
+[ -n "${HX_HOME:-}" ] || hx_brand_pick HX_HOME "$HOME/.polish" "$HOME/.hellish"
+hx_brand_pick HX_CONF "$HX_HOME/polish.conf" "$HX_HOME/hellish.conf"
 HX_STATE="$HX_HOME/state"
 ```
 
 All three are exported, so every child inherits them. With
-`${HX_CONF:-$HX_HOME/hellish.conf}` the inherited value would win, and a run
+`${HX_CONF:-$HX_HOME/polish.conf}` the inherited value would win, and a run
 against a throwaway tree would quietly read and *write* your real
-`~/.hellish/state`. It did exactly that during development.
+`~/.polish/state`. It did exactly that during development.
 
 To test against a scratch tree:
 
 ```sh
-HX_HOME=/tmp/sbox/.hellish HX_RC=/tmp/sbox/.hellishrc hellish /tmp/sbox/.hellish/test/run.hsh
+HX_HOME=/tmp/sbox/.polish HX_RC=/tmp/sbox/.polishrc polish /tmp/sbox/.polish/test/run.hsh
 ```
 
 There is a regression guard for this in the suite.
@@ -219,7 +219,7 @@ There is a regression guard for this in the suite.
 ## The prompt engine
 
 Covered in [the prompt guide](prompt.md#how-it-actually-works). The short
-version: hellish renders prompts in C and speaks both zsh percent escapes and
+version: polish renders prompts in C and speaks both zsh percent escapes and
 its own self-spacing badges, so a theme is one string rather than a function
 that runs per prompt. Computed data goes through variables filled by a precmd
 hook, because a prompt never expands `$( )`. Themes declare what they need and
@@ -230,12 +230,12 @@ the hook computes exactly that set.
 ## Testing
 
 ```sh
-hellish ~/.hellish/test/run.hsh        169 assertions
-hellish ~/.hellish/test/run.hsh -v     show every passing one
-hellish ~/.hellish/test/prompt.hsh     the theme engine alone
+polish ~/.polish/test/run.hsh          169 assertions
+polish ~/.polish/test/run.hsh -v       show every passing one
+polish ~/.polish/test/prompt.hsh       the theme engine alone
 ```
 
-The suite loads your **real** `~/.hellishrc` and asserts against the live
+The suite loads your **real** `~/.polishrc` and asserts against the live
 registry, so it tests what you actually run rather than a copy.
 
 Two categories are worth knowing about:
@@ -257,7 +257,7 @@ healthy install.
 ## Regenerating the docs
 
 ```sh
-hellish ~/.hellish/bin/hx-gendoc > docs/reference.md
+polish ~/.polish/bin/hx-gendoc > docs/reference.md
 ```
 
 The exhaustive tables are generated from the live registry; the prose is

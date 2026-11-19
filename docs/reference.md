@@ -13,7 +13,7 @@ help_conf -s <term>       search every name and description
 hxp info <plugin>         one plugin, in detail
 ```
 
-Generated 2026-09-15 from hellish 2.10.2, 208 items.
+Generated 2026-09-15 from polish 2.10.2, 208 items.
 
 ## Contents
 
@@ -48,7 +48,7 @@ The way in: a one-screen cheat sheet and the written guides.
 
 | variable | what it controls |
 |---|---|
-| `HX_DOCS` | where the written guides live (~/.hellish/docs) |
+| `HX_DOCS` | where the written guides live (~/.polish/docs) |
 
 
 ## Aliases
@@ -81,7 +81,7 @@ Short forms. An alias is expanded when a file is PARSED, so these are live insid
 | `grep` | `grep --color=auto` | grep with colour |
 | `gs` | `git status --short --branch` | git status, short with branch header |
 | `hxd` | `conf doctor` | configuration health check |
-| `hxe` | `conf edit` | edit hellish.conf in $EDITOR |
+| `hxe` | `conf edit` | edit polish.conf in $EDITOR |
 | `hxl` | `conf list` | list features and their state |
 | `hxr` | `conf reload` | reload the whole configuration |
 | `l1` | `ls -1 --color=auto` | one entry per line |
@@ -122,7 +122,7 @@ The general-purpose set: navigation, files, text, dev utilities, and the shims t
 | `genpass` | `genpass [length]` | random password from /dev/urandom |
 | `glob_into` | `glob_into <array> <pattern>...` | fill an array with only real glob matches (nullglob shim) |
 | `grepf` | `grepf <pattern> [dir]` | search file contents below here (uses ripgrep when installed) |
-| `hxcd` | | cd to the configuration directory (~/.hellish) |
+| `hxcd` | | cd to the configuration directory (~/.polish) |
 | `hxnew` | `hxnew <name>` | scaffold a new plugin (via the forge plugin) |
 | `is_set` | `is_set <VARNAME>` | true when a variable is set, even if empty (test -v shim) |
 | `killport` | `killport <port>` | kill whatever is listening on a TCP port |
@@ -164,7 +164,7 @@ PATH helpers and the variables this configuration sets for you.
 | `EDITOR` | preferred editor, auto-detected (nvim/vim/vi/nano) |
 | `HX_COLOR` | colour policy: auto \| always \| never |
 | `HX_HIST_SIZE` | history size kept in memory and on disk |
-| `HX_HOME` | root of this configuration (~/.hellish) |
+| `HX_HOME` | root of this configuration (~/.polish) |
 | `LESS` | less flags: -R colour, -F short-quit, -X no-clear, -i smart case |
 | `PAGER` | preferred pager |
 
@@ -182,7 +182,7 @@ What is remembered, what is deliberately forgotten, and how to search it.
 | variable | what it controls |
 |---|---|
 | `HISTCONTROL` | ignoredups:ignorespace:erasedups - leading space hides a command |
-| `HISTFILE` | where history is kept (~/.hellish_history) |
+| `HISTFILE` | where history is kept (~/.polish_history) |
 | `HISTIGNORE` | commands never recorded (ls, cd, exit, ...) |
 | `HISTSIZE` | commands kept in memory |
 | `HISTTIMEFORMAT` | timestamp shown by `history` |
@@ -194,7 +194,7 @@ Every `set -o` and `shopt` decision, with the reason. Several of these are delib
 
 | variable | what it controls |
 |---|---|
-| `COLUMNS` | NOT maintained by hellish (bash sets it); hx_cols forks tput and caches |
+| `COLUMNS` | NOT maintained by polish (bash sets it); hx_cols forks tput and caches |
 
 
 | option | state and reason |
@@ -213,7 +213,7 @@ Every `set -o` and `shopt` decision, with the reason. Several of these are delib
 
 ## Completion
 
-TAB completion. On hellish 2.10 these install for real; on an older binary they are recorded and install themselves the day you upgrade.
+TAB completion. On polish 2.10 these install for real; on an older binary they are recorded and install themselves the day you upgrade.
 
 | function | usage | what it does |
 |---|---|---|
@@ -235,8 +235,8 @@ The theme engine's own entry points. See [the prompt guide](prompt.md) for the t
 
 | variable | what it controls |
 |---|---|
-| `HELLISH_ANIM` | prompt animation: off, and deliberately so (upstream warns it can corrupt terminals) |
-| `HX_THEME_DIR` | where prompt themes live (~/.hellish/themes) |
+| `POLISH_ANIM` | prompt animation: off, and deliberately so (upstream warns it can corrupt terminals) |
+| `HX_THEME_DIR` | where prompt themes live (~/.polish/themes) |
 
 
 ## Framework internals
@@ -262,7 +262,7 @@ The registry, the capability probe and the hook system. You need these only when
 | `HX_PATH_STYLE` | how {path} is drawn: smart \| short \| fish \| tail \| full |
 | `HX_PS_ACCENT` | the palette colour themes lean on (prompt palette) |
 | `HX_THEME` | the prompt theme (prompt list to browse, prompt save to keep) |
-| `PROMPT_COMMAND` | the fallback prompt hook; inert when hellish has native HELLISH_PRECMD_FUNCS |
+| `PROMPT_COMMAND` | the fallback prompt hook; inert when polish has native POLISH_PRECMD_FUNCS |
 
 
 ## git plugin
@@ -453,7 +453,7 @@ conf on forge && conf reload
 
 | variable | what it controls |
 |---|---|
-| `HELLISH_AI_SUGGEST` | AI inline suggestions (inert until the 'ai' builtin ships) |
+| `POLISH_AI_SUGGEST` | AI inline suggestions (inert until the 'ai' builtin ships) |
 
 
 ---

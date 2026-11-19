@@ -38,7 +38,7 @@ do.
 `reference.md` is **generated** from the live registry:
 
 ```sh
-hellish ~/.hellish/bin/hx-gendoc > docs/reference.md
+polish ~/.polish/bin/hx-gendoc > docs/reference.md
 ```
 
 Every module declares what it provides with `hx_func_doc` and friends, and

@@ -2,12 +2,12 @@
 #
 # TAB-separated:  name  kind  source  default  description
 #   kind    builtin  ships in this repo under plugins/<name>/
-#           zsh      a real zsh plugin, sourced through hellish's zsh dialect
+#           zsh      a real zsh plugin, sourced through polish's zsh dialect
 #           sh       plain sh/bash, sourced directly
 #   source  "-" for builtin, else the URL of the single file to fetch
 #   default on|off — what "install all" enables
 #
-# Adding a plugin = adding a line here. Nothing else changes: hellish's
+# Adding a plugin = adding a line here. Nothing else changes: polish's
 # install.sh and `hxp install` both read this file.
 #
 # Descriptions are embedded in DOUBLE QUOTES by the wrapper generator: keep

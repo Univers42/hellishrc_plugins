@@ -1,17 +1,17 @@
 # hellishrc_plugins
 
-The configuration framework for [hellish](https://github.com/Univers42/hellish):
-a `~/.hellish/` tree with ordered config modules, a plugin system with a
+The configuration framework for [polish](https://github.com/Univers42/polish):
+a `~/.polish/` tree with ordered config modules, a plugin system with a
 catalog, a prompt theme engine with thirty themes, written guides, and a `conf`
 command that keeps everything toggleable and documented.
 
 ## Install
 
-The easy way — hellish's own installer offers it and asks which plugins you
+The easy way — polish's own installer offers it and asks which plugins you
 want:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Univers42/hellish/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Univers42/polish/main/install.sh | sh
 ```
 
 Standalone:
@@ -23,16 +23,28 @@ sh install.sh --plugins all      # everything the catalog defaults on
 sh install.sh --plugins "git jump omz-sudo"
 ```
 
-An existing `~/.hellishrc` is never eaten: it is preserved as
-`~/.hellish/rc.d/95-previous-rc.hsh` (still loads, after the framework) plus
+An existing `~/.polishrc` is never eaten: it is preserved as
+`~/.polish/rc.d/95-previous-rc.hsh` (still loads, after the framework) plus
 a timestamped backup beside the original. Two files are yours and an upgrade
 never overwrites them: `rc.d/99-local.hsh` and `themes/90-local.hsh`.
+
+**Installed before the rename?** The shell was called hellish before 3.4.0.
+An existing `~/.hellishrc`, `~/.hellish/` and `hellish.conf` are found and
+kept: re-running the installer upgrades them in place and creates no
+polish-named copy. Each name is picked the way the shell picks its rc: the
+polish name when it exists or the hellish one does not.
+
+Modules (`rc.d/`, `themes/`, a plugin's entry file) may be named `x.hsh`,
+`x.sh`, `x.zsh`, or a bare `x` whose first line is a shebang naming the
+shell (`#!/usr/bin/env polish`). Every shipped file carries that shebang, and
+the installer rewrites it to `hellish` on a machine that only has the old
+binary.
 
 ## Layout
 
 ```
-~/.hellishrc        the loader — deliberately tiny, everything real lives in:
-~/.hellish/
+~/.polishrc         the loader — deliberately tiny, everything real lives in:
+~/.polish/
   lib/              ui core plugin conf prompt                (the framework)
   rc.d/             10-env … 90-help 99-local                 (config modules, in order;
                                                                a .zsh module is read with zsh rules)
@@ -40,8 +52,8 @@ never overwrites them: `rc.d/99-local.hsh` and `themes/90-local.hsh`.
   plugins/          one directory per plugin + catalog.tsv
   bin/              hx-fetch-plugin  hx-clean  hx-gendoc
   docs/             the written guides + a generated reference (`guide`)
-  test/             run.hsh  prompt.hsh                       (hellish test/run.hsh)
-  hellish.conf      which features are on                     (managed by `conf`)
+  test/             run.hsh  prompt.hsh                       (polish test/run.hsh)
+  polish.conf       which features are on                     (managed by `conf`)
   state/            runtime data (jump db, marks, capabilities) — never committed
 ```
 
@@ -66,7 +78,7 @@ clean                reclaim regenerable space (dry run unless -y)
 
 ## The prompt
 
-A theme is one string in a token language, not a function: hellish renders
+A theme is one string in a token language, not a function: polish renders
 the prompt in C and understands both zsh's percent escapes and its own
 self-spacing badges, so most themes fork nothing and cannot be slow. Themes
 live in `themes/`, one file per family (`minimal`, `classic`, `frames`,
@@ -84,12 +96,12 @@ and `z`.
 
 Adding a plugin to the ecosystem = **one line in the catalog**. External
 `.zsh` files are fetched keeping their extension, which is what arms
-hellish's zsh dialect while they load — a real oh-my-zsh plugin parses as
+polish's zsh dialect while they load — a real oh-my-zsh plugin parses as
 zsh without any shim.
 
 ## Writing a plugin
 
-A plugin is `~/.hellish/plugins/<name>/plugin.hsh` whose first executable
+A plugin is `~/.polish/plugins/<name>/plugin.hsh` whose first executable
 line is:
 
 ```sh
@@ -108,35 +120,35 @@ troubleshooting) and `docs/reference.md`, which is **generated** from the live
 registry — never edit it by hand:
 
 ```sh
-hellish ~/.hellish/bin/hx-gendoc > docs/reference.md
+polish ~/.polish/bin/hx-gendoc > docs/reference.md
 ```
 
 ## Examples
 
-`examples/hellishrc` is a standalone, single-file `~/.hellishrc` — 30 prompt
+`examples/hellishrc` is a standalone, single-file `~/.polishrc` — 30 prompt
 themes, a context collector layer and an `hx` command suite, with no dependency
-on `~/.hellish/lib` or anything else here. It is the "one file, drop it in"
+on `~/.polish/lib` or anything else here. It is the "one file, drop it in"
 counterpart to the framework above.
 
 ```sh
-cp examples/hellishrc ~/.hellishrc && exec hellish
+cp examples/hellishrc ~/.polishrc && exec polish
 hx help
 ```
 
 See `examples/README.md` for what it collects, how it is configured, and the
-four hellish-vs-bash differences it works around.
+four polish-vs-bash differences it works around.
 
 ## Test
 
 ```sh
-hellish test/run.hsh        # loads the real config, asserts the registry
-hellish test/prompt.hsh     # the theme engine, against the running binary
-hellish test/examples_prompt.hsh   # examples/hellishrc; also runs under bash
+polish test/run.hsh         # loads the real config, asserts the registry
+polish test/prompt.hsh      # the theme engine, against the running binary
+polish test/examples_prompt.hsh    # examples/hellishrc; also runs under bash
 ```
 
 Both honour `HX_HOME`, so they can be pointed at a throwaway tree:
 
 ```sh
 sh install.sh --home /tmp/hx --plugins none
-HX_HOME=/tmp/hx/.hellish HOME=/tmp/hx hellish test/run.hsh
+HX_HOME=/tmp/hx/.polish HOME=/tmp/hx polish test/run.hsh
 ```

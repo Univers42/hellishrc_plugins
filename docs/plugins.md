@@ -43,7 +43,7 @@ conf reload
 ```
 
 A `.zsh` file is fetched **keeping its extension**, and that is load-bearing:
-hellish arms its zsh dialect when it sources a path ending in `.zsh` and
+polish arms its zsh dialect when it sources a path ending in `.zsh` and
 disarms it at the end of the file. A real oh-my-zsh plugin therefore parses as
 zsh without any shim, and without the wrapper mentioning dialects at all.
 
@@ -100,7 +100,7 @@ hx_alias_doc mt   "short for mytool_run"
 hx_var_doc   MYTOOL_HOME "where mytool keeps its state"
 ```
 
-`declare -F` can list function *names* on a recent hellish. It cannot say what
+`declare -F` can list function *names* on a recent polish. It cannot say what
 yours is for, who owns it, or how to call it — that exists only because you
 wrote it down.
 
@@ -122,7 +122,7 @@ hx_hook_add precmd  _mytool_precmd     # before every prompt
 hx_hook_add preexec _mytool_log        # before each typed line; "$1" is the line
 ```
 
-These compose. hellish 2.9+ has native hook arrays (`HELLISH_PRECMD_FUNCS`),
+These compose. polish 2.9+ has native hook arrays (`POLISH_PRECMD_FUNCS`),
 and `hx_hook_add` uses them when they exist and falls back to a
 `PROMPT_COMMAND` dispatch list when they do not — you write the same line
 either way. `hx_hook_del` unregisters, so a plugin can switch itself off
@@ -138,7 +138,7 @@ tell.
 hx_complete mytool run status help
 ```
 
-On a hellish with `complete` this installs immediately and reaches TAB. On an
+On a polish with `complete` this installs immediately and reaches TAB. On an
 older one it is recorded and installs itself the day you upgrade. Same line
 either way.
 
@@ -185,7 +185,7 @@ it, and is frozen for the session.
 
 `forge lint` knows all of these. It also knows which interpreter gaps are real
 on *your* binary — the rules about `local -n`, `printf %q` and `[ -v ]` were
-unconditional once, and by hellish 2.10 every one of them was wrong. A linter
+unconditional once, and by polish 2.10 every one of them was wrong. A linter
 that fails you for things that work is a linter you learn to ignore.
 
 ```sh
